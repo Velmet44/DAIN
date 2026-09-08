@@ -233,3 +233,33 @@ Format: what was done, decisions made, deviations from Docs/stages.md, gate resu
   same code path when weights are present; transformers pinned exactly; single-node
   = a stage covering all layers (one code path for S4/S5).
 - Next: **S5 — Distributed pipeline**.
+
+## 2026-09-09 — S5: Distributed pipeline ✅
+
+- `partition.py`: `build_placement` — K = clamp(ceil(L/target), 1, max_k, |pool|);
+  feasible = ONLINE + live WS connection + per-stage capacity share; ranked by score;
+  **stage sizes ∝ throughput proxy** (claimed TFLOPS, CPU cores as relative proxy)
+  via largest-remainder integer split with min 1 layer (spec §8.1 — the §12 formal
+  scheduler lands in S6 on top of this). Largest-remainder handles the min-1 clamp
+  overshoot explicitly.
+- Completions: multi-stage dispatch — one JOB_ASSIGN per stage (`my_stage_idx` per
+  node, prompt only on entry); BUSY marking for exclusive per-node execution
+  (MVP has no intra-node batching; deadlock-free because BUSY nodes are excluded
+  from new placements); `_release` returns nodes BUSY→ONLINE in a finally (both
+  streaming and non-streaming paths). Stage latencies exposed in `/v1/jobs/{id}`.
+- Node: per-node `node_lock` serializing generation/steps (defense in depth),
+  grad disabled globally (inference-only — fixes `numpy()` on requires_grad),
+  **early-activation buffer** for activations arriving before the stage runtime
+  registers (race: entry prefills immediately), ack-per-step via JOB_STATUS.
+- Checkpoint: `test_pipeline_parity.py` — 1-agent reference completion ≡ 4-agent
+  distributed completion (16 layers → 4 stages × 4 layers) ≡ in-process HF greedy
+  reference; job view shows 4 stages with layer ranges [0,4,8,12] and latencies.
+  Full Sim suite green 2× consecutively (plus early flakes diagnosed below).
+- Bring-up lessons: activations for not-yet-built stage runtimes must be BUFFERED,
+  never dropped (entry prefills immediately); a node is not dispatchable between
+  REST registration and WS attach — placement now requires live connections and
+  /admin/nodes exposes `connected`; heredoc-based python patches in Git Bash are
+  fragile (silent non-application) — verify patches by asserting the new content;
+  the machine has 4 cores — full-suite CPU contention produces timing flakes, so
+  tests wait on *state*, with generous bounds, never on sleep().
+- Next: **S6 — Scoring-driven scheduling**.

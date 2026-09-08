@@ -36,6 +36,7 @@ class CoordinatorSettings:
     job_timeout_s: float = 120.0
     queue_limit: int = 16
     max_completion_tokens: int = 512
+    layers_per_node_target: int = 4
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
 
     @property
@@ -58,5 +59,6 @@ class CoordinatorSettings:
             model_store_dir=env.get("DAIN_MODEL_STORE_DIR", "model_store"),
             job_timeout_s=float(env.get("DAIN_JOB_TIMEOUT_S", "120")),
             queue_limit=int(env.get("DAIN_QUEUE_LIMIT", "16")),
+            layers_per_node_target=int(env.get("DAIN_LAYERS_PER_NODE", "4")),
             log_json=env.get("DAIN_LOG_JSON", "").lower() in ("1", "true", "yes"),
         )

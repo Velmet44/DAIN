@@ -30,7 +30,6 @@ from dain_common.schemas import (
     NodeState,
     Register,
     RegisterAck,
-    StageAssignment,
     TokenBatch,
 )
 from fastapi import (
@@ -47,6 +46,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dain_coordinator.jobs import ActivationRelay, JobTracker
 from dain_coordinator.nodes import MessageOutcome, NodeService
+from dain_coordinator.partition import build_placement
 from dain_coordinator.store import NodeRow
 
 log = logging.getLogger("dain.coordinator.api")
@@ -105,6 +105,7 @@ class StateChangeView(BaseModel):
 class NodeView(BaseModel):
     node_id: str
     state: str
+    connected: bool = False
     score: float | None
     score_components: dict[str, float]
     agent_version: str
@@ -121,10 +122,11 @@ class NodeDetail(NodeView):
     history: list[StateChangeView]
 
 
-def _view(row: NodeRow) -> NodeView:
+def _view(row: NodeRow, *, connected: bool = False) -> NodeView:
     return NodeView(
         node_id=row.node_id,
         state=row.state.value,
+        connected=connected,
         score=row.score,
         score_components=row.score_components,
         agent_version=row.agent_version,
@@ -229,13 +231,16 @@ async def node_ws(websocket: WebSocket) -> None:
 @admin_router.get("/nodes", response_model=list[NodeView])
 def list_nodes(request: Request, state: str | None = None) -> list[NodeView]:
     service = _service(request)
+    connections = request.app.state.connections
     if state is not None:
         try:
             state_filter = NodeState(state)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"unknown state {state!r}") from exc
-        return [_view(row) for row in service.registry.list_nodes(state_filter)]
-    return [_view(row) for row in service.registry.list_nodes()]
+        rows = service.registry.list_nodes(state_filter)
+        return [_view(row, connected=connections.is_connected(row.node_id)) for row in rows]
+    rows = service.registry.list_nodes()
+    return [_view(row, connected=connections.is_connected(row.node_id)) for row in rows]
 
 
 @admin_router.get("/nodes/{node_id}", response_model=NodeDetail)
@@ -253,7 +258,8 @@ def node_detail(node_id: str, request: Request) -> NodeDetail:
         )
         for c in service.registry.history(node_id)
     ]
-    return NodeDetail(**_view(row).model_dump(), history=history)
+    connected = request.app.state.connections.is_connected(row.node_id)
+    return NodeDetail(**_view(row, connected=connected).model_dump(), history=history)
 
 
 # -- client API (S4): SSE streaming completions ----------------------------------
@@ -263,13 +269,11 @@ def _sse(frame: dict) -> str:
     return f"data: {json.dumps(frame, separators=(',', ':'))}\n\n"
 
 
-def _pick_node(request: Request, manifest: ModelManifest) -> NodeRow | None:
-    """S4 minimal router: best-scoring ONLINE node. Full scheduling is S6."""
+def _release(request: Request, node_ids: list[str]) -> None:
+    """Return stage nodes from BUSY to ONLINE after a job reaches a terminal state."""
     service = _service(request)
-    rows = service.registry.list_nodes(NodeState.ONLINE)
-    if not rows:
-        return None
-    return max(rows, key=lambda r: r.score if r.score is not None else -1.0)
+    for node_id in node_ids:
+        service.release_node(node_id)
 
 
 @v1_router.get("/models")
@@ -296,13 +300,30 @@ async def completions(payload: CompletionRequest, request: Request):
     active = sum(
         1 for j in jobs.jobs.values() if j.state not in (JobState.COMPLETED, JobState.FAILED)
     )
-    node = _pick_node(request, manifest)
-    if node is None or active >= settings.queue_limit:
+    service = _service(request)
+    rows = [
+        r
+        for r in service.registry.list_nodes(NodeState.ONLINE)
+        if request.app.state.connections.is_connected(r.node_id)
+    ]
+    stages = build_placement(manifest, rows, layers_per_node_target=settings.layers_per_node_target)
+    if stages is None:
         raise HTTPException(
             status_code=429,
-            detail="no capacity available; retry later",
+            detail="no connected node pool can host this model; retry later",
             headers={"Retry-After": "5"},
         )
+    if active >= settings.queue_limit:
+        raise HTTPException(
+            status_code=429,
+            detail="server busy: queue limit reached; retry later",
+            headers={"Retry-After": "5"},
+        )
+    # Exclusive execution per stage node (MVP has no intra-node batching): a node
+    # marked BUSY is excluded from new placements until the job finishes.
+    busy_nodes = [s.node_id for s in stages]
+    for node_id in busy_nodes:
+        service.mark_busy(node_id)
 
     record = jobs.create(
         payload.model_id,
@@ -314,53 +335,55 @@ async def completions(payload: CompletionRequest, request: Request):
         },
         manifest,
     )
-    stages = (
-        StageAssignment(
-            stage_idx=0,
-            node_id=node.node_id,
-            shard_id="all",
-            layer_start=0,
-            layer_end=manifest.layers - 1,
-        ),
+    params = GenerationParams(
+        max_tokens=payload.max_tokens,
+        temperature=payload.temperature,
+        top_p=1.0,
+        seed=payload.seed,
     )
-    assign = JobAssign(
-        job_id=record.job_id,
-        model_id=payload.model_id,
-        my_stage_idx=0,
-        stages=stages,
-        prompt=payload.prompt,
-        params=GenerationParams(
-            max_tokens=payload.max_tokens,
-            temperature=payload.temperature,
-            top_p=1.0,
-            seed=payload.seed,
-        ),
-    )
-    sent = await connections.send_envelope(
-        node.node_id, Envelope.wrap(MessageType.JOB_ASSIGN, assign, ts=time.time())
-    )
-    if not sent:
-        jobs.fail_job(record.job_id, "node connection lost before dispatch")
-        raise HTTPException(status_code=503, detail="node connection lost")
-    jobs.mark_dispatched(record.job_id, node.node_id, stages)
+    dispatched = True
+    for stage in stages:
+        assign = JobAssign(
+            job_id=record.job_id,
+            model_id=payload.model_id,
+            my_stage_idx=stage.stage_idx,
+            stages=stages,
+            prompt=payload.prompt if stage.stage_idx == 0 else None,
+            params=params,
+        )
+        sent = await connections.send_envelope(
+            stage.node_id, Envelope.wrap(MessageType.JOB_ASSIGN, assign, ts=time.time())
+        )
+        if not sent:
+            dispatched = False
+            break
+    if not dispatched:
+        for node_id in busy_nodes:
+            service.release_node(node_id)
+        jobs.fail_job(record.job_id, "stage node connection lost before dispatch")
+        raise HTTPException(status_code=503, detail="stage node connection lost")
+    jobs.mark_dispatched(record.job_id, stages[0].node_id, stages)
     queue = jobs.attach(record.job_id)
 
     async def event_stream():
-        yield _sse({"job_id": record.job_id, "status": "dispatched"})
-        deadline = asyncio.get_event_loop().time() + settings.job_timeout_s
-        while True:
-            try:
-                frame = await asyncio.wait_for(
-                    queue.get(), timeout=max(0.1, deadline - asyncio.get_event_loop().time())
-                )
-            except TimeoutError:
-                jobs.fail_job(record.job_id, "job timeout")
-                yield _sse({"type": "error", "job_id": record.job_id, "detail": "job timeout"})
-                break
-            yield _sse(frame)
-            if frame["type"] in ("final", "error"):
-                break
-        yield "data: [DONE]\n\n"
+        try:
+            yield _sse({"job_id": record.job_id, "status": "dispatched"})
+            deadline = asyncio.get_event_loop().time() + settings.job_timeout_s
+            while True:
+                try:
+                    frame = await asyncio.wait_for(
+                        queue.get(), timeout=max(0.1, deadline - asyncio.get_event_loop().time())
+                    )
+                except TimeoutError:
+                    jobs.fail_job(record.job_id, "job timeout")
+                    yield _sse({"type": "error", "job_id": record.job_id, "detail": "job timeout"})
+                    break
+                yield _sse(frame)
+                if frame["type"] in ("final", "error"):
+                    break
+            yield "data: [DONE]\n\n"
+        finally:
+            _release(request, busy_nodes)
 
     if payload.stream:
         return StreamingResponse(
@@ -372,21 +395,24 @@ async def completions(payload: CompletionRequest, request: Request):
     text_parts: list[str] = []
     final: dict = {}
     deadline = asyncio.get_event_loop().time() + settings.job_timeout_s
-    while True:
-        try:
-            frame = await asyncio.wait_for(
-                queue.get(), timeout=max(0.1, deadline - asyncio.get_event_loop().time())
-            )
-        except TimeoutError:
-            jobs.fail_job(record.job_id, "job timeout")
-            raise HTTPException(status_code=504, detail="job timeout") from None
-        if frame["type"] == "token":
-            text_parts.append(frame["token"])
-        elif frame["type"] == "final":
-            final = frame
-            break
-        elif frame["type"] == "error":
-            raise HTTPException(status_code=502, detail=frame["detail"])
+    try:
+        while True:
+            try:
+                frame = await asyncio.wait_for(
+                    queue.get(), timeout=max(0.1, deadline - asyncio.get_event_loop().time())
+                )
+            except TimeoutError:
+                jobs.fail_job(record.job_id, "job timeout")
+                raise HTTPException(status_code=504, detail="job timeout") from None
+            if frame["type"] == "token":
+                text_parts.append(frame["token"])
+            elif frame["type"] == "final":
+                final = frame
+                break
+            elif frame["type"] == "error":
+                raise HTTPException(status_code=502, detail=frame["detail"])
+    finally:
+        _release(request, busy_nodes)
     return {
         "job_id": record.job_id,
         "text": "".join(text_parts),

@@ -279,6 +279,16 @@ class NodeService:
         """Scheduler-facing (S6): BUSY → ONLINE when a job finishes."""
         return self.transition(node_id, NodeState.ONLINE, "job_finished")
 
+    def release_node(self, node_id: str) -> None:
+        """Scheduler-facing (S5): best-effort release after a terminal job.
+
+        No-op when the node is not BUSY (it may have degraded or gone offline
+        during the job — those states must not be papered over here).
+        """
+        row = self.registry.get_node(node_id)
+        if row is not None and row.state == NodeState.BUSY:
+            self.mark_online(node_id)
+
     def enforce_timeouts(self, now: float) -> list[str]:
         """Monitor hook: any non-OFFLINE node silent for offline_timeout_s → OFFLINE."""
         evicted: list[str] = []

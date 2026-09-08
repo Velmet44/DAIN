@@ -71,6 +71,7 @@ class JobHandler:
     """Agent-side job execution. Transport is injected (the agent owns the WS)."""
 
     def __init__(self, settings: NodeSettings, store: ModelStoreClient) -> None:
+        torch.set_grad_enabled(False)  # inference-only agent
         self.settings = settings
         self.store = store
         self.send_envelope = None  # bound by the agent
@@ -79,6 +80,10 @@ class JobHandler:
         self.jobs: dict[str, JobRuntime] = {}
         self._pending_header: ActivationRelayHeader | None = None
         self._send_lock = asyncio.Lock()
+        self.node_lock = asyncio.Lock()
+        # Activations arriving before the stage runtime is built (entry may prefill
+        # immediately) are buffered here and drained in on_job_assign.
+        self._early: dict[str, list[tuple[ActivationRelayHeader, bytes]]] = {}
 
     # -- wiring ------------------------------------------------------------------
 
@@ -212,6 +217,8 @@ class JobHandler:
             started_at=time.time(),
         )
         self.jobs[job.job_id] = rt
+        for header, payload in self._early.pop(job.job_id, []):
+            await rt.inbound.put((header, payload))
         if job.my_stage_idx == 0:
             rt.task = asyncio.create_task(self._run_entry(rt), name=f"entry-{job.job_id}")
         else:
@@ -236,7 +243,10 @@ class JobHandler:
             return
         rt = self.jobs.get(header.job_id)
         if rt is None:
-            log.warning("activation_for_unknown_job job=%s", header.job_id)
+            if header.role == "hidden":
+                self._early.setdefault(header.job_id, []).append((header, payload))
+            else:
+                log.warning("activation_for_unknown_job job=%s", header.job_id)
             return
         if rt.first and header.role == "sampled_token":
             await rt.inbound.put((header, payload))
@@ -262,18 +272,19 @@ class JobHandler:
         job = rt.job
         try:
             stage = await self._build_stage(rt)
-            await self._status(rt, JobState.RUNNING, detail="entry_ready")
-            ids = stage.tokenizer.encode(job.prompt or "")
-            generator = (
-                torch.Generator().manual_seed(job.params.seed)
-                if job.params.seed is not None
-                else None
-            )
-            if rt.first and rt.last:
-                await self._run_single_stage(rt, stage, ids, generator)
-            else:
-                await self._run_distributed_entry(rt, stage, ids, generator)
-            await self._status(rt, JobState.COMPLETED, detail=f"generated={rt.generated}")
+            async with self.node_lock:  # exclusive: one generation per node
+                await self._status(rt, JobState.RUNNING, detail="entry_ready")
+                ids = stage.tokenizer.encode(job.prompt or "")
+                generator = (
+                    torch.Generator().manual_seed(job.params.seed)
+                    if job.params.seed is not None
+                    else None
+                )
+                if rt.first and rt.last:
+                    await self._run_single_stage(rt, stage, ids, generator)
+                else:
+                    await self._run_distributed_entry(rt, stage, ids, generator)
+                await self._status(rt, JobState.COMPLETED, detail=f"generated={rt.generated}")
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — every failure must reach the client
@@ -348,49 +359,55 @@ class JobHandler:
     ) -> None:
         """Non-entry stage step: forward → relay onward, or sample → stream."""
         try:
-            stage = rt.stage or await self._build_stage(rt)
-            hidden = torch.frombuffer(bytearray(payload), dtype=torch.float32).reshape(
-                tuple(header.shape)
-            )
-            out = stage.forward_hidden(hidden)
-            if rt.last:
-                logits = stage.logits_from(out)[:, -1, :]
-                generator = (
-                    torch.Generator().manual_seed((rt.job.params.seed or 0) + rt.generated)
-                    if rt.job.params.seed is not None
-                    else None
+            async with self.node_lock:
+                stage = rt.stage or await self._build_stage(rt)
+                hidden = torch.frombuffer(bytearray(payload), dtype=torch.float32).reshape(
+                    tuple(header.shape)
                 )
-                token_id = sample_token(logits.unsqueeze(1), rt.job.params.temperature, generator)
-                is_eos = token_id == stage.manifest.eos_token_id
-                rt.generated += 1
-                finished = is_eos or rt.generated >= rt.job.params.max_tokens
-                finish_reason = "eos" if is_eos else "length" if finished else None
-                if not is_eos:
-                    chars = rt.streamer.feed(token_id)
-                    if chars:
-                        await self._send_tokens(rt, [chars], is_final=False, finish_reason=None)
-                await self._send_tokens(
-                    rt, [], is_final=finished, finish_reason=finish_reason if finished else None
-                )
-                await self._send_activation(
-                    rt,
-                    role="sampled_token",
-                    tensor_bytes=_INT64.pack(token_id),
-                    shape=(1,),
-                    dtype="int64",
-                    is_final=finished,
-                )
-                if finished:
-                    await self._status(rt, JobState.COMPLETED, detail=f"generated={rt.generated}")
-            else:
-                await self._send_activation(
-                    rt,
-                    role="hidden",
-                    tensor_bytes=out.contiguous().numpy().tobytes(),
-                    shape=tuple(out.shape),
-                    dtype="fp32",
-                    is_final=header.is_final,
-                )
+                out = stage.forward_hidden(hidden)
+                if rt.last:
+                    logits = stage.logits_from(out)[:, -1, :]
+                    generator = (
+                        torch.Generator().manual_seed((rt.job.params.seed or 0) + rt.generated)
+                        if rt.job.params.seed is not None
+                        else None
+                    )
+                    token_id = sample_token(logits, rt.job.params.temperature, generator)
+                    is_eos = token_id == stage.manifest.eos_token_id
+                    rt.generated += 1
+                    finished = is_eos or rt.generated >= rt.job.params.max_tokens
+                    finish_reason = "eos" if is_eos else "length" if finished else None
+                    if not is_eos:
+                        chars = rt.streamer.feed(token_id)
+                        if chars:
+                            await self._send_tokens(rt, [chars], is_final=False, finish_reason=None)
+                    await self._send_tokens(
+                        rt,
+                        [],
+                        is_final=finished,
+                        finish_reason=finish_reason if finished else None,
+                    )
+                    await self._send_activation(
+                        rt,
+                        role="sampled_token",
+                        tensor_bytes=_INT64.pack(token_id),
+                        shape=(1,),
+                        dtype="int64",
+                        is_final=finished,
+                    )
+                    if finished:
+                        await self._status(
+                            rt, JobState.COMPLETED, detail=f"generated={rt.generated}"
+                        )
+                else:
+                    await self._send_activation(
+                        rt,
+                        role="hidden",
+                        tensor_bytes=out.contiguous().numpy().tobytes(),
+                        shape=tuple(out.shape),
+                        dtype="fp32",
+                        is_final=header.is_final,
+                    )
         except Exception:  # noqa: BLE001
             log.exception("step_failed job=%s stage=%d", rt.job.job_id, rt.job.my_stage_idx)
             if rt.last:

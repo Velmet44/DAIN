@@ -103,8 +103,8 @@ class JobTracker:
             return
         if state == JobState.RUNNING and job.state in (JobState.DISPATCHED, JobState.QUEUED):
             self._transition(job, JobState.RUNNING)
-        if state in (JobState.RUNNING,) and stage_idx in job.stage_started_at:
-            job.stage_finished_at.setdefault(stage_idx, time.time())
+        if state == JobState.RUNNING and stage_idx in job.stage_started_at:
+            job.stage_finished_at[stage_idx] = time.time()  # last activity per stage
         if state == JobState.COMPLETED and job.state not in (
             JobState.COMPLETED,
             JobState.FAILED,
@@ -199,6 +199,16 @@ class JobTracker:
                     "node_id": s.node_id,
                     "layer_start": s.layer_start,
                     "layer_end": s.layer_end,
+                    "latency_ms": (
+                        round(
+                            (job.stage_finished_at[s.stage_idx] - job.stage_started_at[s.stage_idx])
+                            * 1000,
+                            2,
+                        )
+                        if s.stage_idx in job.stage_finished_at
+                        and s.stage_idx in job.stage_started_at
+                        else None
+                    ),
                 }
                 for s in job.stages
             ],

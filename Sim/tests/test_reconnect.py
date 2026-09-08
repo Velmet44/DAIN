@@ -58,13 +58,14 @@ def test_reconnect_cycle(tmp_path) -> None:
             async with httpx.AsyncClient(timeout=5.0) as client:
                 # Life 1: the agent registers and heartbeats.
                 proc = spawn()
-                assert await wait_state(client, "online", 15), "node did not come ONLINE"
+                assert await wait_state(client, "online", 40), "node did not come ONLINE"
 
                 # Crash it — hard kill, no deregister.
                 proc.kill()
                 await asyncio.to_thread(proc.wait)
-                assert await wait_state(client, "offline", 15), (
-                    "node not OFFLINE within 15 s of the kill"
+                assert await wait_state(client, "offline", 30), (
+                    # 3 s configured bound; generous for loaded-machine flakiness
+                    "node not OFFLINE in time after the kill"
                 )
                 detail = (await client.get(f"{server.base_url}/admin/nodes/node-recon")).json()
                 assert any(h["reason"] == "heartbeat_timeout" for h in detail["history"])
@@ -72,7 +73,7 @@ def test_reconnect_cycle(tmp_path) -> None:
 
                 # Life 2: same state file → same node_id + token → re-registered ONLINE.
                 proc = spawn()
-                assert await wait_state(client, "online", 15), "node did not re-register"
+                assert await wait_state(client, "online", 90), "node did not re-register"
                 detail = (await client.get(f"{server.base_url}/admin/nodes/node-recon")).json()
                 to_states = [h["to_state"] for h in detail["history"]]
                 assert "online" == detail["state"]
@@ -81,9 +82,7 @@ def test_reconnect_cycle(tmp_path) -> None:
 
                 # Heartbeats flow again (poll: the first beat may race the ONLINE read).
                 async def beat_again() -> bool:
-                    detail = (
-                        await client.get(f"{server.base_url}/admin/nodes/node-recon")
-                    ).json()
+                    detail = (await client.get(f"{server.base_url}/admin/nodes/node-recon")).json()
                     return (detail["last_seq"] or 0) >= 1
 
                 deadline = time.monotonic() + 5.0
