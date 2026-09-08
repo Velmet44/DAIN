@@ -101,3 +101,48 @@ Format: what was done, decisions made, deviations from Docs/stages.md, gate resu
 - Gates re-run in all four projects: Common **43 passed**, Coordinator **1 passed**,
   Node **1 passed**, Sim **1 passed**; ruff clean everywhere.
 - Next: **S2 — Coordinator core**.
+
+## 2026-09-08 — S2: Coordinator core ✅
+
+- `dain_common` (S1 pkg): `RegisterAck` gained `node_token` — the per-node credential
+  issued at first registration and used for WS auth (spec §11 amended to match).
+- `settings.py`: `CoordinatorSettings` (env-driven; heartbeat 5 s × 3 missed = 15 s
+  offline; join token; min_score 0.05; overload/thermal thresholds; `uptime_alpha`).
+- `store.py`: `SQLiteRegistry` — single connection + lock, WAL, portable SQL schema
+  (`nodes` + `state_history`); JSON columns for manifest/metrics/score components;
+  only the WAL pragma is SQLite-specific. NodeRow ↔ row mapping is the serialization
+  boundary.
+- `nodes.py`: `NodeService` — registration (join token → per-node token via
+  `secrets.token_hex`, comparison via `secrets.compare_digest`), heartbeat handling
+  (server-clock timestamps, seq-gap warnings, uptime EWMA), score recomputation on
+  every report, and the **spec §6 state machine enforced by an explicit transition
+  table** (`ALLOWED_TRANSITIONS`, incl. from-None registration edge). DEGRADED on:
+  score < min_score / thermal > 90 °C / 3 consecutive overload strikes (>97 % util);
+  automatic recovery on a clean report; OFFLINE on heartbeat timeout; re-registration
+  and WS reconnect paths both restore ONLINE with history preserved. `mark_busy` /
+  `mark_online` exposed for the S6 scheduler. WS message dispatch (malformed → 4400,
+  identity mismatch → 4400, unauthenticated → 4401); later-stage message families are
+  logged and deferred (JOB_STATUS S4+, SHARD_MANIFEST S5, LEDGER_EVENT S8).
+- `monitor.py`: `HeartbeatMonitor` background task (tick 0.5 s, exception-proof);
+  `api.py`: REST `POST /node/register`, `POST /node/deregister`, WS `/node/ws`,
+  admin `GET /admin/nodes[?state=]` and `GET /admin/nodes/{id}` with full history.
+  `logging_setup.py`: JSON formatter with node_id/job_id correlation (text default).
+- Tests (Coordinator, compressed timings ≈ 50×): 20 passed — registration/auth
+  lifecycle incl. the gate sequence register→ONLINE→silence→OFFLINE→re-register→ONLINE,
+  thermal/overload degrade + recovery, deregister auth (403/404), state-machine unit
+  tests against the spec table, restart persistence (records + tokens + history +
+  monitor working across processes), wire-validity of the REST body.
+- Sim: `tests/helpers.py` (in-process uvicorn cluster + fake WS nodes) and the
+  **20-node × 60 s real-socket stability checkpoint — passed (64.9 s)**: 20/20 ONLINE,
+  exactly one history entry per node (zero spurious flips), heartbeat counts healthy.
+  Sim dev deps += dain-coordinator (editable path), httpx, websockets.
+- Bring-up lessons: starlette WS close codes surface on `WebSocketDisconnect.code`
+  (assert the attribute, not str()); close-before-accept raises at connect, close
+  after accept must be *received* to be observed; dataclasses use `dataclasses.replace`
+  (no `model_copy`); a helper named `test_settings` gets collected by pytest — renamed
+  to `make_settings`.
+- Decisions: sync sqlite3 + lock accepted at MVP scale (≤ 100 nodes, sub-ms ops) with
+  async/Postgres deferred to the HA path; admin endpoints unauthenticated until S9
+  hardening; DEGRADED evaluation is immediate for score/thermal, strike-counted (3)
+  for overload.
+- Next: **S3 — Node agent skeleton + local cluster sim** per `Docs/stages.md`.

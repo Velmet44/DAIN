@@ -328,7 +328,9 @@ node ─► coordinator: REGISTER {
   auth_token / mTLS cert
 }
 coordinator ─► node: REGISTER_ACK {
-  heartbeat_interval, scoring_snapshot_refs,
+  heartbeat_interval, node_token (per-node credential for WS auth; issued once,
+                      persisted across re-registrations),
+  scoring_snapshot_refs,
   assigned_shards[] (may be empty → standby), model_store_url
 }
 ```

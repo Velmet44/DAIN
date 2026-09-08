@@ -1,15 +1,14 @@
 """Entry point: ``python -m dain_coordinator`` starts the coordinator API."""
 
-import os
-
 import uvicorn
 
 from dain_coordinator.app import create_app
+from dain_coordinator.settings import CoordinatorSettings
 
 
 def main() -> None:
-    port = int(os.environ.get("DAIN_PORT", "8000"))
-    uvicorn.run(create_app(), host="0.0.0.0", port=port)
+    settings = CoordinatorSettings.from_env()
+    uvicorn.run(create_app(settings), host=settings.host, port=settings.port)
 
 
 if __name__ == "__main__":

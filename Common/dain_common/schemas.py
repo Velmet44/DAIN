@@ -174,6 +174,9 @@ class Register(_Model):
 class RegisterAck(_Model):
     accepted: bool
     heartbeat_interval_s: float = Field(default=5.0, gt=0)
+    # Issued at first registration; the node persists it and authenticates WS
+    # connections with it (spec §11).
+    node_token: str | None = Field(default=None, max_length=512)
     assigned_shards: tuple[ShardRef, ...] = ()
     model_store_url: str | None = None
     reason: str | None = None
