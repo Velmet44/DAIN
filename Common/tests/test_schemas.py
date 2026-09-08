@@ -1,6 +1,8 @@
 """S1 checkpoint: protocol envelope + payload schemas (spec §10–§11)."""
 
 import pytest
+from pydantic import ValidationError
+
 from dain_common import (
     PAYLOAD_TYPES,
     PROTOCOL_VERSION,
@@ -21,7 +23,6 @@ from dain_common import (
     TaskOutcome,
     parse_payload,
 )
-from pydantic import ValidationError
 
 # -- helpers -----------------------------------------------------------------
 

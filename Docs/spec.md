@@ -542,7 +542,7 @@ Locked for the first implementation; changing a choice requires a written ration
 | Node agent | Python 3.11+, asyncio, PyTorch + transformers, psutil | GPU math runs in CUDA — Python only orchestrates and serializes; one language shares protocol code with the coordinator |
 | Shared code | `dain-common` package: pydantic message schemas (§10), FLOP tables, scoring config | Single source of truth imported by coordinator, node, sim, and tests |
 | Dev simulation | Multi-process local cluster: coordinator + N node agents, TinyLlama-1.1B on CPU, deterministic FakeExecutor for CI | Full pipeline testable without any GPU |
-| Tooling | uv workspaces, ruff, pytest, mypy (non-gating) | Fast, deterministic, agent-friendly loop |
+| Tooling | uv — one venv + lockfile **per project** (Common/Coordinator/Node/Sim; `dain-common` consumed via editable path dependency), ruff, pytest, mypy (non-gating) | Fast, deterministic, agent-friendly loop; every component standalone-syncable and deployable |
 
 Deliberately **not** chosen: Rust/Go/C++ for coordinator or node — they pay off only in the
 activation-relay hot path and deployment footprint, not in MVP iteration speed; the

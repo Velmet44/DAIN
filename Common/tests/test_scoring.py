@@ -6,6 +6,8 @@ amendment plus a re-pin of these numbers.
 """
 
 import pytest
+from pydantic import ValidationError
+
 from dain_common import (
     CapabilityManifest,
     CPUInfo,
@@ -22,7 +24,6 @@ from dain_common import (
     norm_inv,
     score_node,
 )
-from pydantic import ValidationError
 
 
 def gpu(**overrides) -> GPUInfo:

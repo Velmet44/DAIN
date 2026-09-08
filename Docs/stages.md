@@ -29,33 +29,46 @@ disagree, the spec wins and this file must be amended explicitly.
 ## 2. Global definition of done (applies to every stage)
 
 - [ ] All stage checkpoints pass (commands + expected output below)
-- [ ] `uv run pytest -q` green and `uv run ruff check .` clean
+- [ ] In every modified Python project: `cd <project> && uv run pytest -q` green and
+      `uv run ruff check .` clean
 - [ ] New protocol/parsing/accounting code has full test coverage; other code proportionate
 - [ ] README/docstrings updated where behavior changed
 - [ ] STATUS table (§5) ticked and committed
 
 ## 3. Repository architecture
 
-The existing skeleton (`Client/`, `Coordinator/`, `Node/`, `Docs/`, `Builds/`) is adopted
-and extended — directories are **not** renamed.
+The repo root holds **no buildable code** — only shared docs/config and the project
+directories. Each Python project is standalone: own `pyproject.toml`, `uv.lock`,
+`.venv` (local, gitignored), `.python-version` (3.12), ruff + pytest config, `tests/`.
 
 ```
-DAIN/
-├── Docs/              spec.md · stages.md · pilot reports
-├── Common/            dain_common/    shared: pydantic schemas, scoring, FLOP tables (no I/O)
-├── Coordinator/       dain_coordinator/  FastAPI app:
-│                                         api/ (client REST+SSE, node WS, admin)
-│                                         registry/ · scheduler/ · monitor/ · relay/ · ledger/
-├── Node/              dain_node/      agent: ws client, heartbeat, executors/{fake,hf},
-│                                      shard_store, capability probe (psutil/torch)
-├── Client/            React 18 + Vite + TypeScript SPA (chat UI + node dashboard)
-├── Sim/               cluster.py (spawn coordinator + N nodes), chaos.py, benchmarks
-├── Tests/             unit/ · integration/  (pytest; imports dain_common / app factories)
-├── Deploy/            systemd units, env templates, Netlify/VPS/Render notes
-├── Builds/            build artifacts only (gitignored)
-├── pyproject.toml     uv workspace: Common, Coordinator, Node, Sim
-└── README.md
+DAIN/                        repo root: docs + config only
+├── README.md · .gitignore · .gitattributes
+├── Docs/                    spec.md · stages.md · log.md · pilot reports
+├── Deploy/                  .env.example, systemd units, hosting notes (VPS/Render/Netlify)
+├── Builds/                  artifacts only (gitignored)
+├── Client/                  React 18 + Vite + TypeScript SPA (own toolchain, arrives S9)
+├── Common/                  dain-common: schemas, scoring, accounting (no I/O)
+│   ├── dain_common/ · tests/ · pyproject.toml · .python-version · .venv/ (local)
+├── Coordinator/             dain-coordinator: FastAPI control plane
+│   ├── dain_coordinator/    api/ registry/ scheduler/ monitor/ relay/ ledger/ (added per stage)
+│   ├── tests/ · pyproject.toml · .venv/ (local)
+├── Node/                    dain-node: compute-node agent
+│   ├── dain_node/           ws client, heartbeat, executors/{fake,hf}, shard_store (per stage)
+│   ├── tests/ · pyproject.toml · .venv/ (local)
+└── Sim/                     dain-sim: cluster launcher, chaos harness, benchmarks
+    ├── dain_sim/ · tests/ (cross-component integration tests) · .venv/ (local)
 ```
+
+Conventions:
+
+- `dain-common` is consumed via an **editable path dependency**
+  (`dain-common = { path = "../Common", editable = true }`) in Coordinator/Node/Sim —
+  one protocol source of truth, per-project lockfiles.
+- **Run gates inside the project directory** (`cd <project> && uv run …`); nothing at
+  the root is buildable.
+- Unit tests live in the owning project's `tests/`; cross-component integration tests
+  (cluster, chaos, ledger reconciliation) live in `Sim/tests/`.
 
 Runtime model (dev = everything on one machine):
 
@@ -103,8 +116,10 @@ Runtime model (dev = everything on one machine):
 **Preconditions:** repo exists (git initialized), `Docs/` populated, Python 3.11+ installed.
 
 Tasks:
-1. `pyproject.toml` as a **uv workspace** with members `Common`, `Coordinator`, `Node`,
-   `Sim`; packages `dain-common`, `dain-coordinator`, `dain-node`, `dain-sim`.
+1. Each of `Common`, `Coordinator`, `Node`, `Sim` is a **standalone uv project** (own
+   `pyproject.toml`, `uv.lock`, `.venv`, `.python-version` = 3.12, ruff/pytest config);
+   `Coordinator`/`Node`/`Sim` depend on `dain-common` via editable path dependency
+   (`{ path = "../Common", editable = true }`).
 2. Tooling: ruff (lint+format), pytest config, `.gitignore` (`Builds/`, `__pycache__`,
    `.env`, model caches), `.env.example` in `Deploy/`.
 3. Skeleton packages with `python -m dain_coordinator --version` style entry points;
@@ -114,10 +129,12 @@ Tasks:
 
 Checkpoints:
 ```bash
-uv sync                          # resolves workspace, no errors
-uv run pytest -q                 # 1 smoke test green
-uv run ruff check .              # clean
-uv run python -m dain_coordinator &  curl -s localhost:8000/healthz   # {"status":"ok"}
+cd Common      && uv sync && uv run pytest -q && uv run ruff check .
+cd Coordinator && uv sync && uv run pytest -q && uv run ruff check .
+cd Node        && uv sync && uv run pytest -q && uv run ruff check .
+cd Sim         && uv sync && uv run pytest -q && uv run ruff check .
+# coordinator smoke (inside Coordinator/): uv run python -m dain_coordinator, then:
+curl -s localhost:8000/healthz   # {"status":"ok"}
 ```
 
 Do NOT: implement any DAIN logic, add websockets/pydantic models beyond the health app, or
@@ -144,10 +161,11 @@ Tasks:
 
 Checkpoints:
 ```bash
-uv run pytest Tests/unit/test_schemas.py -q      # envelope round-trips, versioning, malformed rejects
-uv run pytest Tests/unit/test_scoring.py -q      # golden tests: synthetic 20-node pool → expected
-                                                 # ranking & scores (seeded, from spec §7 weights)
-uv run pytest Tests/unit/test_accounting.py -q   # FLOP table golden values for Qwen2.5-7B (2·7.6e9·tok)
+cd Common
+uv run pytest tests/test_schemas.py -q      # envelope round-trips, versioning, malformed rejects
+uv run pytest tests/test_scoring.py -q      # golden tests: synthetic pool → expected ranking &
+                                            # scores (seeded, from spec §7 weights)
+uv run pytest tests/test_accounting.py -q   # FLOP table golden values for Qwen2.5-7B (2·7.6e9·tok)
 ```
 
 Do NOT: any network I/O, any coordinator/node package code, client work.
@@ -171,11 +189,11 @@ Tasks:
 
 Checkpoints:
 ```bash
-uv run pytest Tests/integration/test_registration.py -q   # fake WS node: register→ONLINE→
-                                                          # stop heartbeats→OFFLINE→re-register→ONLINE
-uv run pytest Tests/integration/test_coordinator_restart.py -q  # state survives process restart
-uv run pytest Tests/integration/test_20_nodes.py -q       # 20 concurrent fake nodes, 60 s, 0 spurious
-                                                          # state flips, all transitions logged
+cd Coordinator && uv run pytest tests/test_registration.py -q   # fake WS node: register→ONLINE→
+                        # stop heartbeats→OFFLINE→re-register→ONLINE
+cd Coordinator && uv run pytest tests/test_coordinator_restart.py -q  # state survives restart
+cd Sim && uv run pytest tests/test_20_nodes.py -q       # 20 concurrent fake nodes, 60 s, 0 spurious
+                        # state flips, all transitions logged
 ```
 
 Do NOT: scheduling, partition tables, ledger, relay, any model execution.
@@ -192,16 +210,16 @@ Tasks:
 1. `dain_node`: outbound WSS client (auto-reconnect with backoff), capability probe
    (psutil; torch/CUDA if present, else CPU-only), heartbeat loop with metrics payload,
    `Executor` interface with a **deterministic `FakeExecutor`** (canned activations/tokens).
-2. `Sim/cluster.py`: spawns coordinator + N node subprocesses from one config; health
-   summary; `--duration`, `--nodes` flags; exit code reflects cluster health.
+2. `dain_sim.cluster` module: spawns coordinator + N node subprocesses from one config;
+   health summary; `--duration`, `--nodes` flags; exit code reflects cluster health.
 3. Graceful shutdown (SIGINT → deregister → exit) on both sides.
 
 Checkpoints:
 ```bash
-uv run python Sim/cluster.py --nodes 12 --duration 60 ; echo $?   # exit 0: 12/12 ONLINE,
-                                                                 # 0 missed heartbeats, 0 reconnect storms
-uv run pytest Tests/integration/test_reconnect.py -q      # kill a node process → OFFLINE within 15 s;
-                                                          # restart → ONLINE, same node_id, history kept
+cd Sim && uv run python -m dain_sim.cluster --nodes 12 --duration 60 ; echo $?   # exit 0: 12/12
+                        # ONLINE, 0 missed heartbeats, 0 reconnect storms
+cd Sim && uv run pytest tests/test_reconnect.py -q      # kill a node process → OFFLINE within 15 s;
+                        # restart → ONLINE, same node_id, history kept
 ```
 
 Do NOT: GPU/model code (FakeExecutor only), partition assignment, job dispatch.
@@ -225,9 +243,9 @@ Tasks:
 
 Checkpoints:
 ```bash
-uv run pytest Tests/integration/test_single_node_e2e.py -q   # coordinator+1 node: prompt →
+cd Sim && uv run pytest tests/test_single_node_e2e.py -q   # coordinator+1 node: prompt →
    # ≥20 streamed SSE tokens, valid SSE framing, job COMPLETED, tokens>0 in job record
-uv run python Sim/cluster.py --nodes 2 --chat     # manual smoke: interactive prompt answers
+cd Sim && uv run python -m dain_sim.cluster --nodes 2 --chat   # manual smoke: interactive
 ```
 
 Do NOT: partitioning/multi-hop, scheduling beyond "pick the only node", failover logic.
@@ -251,11 +269,11 @@ Tasks:
 
 Checkpoints:
 ```bash
-uv run pytest Tests/integration/test_pipeline_parity.py -q   # TinyLlama on 4 sim nodes vs
+cd Sim && uv run pytest tests/test_pipeline_parity.py -q   # TinyLlama on 4 sim nodes vs
    # single-node reference: max|Δlogits| < 1e-3 (fp32 CPU), identical token stream (greedy)
-uv run pytest Tests/integration/test_stage_progress.py -q    # job record shows per-stage
+cd Sim && uv run pytest tests/test_stage_progress.py -q    # job record shows per-stage
    # latencies & token counts; stage timing matches spec §9 envelope expectations (±50%)
-uv run python Sim/cluster.py --nodes 8 --chat    # manual: generation flows through 8 stages
+cd Sim && uv run python -m dain_sim.cluster --nodes 8 --chat   # manual: 8-stage generation
 ```
 
 Do NOT: dynamic re-placement, failover (fixed node set — kills crash the job, that is S7),
@@ -278,12 +296,12 @@ Tasks:
 
 Checkpoints:
 ```bash
-uv run pytest Tests/unit/test_scheduler.py -q        # mixed synthetic pool → expected K,
-                                                     # membership, sizing; min-VRAM exclusion works
-uv run pytest Tests/integration/test_admission.py -q # 50 concurrent requests vs small pool:
-                                                     # some 429 with retry-after, no crash, no deadlock
-uv run pytest Tests/integration/test_placement_recompute.py -q  # node leaves → placement
-                                                     # updated, new jobs use it, old jobs finish
+cd Coordinator && uv run pytest tests/test_scheduler.py -q       # mixed synthetic pool → K,
+                        # membership, sizing; min-VRAM exclusion works
+cd Sim && uv run pytest tests/test_admission.py -q               # 50 concurrent requests vs small
+                        # pool: some 429 with retry-after, no crash, no deadlock
+cd Sim && uv run pytest tests/test_placement_recompute.py -q     # node leaves → placement
+                        # updated, new jobs use it, old jobs finish
 ```
 
 Do NOT: periodic rebalancer (defer), MoE, multi-model.
@@ -303,12 +321,13 @@ Tasks:
    placement; queued jobs re-route.
 3. Degraded mode: re-partition across remaining nodes when pool < K but ≥ `min_nodes`;
    clean rejection below it.
-4. `Sim/chaos.py`: deterministic kill schedule (node index, time) for repeatable tests.
+4. `dain_sim.chaos` module: deterministic kill schedule (node index, time) for repeatable
+   tests.
 
 Checkpoints:
 ```bash
-uv run python Sim/chaos.py --nodes 6 --kill-at 5s:node3 --expect-complete ; echo $?   # 0
-uv run pytest Tests/integration/test_chaos_matrix.py -q   # scripted: kill 1 mid-job → completes
+cd Sim && uv run python -m dain_sim.chaos --nodes 6 --kill-at 5s:node3 --expect-complete ; echo $?  # 0
+cd Sim && uv run pytest tests/test_chaos_matrix.py -q     # scripted: kill 1 mid-job → completes
    # via retry/backup; kill 3 of 8 → degraded serving continues; kill below min_nodes → clean
    # 429/503 with status, no hang; zero duplicate ledger keys emitted (keys recorded from S5)
 ```
@@ -332,10 +351,10 @@ Tasks:
 
 Checkpoints:
 ```bash
-uv run pytest Tests/integration/test_ledger_reconcile.py -q  # replay S7 chaos scenario:
+cd Sim && uv run pytest tests/test_ledger_reconcile.py -q    # replay S7 chaos scenario:
    # Σ credits per node == expected from job records; retry storms produce exactly one
    # SUCCESS event per (job, stage); FAILED/RETRIED_AWAY outcomes weighted per spec §15
-uv run pytest Tests/unit/test_credit.py -q                   # credit golden tests
+cd Common && uv run pytest tests/test_accounting.py -q       # credit golden tests
 ```
 
 Do NOT: payments, settlement, crypto, price configuration.
@@ -377,15 +396,16 @@ licenses accepted (§4).
 Tasks:
 1. Onboard real nodes (agent install script in `Deploy/`); Qwen2.5-7B-Instruct fp16 sharded
    across the pool.
-2. `Sim/benchmarks.py`: single-stream tok/s, batch-1/8 pipelined throughput, per-stage
-   latency, per-hop RTT; compare measured vs §9 predictions.
+2. `dain_sim.benchmarks` module: single-stream tok/s, batch-1/8 pipelined throughput,
+   per-stage latency, per-hop RTT; compare measured vs §9 predictions.
 3. Energy capture where available (GPU power telemetry → ledger `energy_kwh_est`);
    `kWh/1k tokens` per H5.
 4. Write `Docs/pilot-report.md`: measured vs predicted table, deviations, spec amendments.
 
 Checkpoints:
 ```bash
-uv run python Sim/benchmarks.py --nodes <pilot> --model qwen2.5-7b --out Docs/pilot-data.json
+cd Sim && uv run python -m dain_sim.benchmarks --nodes <pilot> --model qwen2.5-7b \
+    --out ../../Docs/pilot-data.json
 # exit 0; report shows measured tok/s within 2× of §9 envelope prediction; every stage of the
 # pipeline observed healthy ≥30 min under load
 ```
@@ -405,9 +425,9 @@ checkpoints as S5/S7 but for OLMoE.
 
 Checkpoints:
 ```bash
-uv run pytest Tests/integration/test_moe_parity.py -q   # OLMoE distributed vs single-node
-                                                        # reference logits parity < 1e-3
-uv run python Sim/chaos.py --model olmoe --kill-at 5s:node2 --expect-complete ; echo $?  # 0
+cd Sim && uv run pytest tests/test_moe_parity.py -q   # OLMoE distributed vs single-node
+                                                      # reference logits parity < 1e-3
+cd Sim && uv run python -m dain_sim.chaos --model olmoe --kill-at 5s:node2 --expect-complete ; echo $?  # 0
 ```
 
 ---

@@ -72,3 +72,32 @@ Format: what was done, decisions made, deviations from Docs/stages.md, gate resu
   LF normalization after CRLF warning noise on Windows.
 - Next: **S2 — Coordinator core** (registry, auth, heartbeats, state machine) per
   `Docs/stages.md`.
+
+## 2026-09-08 — Repository restructure: per-project isolation (user request)
+
+- Dropped the root uv workspace: root `pyproject.toml`, `uv.lock`, `.venv`,
+  `.python-version`, and root caches removed. The root now holds only shared docs/config:
+  `README.md`, `.gitignore`, `.gitattributes`, `Docs/`, `Deploy/`, `Builds/` (gitignored),
+  and the four project directories (+ `Client/` from S9).
+- Each Python project is now **standalone**: own `pyproject.toml`, `uv.lock`, `.venv`,
+  `.python-version` (3.12), ruff + pytest config, and its own `tests/` directory.
+  Tests relocated: schema/scoring/accounting/smoke suites → `Common/tests/`, healthz →
+  `Coordinator/tests/`, placeholders in `Node/tests/` and `Sim/tests/`; root `Tests/`
+  dissolved.
+- `dain-common` is consumed via editable path dependency
+  (`{ path = "../Common", editable = true }`) in Coordinator/Node/Sim — single protocol
+  source of truth, no root workspace.
+- Conventions locked and documented: gates run **inside the project directory**;
+  cross-component integration tests live in `Sim/tests/`; Sim entry points are modules
+  (`python -m dain_sim.cluster|chaos|benchmarks`).
+- `Docs/stages.md` updated everywhere (§2 DoD, §3 architecture, S0–S11 command paths);
+  `README.md` rewritten; spec §21 tooling row amended.
+- Rationale: user asked for a clean root and per-project isolation (one venv each for
+  node and coordinator). This also matches the deployment reality — coordinator ships to
+  a VPS, nodes ship to provider machines, each syncing independently.
+- Accepted trade-off: dependency resolution duplicated across four lockfiles (all on
+  3.12; uv's shared wheel cache makes this cheap), and a protocol change requires
+  re-running `uv sync` in consumer projects.
+- Gates re-run in all four projects: Common **43 passed**, Coordinator **1 passed**,
+  Node **1 passed**, Sim **1 passed**; ruff clean everywhere.
+- Next: **S2 — Coordinator core**.

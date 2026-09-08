@@ -1,6 +1,7 @@
 """S1 checkpoint: accounting math goldens (spec §15)."""
 
 import pytest
+
 from dain_common import (
     MODELS,
     CreditWeights,
