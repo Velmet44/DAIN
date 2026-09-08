@@ -80,8 +80,8 @@ Runtime model (dev = everything on one machine):
 
 | Stage | Name | Status |
 |---|---|---|
-| S0 | Bootstrap & toolchain | ☐ |
-| S1 | Protocol & shared schemas (`Common`) | ☐ |
+| S0 | Bootstrap & toolchain | ✅ 2026-09-08 (2cd11ad) |
+| S1 | Protocol & shared schemas (`Common`) | ✅ 2026-09-08 (2983e9a) |
 | S2 | Coordinator core: registry, auth, heartbeats, state machine | ☐ |
 | S3 | Node agent skeleton + local cluster sim | ☐ |
 | S4 | Single-node inference path (real model, streaming) | ☐ |

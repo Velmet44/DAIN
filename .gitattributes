@@ -1,0 +1,8 @@
+# Normalize line endings: LF in the repo and on checkout (Windows-safe).
+* text=auto eol=lf
+
+# Explicit binaries
+*.png binary
+*.jpg binary
+*.ico binary
+*.safetensors binary
