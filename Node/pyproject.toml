@@ -1,0 +1,16 @@
+[project]
+name = "dain-node"
+version = "0.1.0"
+description = "DAIN compute-node agent: registration, heartbeats, model executors"
+requires-python = ">=3.12"
+dependencies = ["dain-common"]
+
+[tool.uv.sources]
+dain-common = { workspace = true }
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dain_node"]
