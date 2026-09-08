@@ -6,10 +6,10 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterator
 
+from dain_common.logging_setup import configure_logging
 from fastapi import FastAPI
 
 from dain_coordinator.api import admin_router, node_router
-from dain_coordinator.logging_setup import configure_logging
 from dain_coordinator.monitor import HeartbeatMonitor
 from dain_coordinator.nodes import NodeService
 from dain_coordinator.settings import CoordinatorSettings

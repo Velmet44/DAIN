@@ -1,9 +1,9 @@
 """Logging setup with optional JSON output and node/job correlation.
 
-Correlation convention: domain log calls pass ``node_id`` / ``job_id`` via the
-standard ``extra`` mapping; the JSON formatter lifts them to top-level keys, and
-domain messages repeat the node_id in text so the default console format stays
-greppable.
+Shared by the coordinator and the node agent. Correlation convention: domain
+log calls pass ``node_id`` / ``job_id`` via the standard ``extra`` mapping; the
+JSON formatter lifts them to top-level keys, and domain messages repeat the
+node_id in text so the default console format stays greppable.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ class JsonFormatter(logging.Formatter):
 
 
 def configure_logging(json_mode: bool = False, level: int = logging.INFO) -> None:
-    """Idempotent: safe to call on every create_app()."""
+    """Idempotent: safe to call on every process/app start."""
     logger = logging.getLogger(_NAMESPACE)
     if logger.handlers:
         return

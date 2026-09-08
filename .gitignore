@@ -12,6 +12,7 @@ build/
 # DAIN
 Builds/
 models/
+node_state.json
 *.sqlite3
 *.sqlite
 

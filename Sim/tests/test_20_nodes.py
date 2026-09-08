@@ -9,14 +9,13 @@ import asyncio
 import httpx
 from dain_coordinator.settings import CoordinatorSettings
 from helpers import (
-    Cluster,
     cpu_only_manifest,
     fake_node,
     gpu_manifest,
     register_node,
-    start_cluster,
-    stop_cluster,
 )
+
+from dain_sim.server import ClusterServer, start_server, stop_server
 
 N_NODES = 20
 DURATION_S = 60.0
@@ -28,7 +27,7 @@ def test_twenty_nodes_sixty_seconds_stable(tmp_path) -> None:
         settings = CoordinatorSettings(
             db_path=str(tmp_path / "coordinator.sqlite3")
         )  # production timing
-        cluster: Cluster = await start_cluster(settings)
+        cluster: ClusterServer = await start_server(settings)
         tokens: dict[str, str] = {}
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -80,6 +79,6 @@ def test_twenty_nodes_sixty_seconds_stable(tmp_path) -> None:
 
                 assert all(count >= DURATION_S / HEARTBEAT_S - 2 for count in sent), sent
         finally:
-            await stop_cluster(cluster)
+            await stop_server(cluster)
 
     asyncio.run(main())

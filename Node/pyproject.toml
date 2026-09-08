@@ -3,7 +3,12 @@ name = "dain-node"
 version = "0.1.0"
 description = "DAIN compute-node agent: registration, heartbeats, model executors"
 requires-python = ">=3.12"
-dependencies = ["dain-common"]
+dependencies = [
+    "dain-common",
+    "httpx>=0.27",
+    "psutil>=5.9",
+    "websockets>=13",
+]
 
 [tool.uv.sources]
 # Shared protocol/math package, installed editable from the sibling directory.

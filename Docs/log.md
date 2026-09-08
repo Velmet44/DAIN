@@ -146,3 +146,49 @@ Format: what was done, decisions made, deviations from Docs/stages.md, gate resu
   hardening; DEGRADED evaluation is immediate for score/thermal, strike-counted (3)
   for overload.
 - Next: **S3 — Node agent skeleton + local cluster sim** per `Docs/stages.md`.
+
+## 2026-09-08 — S3: Node agent skeleton + local cluster sim ✅
+
+- `logging_setup` moved to `dain_common` (both agents share the JSON-correlation
+  formatter); Coordinator imports updated.
+- `dain_node` (deps += httpx, psutil, websockets):
+  - `settings.py`: `NodeSettings` (DAIN_COORD_URL is a **base** URL — agent derives
+    `/node/ws` and REST endpoints; state path; reconnect bounds; stub net figures).
+  - `identity.py`: persistent node identity (`node_id` + issued `node_token`,
+    atomic tmp+replace writes, corrupt-file → fresh join). Spec §11: re-registration
+    reuses node_id; history survives because it is keyed by node_id.
+  - `capabilities.py`: psutil CPU/RAM always; torch/CUDA GPU (vram via `mem_get_info`,
+    TFLOPS/mem-BW from a name table — *claimed*, unverified per spec §7) else CPU-only.
+  - `executor.py`: `Executor` base (no-op lifecycle hooks) + deterministic
+    `FakeExecutor` (sha1-of-prompt token stream); S4 wires the real HF executor.
+  - `agent.py`: `NodeAgent` — REST registration each session (join token first,
+    per-node token after; rejected token → automatic re-join under same node_id),
+    heartbeat loop (ack'ed interval, seq, psutil/CUDA metrics), receive loop raced
+    against the stop event (`asyncio.wait FIRST_COMPLETED`) so a silent server can
+    never block shutdown, capped exponential backoff (0.5→8 s), `StopGuard` for
+    SIGINT/SIGTERM/SIGBREAK → deregister → exit 0. Incoming JOB_ASSIGN is logged and
+    deferred to S4.
+- `dain_sim.server`: in-process uvicorn coordinator helper (moved out of test helpers).
+- `dain_sim.cluster`: one-command cluster — spawns coordinator + N real
+  `python -m dain_node` subprocesses (per-node state dirs, varied reported bandwidth),
+  polls the registry for `--duration`, graceful-stops all agents, prints a per-node
+  health summary (final state / transitions / heartbeats / score / shutdown reason),
+  exit 0 iff: all heartbeating, zero spurious OFFLINE flips, all deregistered.
+- Checkpoints:
+  - `uv run python -m dain_sim.cluster --nodes 12 --duration 60` → **HEALTHY, exit 0**:
+    12/12 online throughout, 12 heartbeats each, exactly 2 transitions (registered +
+    deregistered), differentiated scores (0.320–0.344), all `deregistered`.
+  - `tests/test_reconnect.py` → passed: hard-kill (no deregister) → OFFLINE in ~3 s
+    (well within the 15 s budget) → restart with persisted identity → same node_id
+    re-registered ONLINE → graceful stop → `deregistered`.
+- Gates: Common 43, Coordinator 20, Node 11, Sim 3 — all passed, ruff clean.
+- Bring-up lessons: the agent's receive loop blocked `async for` on a silent server,
+  which postponed deregister until `heartbeat_timeout` won the race — fixed by racing
+  receive vs stop-event and cancelling pending tasks; `_summarize()` call-signature
+  bug only surfaced via the real CLI run (exit-code assertions in bash pipelines are
+  polluted by grep — capture with `$?` directly after `;`, not inside a pipe);
+  `Executor` kept a plain base class (no ABC) because its hooks have defaults.
+- Decisions: seq resets to 0 across agent restarts (server logs a gap warning;
+  persistent counters deferred until needed); net BW/latency are configured stubs
+  until S10; admin REST stays unauthenticated until S9.
+- Next: **S4 — Single-node inference path** (real model, streaming).

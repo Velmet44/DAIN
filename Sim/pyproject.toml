@@ -8,12 +8,14 @@ dependencies = ["dain-common"]
 [tool.uv.sources]
 # Shared protocol/math package, installed editable from the sibling directory.
 dain-common = { path = "../Common", editable = true }
-# The sim drives a real in-process coordinator (dev/test dependency).
+# The sim drives a real in-process coordinator and spawns real node agents (dev/test).
 dain-coordinator = { path = "../Coordinator", editable = true }
+dain-node = { path = "../Node", editable = true }
 
 [dependency-groups]
 dev = [
     "dain-coordinator",
+    "dain-node",
     "httpx>=0.27",
     "pytest>=8.3",
     "ruff>=0.6",

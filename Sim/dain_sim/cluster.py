@@ -1,0 +1,214 @@
+"""dain_sim.cluster — one-command local cluster (S3).
+
+Spawns a real coordinator (in-process uvicorn) plus N real node-agent
+subprocesses, watches the registry for the requested duration, shuts everything
+down gracefully (SIGTERM/CTRL_BREAK → agents deregister), prints a health
+summary, and exits 0 only if the cluster was healthy throughout.
+
+Usage: uv run python -m dain_sim.cluster --nodes 12 --duration 60
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import contextlib
+import os
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass, field
+
+import httpx
+from dain_common.logging_setup import configure_logging
+from dain_common.schemas import NodeState
+from dain_coordinator.settings import CoordinatorSettings
+
+from dain_sim.server import start_server, stop_server
+
+JOIN_TOKEN = "dain-dev-join-token"
+
+
+@dataclass
+class NodeProc:
+    node_id: str
+    workdir: str
+    process: subprocess.Popen
+    saw_offline: bool = False
+    final_state: str = "?"
+    transitions: int = 0
+    heartbeats: int = 0
+    score: float | None = None
+    shutdown_reason: str | None = None
+
+
+@dataclass
+class ClusterReport:
+    healthy: bool
+    reason: str
+    nodes: list[NodeProc] = field(default_factory=list)
+
+
+def _spawn_flags() -> int:
+    return subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+
+
+def _graceful_stop(proc: subprocess.Popen) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        with contextlib.suppress(OSError, ValueError):
+            proc.send_signal(signal.CTRL_BREAK_EVENT)
+    else:
+        proc.terminate()
+
+
+def _node_env(
+    port: int, node_id: str, workdir: str, heartbeat_s: float, idx: int
+) -> dict[str, str]:
+    env = dict(os.environ)
+    env.update(
+        {
+            "DAIN_COORD_URL": f"ws://127.0.0.1:{port}",
+            "DAIN_JOIN_TOKEN": JOIN_TOKEN,
+            "DAIN_NODE_ID": node_id,
+            "DAIN_HEARTBEAT_S": str(heartbeat_s),
+            "DAIN_NODE_STATE_PATH": os.path.join(workdir, "node_state.json"),
+            # Varied reported bandwidth exercises score differentiation.
+            "DAIN_NET_BW_MBPS": str(150 + idx * 25),
+            "PYTHONIOENCODING": "utf-8",
+        }
+    )
+    return env
+
+
+def _print_result(
+    code: int, reason: str, procs: list[NodeProc], keep_dir: bool, workdir_root: str
+) -> None:
+    print("\n== health summary ==")
+    print(f"{'node':10s} {'final':9s} {'transitions':11s} {'heartbeats':10s} {'score':6s} shutdown")
+    for proc in procs:
+        score = f"{proc.score:.3f}" if proc.score is not None else "-"
+        print(
+            f"{proc.node_id:10s} {proc.final_state:9s} {proc.transitions:<11d} "
+            f"{proc.heartbeats:<10d} {score:6s} {proc.shutdown_reason}"
+        )
+    print(f"\n== result: {'HEALTHY' if code == 0 else 'UNHEALTHY'} ({reason}) ==")
+    if keep_dir:
+        print(f"[cluster] artifacts kept in {workdir_root}")
+    else:
+        with contextlib.suppress(OSError):
+            for proc in procs:
+                with contextlib.suppress(OSError):
+                    os.remove(os.path.join(proc.workdir, "node_state.json"))
+                with contextlib.suppress(OSError):
+                    os.rmdir(proc.workdir)
+            os.rmdir(workdir_root)
+
+
+async def _summarize(server, procs: list[NodeProc]) -> ClusterReport:
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for proc in procs:
+            detail = (await client.get(f"{server.base_url}/admin/nodes/{proc.node_id}")).json()
+            proc.final_state = detail["state"]
+            proc.transitions = len(detail["history"])
+            proc.heartbeats = (detail["last_seq"] or -1) + 1
+            proc.score = detail["score"]
+            reasons = [h["reason"] for h in detail["history"] if h["to_state"] == "offline"]
+            proc.shutdown_reason = reasons[-1] if reasons else None
+
+    all_heartbeating = all(p.heartbeats > 0 for p in procs)
+    clean_shutdown = all(p.shutdown_reason == "deregistered" for p in procs)
+    no_spurious = all(not p.saw_offline for p in procs)
+    if not all_heartbeating:
+        return ClusterReport(False, "some nodes never heartbeated", procs)
+    if not no_spurious:
+        return ClusterReport(False, "spurious OFFLINE flips during the run", procs)
+    if not clean_shutdown:
+        return ClusterReport(False, "some nodes failed to deregister cleanly", procs)
+    return ClusterReport(True, f"{len(procs)}/{len(procs)} nodes stable, clean shutdown", procs)
+
+
+async def run_cluster(nodes_n: int, duration_s: float, heartbeat_s: float, keep_dir: bool) -> int:
+    workdir_root = tempfile.mkdtemp(prefix="dain-cluster-")
+    configure_logging()
+
+    settings = CoordinatorSettings(
+        db_path=os.path.join(workdir_root, "coordinator.sqlite3"),
+        heartbeat_interval_s=heartbeat_s,
+    )
+    server = await start_server(settings)
+    print(f"[cluster] coordinator on :{server.port} (db={settings.db_path})")
+
+    procs: list[NodeProc] = []
+    python = sys.executable
+    for idx in range(nodes_n):
+        node_id = f"node-{idx:02d}"
+        workdir = os.path.join(workdir_root, node_id)
+        os.makedirs(workdir, exist_ok=True)
+        proc = subprocess.Popen(
+            [python, "-m", "dain_node"],
+            cwd=workdir,
+            env=_node_env(server.port, node_id, workdir, heartbeat_s, idx),
+            creationflags=_spawn_flags(),
+        )
+        procs.append(NodeProc(node_id=node_id, workdir=workdir, process=proc))
+        print(f"[cluster] spawned {node_id} pid={proc.pid}")
+
+    stop_at = time.monotonic() + duration_s
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            while time.monotonic() < stop_at:
+                await asyncio.sleep(min(2.0, max(0.5, duration_s / 20)))
+                response = await client.get(f"{server.base_url}/admin/nodes")
+                listing = response.json()
+                states = {n["node_id"]: n["state"] for n in listing}
+                online = sum(1 for s in states.values() if s == NodeState.ONLINE.value)
+                print(f"[cluster] t-{stop_at - time.monotonic():5.0f}s online={online}/{nodes_n}")
+                for proc in procs:
+                    if states.get(proc.node_id) == NodeState.OFFLINE.value:
+                        proc.saw_offline = True
+    except (httpx.HTTPError, OSError) as exc:
+        print(f"[cluster] ERROR while monitoring: {exc}")
+        await stop_server(server)
+        _print_result(2, "monitor failure", procs, keep_dir, workdir_root)
+        return 2
+
+    # Graceful shutdown: agents deregister on SIGTERM/CTRL_BREAK.
+    for proc in procs:
+        _graceful_stop(proc.process)
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline and any(p.process.poll() is None for p in procs):
+        await asyncio.sleep(0.2)
+    for proc in procs:
+        if proc.process.poll() is None:
+            proc.process.kill()
+            print(f"[cluster] WARNING: {proc.node_id} ignored shutdown signal — killed")
+
+    report = await _summarize(server, procs)
+    await stop_server(server)
+    code = 0 if report.healthy else 1
+    _print_result(code, report.reason, report.nodes, keep_dir, workdir_root)
+    return code
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="DAIN local cluster (coordinator + N node agents)")
+    parser.add_argument("--nodes", type=int, default=4)
+    parser.add_argument("--duration", type=float, default=30.0, help="seconds to run")
+    parser.add_argument("--heartbeat-s", type=float, default=5.0)
+    parser.add_argument("--keep", action="store_true", help="keep temp artifacts (db, state files)")
+    args = parser.parse_args()
+    try:
+        return asyncio.run(
+            run_cluster(args.nodes, args.duration, args.heartbeat_s, keep_dir=args.keep)
+        )
+    except KeyboardInterrupt:
+        print("\n[cluster] interrupted")
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

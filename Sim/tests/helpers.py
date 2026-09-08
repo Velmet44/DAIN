@@ -1,21 +1,16 @@
-"""Shared helpers for cross-component tests: in-process cluster + fake nodes.
+"""Shared test fakes: REST registration + heartbeat-loop node clients.
 
-`start_cluster()` runs a real coordinator (uvicorn) inside the test's event loop
-on 127.0.0.1; `fake_node()` plays one node: REST registration + a heartbeat WS
-loop with the wire Envelope protocol — the same code path the real agent uses
-from S3 on.
+Cluster server plumbing lives in `dain_sim.server`; this module keeps only the
+test-side fakes (direct-WS fake nodes used by protocol/stability tests).
 """
 
 from __future__ import annotations
 
 import asyncio
-import socket
 import time
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
-import uvicorn
 import websockets
 from dain_common.schemas import (
     CapabilityManifest,
@@ -28,56 +23,8 @@ from dain_common.schemas import (
     NetInfo,
     PowerInfo,
 )
-from dain_coordinator.app import create_app
-from dain_coordinator.settings import CoordinatorSettings
 
 JOIN_TOKEN = "dain-dev-join-token"
-
-
-def free_port() -> int:
-    with socket.socket() as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
-
-
-@dataclass
-class Cluster:
-    settings: CoordinatorSettings
-    port: int
-    _server: uvicorn.Server
-    _task: asyncio.Task
-
-    @property
-    def base_url(self) -> str:
-        return f"http://127.0.0.1:{self.port}"
-
-    @property
-    def ws_url(self) -> str:
-        return f"ws://127.0.0.1:{self.port}"
-
-    @property
-    def db_path(self) -> str:
-        return self.settings.db_path
-
-
-async def start_cluster(settings: CoordinatorSettings) -> Cluster:
-    port = free_port()
-    app = create_app(settings)
-    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="error")
-    server = uvicorn.Server(config)
-    task = asyncio.create_task(server.serve(), name="coordinator-server")
-    for _ in range(200):
-        if server.started:
-            break
-        await asyncio.sleep(0.05)
-    if not server.started:
-        raise RuntimeError("coordinator did not start in time")
-    return Cluster(settings=settings, port=port, _server=server, _task=task)
-
-
-async def stop_cluster(cluster: Cluster) -> None:
-    cluster._server.should_exit = True  # noqa: SLF001 (test handle)
-    await cluster._task
 
 
 async def register_node(
