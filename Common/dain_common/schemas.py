@@ -30,6 +30,7 @@ class MessageType(StrEnum):
     JOB_ASSIGN = "job_assign"
     JOB_STATUS = "job_status"
     ACTIVATION_RELAY = "activation_relay"
+    TOKEN_BATCH = "token_batch"
     LEDGER_EVENT = "ledger_event"
     SHARD_MANIFEST = "shard_manifest"
 
@@ -159,6 +160,28 @@ class ShardManifest(_Model):
     total_size_bytes: int = Field(ge=0)
 
 
+class ModelManifest(_Model):
+    """Served by the model store; nodes build their stage runners from it.
+
+    The dev model (`dain-tiny-16L`) is a seeded Llama-family transformer with a
+    byte-level tokenizer (vocab 256), so the whole pipeline is hermetic — no
+    network or gated weights at test time (spec §18).
+    """
+
+    model_id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    layers: int = Field(gt=0)
+    hidden: int = Field(gt=0)
+    heads: int = Field(gt=0)
+    kv_heads: int = Field(gt=0)
+    intermediate: int = Field(gt=0)
+    vocab_size: int = Field(gt=0)
+    eos_token_id: int = Field(ge=0)
+    rope_theta: float = Field(default=10000.0, gt=0)
+    dtype: str = Field(default="fp32")
+    shards: tuple[ShardRef, ...] = ()
+
+
 # ---------------------------------------------------------------------------
 # Message payloads
 # ---------------------------------------------------------------------------
@@ -203,6 +226,9 @@ class StageAssignment(_Model):
     shard_id: str = Field(min_length=1)
     layer_start: int = Field(ge=0)
     layer_end: int = Field(gt=0, description="Inclusive upper bound")
+    # S11 (MoE) skeleton: an expert-set stage hosts these expert indices for the
+    # layers in [layer_start, layer_end] instead of all layers in the range.
+    expert_ids: tuple[int, ...] | None = None
 
     @model_validator(mode="after")
     def _layers_ordered(self) -> StageAssignment:
@@ -253,16 +279,33 @@ class JobStatus(_Model):
 
 
 class ActivationRelayHeader(_Model):
-    """Header of an activation chunk; bytes follow out-of-band (spec §10)."""
+    """Header of an activation chunk; bytes follow out-of-band (spec §10).
+
+    `role="hidden"` carries stage activations toward the next stage;
+    `role="sampled_token"` carries the last stage's sampled token id (int64
+    bytes) back to the entry stage, which embeds it for the next decode step.
+    `is_final` on a sampled_token means generation finished for the job.
+    """
 
     job_id: str = Field(min_length=4, max_length=64)
     stage_idx: int = Field(ge=0)
     attempt: int = Field(ge=0)
     seq: int = Field(ge=0)
-    dtype: Literal["fp32", "fp16", "bf16"] = "fp32"
+    dtype: Literal["fp32", "fp16", "bf16", "int64"] = "fp32"
+    role: Literal["hidden", "sampled_token"] = "hidden"
     shape: tuple[int, ...] = ()
     n_bytes: int = Field(ge=0)
     is_final: bool = False
+
+
+class TokenBatch(_Model):
+    """Final-stage → coordinator → client token stream (spec §9.6)."""
+
+    job_id: str = Field(min_length=4, max_length=64)
+    tokens: tuple[str, ...] = ()
+    is_final: bool = False
+    finish_reason: Literal["length", "eos", "error"] | None = None
+    detail: str | None = None
 
 
 class LedgerEvent(_Model):
@@ -302,6 +345,7 @@ PAYLOAD_TYPES: dict[MessageType, type[BaseModel]] = {
     MessageType.JOB_ASSIGN: JobAssign,
     MessageType.JOB_STATUS: JobStatus,
     MessageType.ACTIVATION_RELAY: ActivationRelayHeader,
+    MessageType.TOKEN_BATCH: TokenBatch,
     MessageType.LEDGER_EVENT: LedgerEvent,
     MessageType.SHARD_MANIFEST: ShardManifest,
 }

@@ -80,7 +80,7 @@ class NodeService:
 
     # -- registration ------------------------------------------------------------
 
-    def register(self, payload: Register) -> RegisterAck:
+    def register(self, payload: Register, *, model_store_url: str | None = None) -> RegisterAck:
         now = time.time()
         existing = self.registry.get_node(payload.node_id)
         if existing is not None and payload.auth_token != existing.node_token:
@@ -142,7 +142,7 @@ class NodeService:
             score.score,
             payload.agent_version,
         )
-        return self._ack(True, node_token=node_token)
+        return self._ack(True, node_token=node_token, model_store_url=model_store_url)
 
     def authenticate(self, node_id: str, token: str) -> bool:
         row = self.registry.get_node(node_id)
@@ -353,11 +353,16 @@ class NodeService:
         )
 
     def _ack(
-        self, accepted: bool, node_token: str | None = None, reason: str | None = None
+        self,
+        accepted: bool,
+        node_token: str | None = None,
+        reason: str | None = None,
+        model_store_url: str | None = None,
     ) -> RegisterAck:
         return RegisterAck(
             accepted=accepted,
             heartbeat_interval_s=self.settings.heartbeat_interval_s,
             node_token=node_token,
+            model_store_url=model_store_url,
             reason=reason,
         )

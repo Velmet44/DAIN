@@ -313,8 +313,11 @@ unmodified. The direct node↔node data plane (§19) must then handle NAT traver
 (hole punching / TURN — TBD).
 
 Message families (node ↔ coordinator): `REGISTER`, `REGISTER_ACK`, `HEARTBEAT`,
-`METRICS_REPORT`, `JOB_ASSIGN`, `JOB_STATUS`, `ACTIVATION_RELAY`, `LEDGER_EVENT`,
-`SHARD_MANIFEST`. Exact schemas: TBD.
+`METRICS_REPORT`, `JOB_ASSIGN`, `JOB_STATUS`, `ACTIVATION_RELAY`, `TOKEN_BATCH`,
+`LEDGER_EVENT`, `SHARD_MANIFEST`. Schemas are pydantic models in `dain_common`
+(S1); `TOKEN_BATCH` carries decoded token strings from the sampling stage to the
+client relay; `ACTIVATION_RELAY` headers distinguish `hidden` (forward) and
+`sampled_token` (last stage → entry) roles.
 
 Constraints to respect in schema design: heartbeats ≤ 1 KiB; activation frames chunked and
 streamable; all messages versioned; idempotent job operations (safe retry).
@@ -482,6 +485,9 @@ cycles) are explicitly part of the measurement plan.
 
 In scope:
 - 1 coordinator VPS, 8–16 nodes, 1 model.
+- Dev/CI model `dain-tiny-16L`: a seeded 16-layer Llama-family transformer with a
+  byte-level tokenizer, exported to per-layer shards — hermetic (no network, no
+  gated weights) and numerically parity-checkable against the full model.
 - Reference models: **TinyLlama-1.1B** (dev/CI, CPU-simulable), **Qwen2.5-7B-Instruct fp16**
   (pilot; 15.2 GB weights — exceeds 12 GB cards, so sharding is *required* on consumer
   pools), **Qwen3-32B fp16** (capacity showcase; 65.6 GB — fits no single consumer GPU),

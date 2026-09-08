@@ -1,4 +1,4 @@
-"""Node agent (S3): register → connect → heartbeat → reconnect → deregister.
+"""Node agent (S3/S4): register → connect → heartbeat → reconnect → deregister.
 
 Lifecycle per spec §6/§10/§11:
 - outbound-only connections (persistent WSS to the coordinator; NAT-friendly);
@@ -8,7 +8,8 @@ Lifecycle per spec §6/§10/§11:
 - auto-reconnect with capped exponential backoff on any transport failure;
 - graceful shutdown (SIGINT/SIGTERM/SIGBREAK) → deregister → exit 0.
 
-Jobs are NOT handled yet (S4); incoming messages are parsed and deferred.
+Job execution (S4): JOB_ASSIGN dispatches to the JobHandler; activations and
+token batches flow over the same connection.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import httpx
 import psutil
 import websockets
 from dain_common.schemas import (
+    ActivationRelayHeader,
     Envelope,
     Heartbeat,
     JobAssign,
@@ -35,8 +37,8 @@ from dain_common.schemas import (
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from dain_node.capabilities import probe
-from dain_node.executor import Executor
 from dain_node.identity import IdentityState
+from dain_node.jobs import JobHandler
 from dain_node.settings import NodeSettings
 
 log = logging.getLogger("dain.node.agent")
@@ -69,15 +71,31 @@ class StopGuard:
 
 
 class NodeAgent:
-    def __init__(self, settings: NodeSettings, executor: Executor) -> None:
+    def __init__(self, settings: NodeSettings, handler: JobHandler) -> None:
         self.settings = settings
-        self.executor = executor
+        self.handler = handler
         self.identity: IdentityState = IdentityState.load(
             settings.state_path
         ) or IdentityState.create(settings.state_path, settings.node_id)
         self.heartbeat_interval_s = settings.heartbeat_interval_s
         self._seq = 0
+        self._ws = None
+        self._ws_lock = asyncio.Lock()
+        self._bind_transport()
         psutil.cpu_percent(interval=None)  # prime the non-blocking sampler
+
+    def _bind_transport(self) -> None:
+        async def send_envelope(envelope: Envelope) -> None:
+            if self._ws is None:
+                raise ConnectionError("ws not connected")
+            await self._ws.send(envelope.model_dump_json())
+
+        async def send_bytes(data: bytes) -> None:
+            if self._ws is None:
+                raise ConnectionError("ws not connected")
+            await self._ws.send(data)
+
+        self.handler.bind(send_envelope, send_bytes)
 
     # -- registration (REST) ----------------------------------------------------
 
@@ -105,6 +123,9 @@ class NodeAgent:
         if ack.node_token and ack.node_token != self.identity.node_token:
             self.identity.node_token = ack.node_token
             self.identity.save(self.settings.state_path)
+        if ack.model_store_url:
+            self.handler.set_store_base(ack.model_store_url)
+            self.handler.store.set_auth(self.identity.node_id, ack.node_token or "")
         self.heartbeat_interval_s = ack.heartbeat_interval_s
         log.info(
             "registered node=%s interval=%.1fs", self.identity.node_id, self.heartbeat_interval_s
@@ -183,6 +204,7 @@ class NodeAgent:
         )
         async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
             log.info("ws_connected node=%s", self.identity.node_id)
+            self._ws = ws
             heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(ws, stop_event), name="heartbeat-loop"
             )
@@ -203,11 +225,15 @@ class NodeAgent:
             # Surface a receive failure (connection lost) so run() reconnects.
             for task in done:
                 task.result()
+            self._ws = None
         log.info("ws_closed node=%s", self.identity.node_id)
 
     async def _receive_loop(self, ws) -> None:
-        async for raw in ws:
-            self._handle_server_message(raw)
+        async for message in ws:
+            if isinstance(message, bytes):
+                await self.handler.on_payload(message)
+            else:
+                await self._handle_server_message(message)
 
     async def _heartbeat_loop(self, ws, stop_event: asyncio.Event) -> None:
         while not stop_event.is_set():
@@ -221,7 +247,7 @@ class NodeAgent:
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=self.heartbeat_interval_s)
 
-    def _handle_server_message(self, raw: str | bytes) -> None:
+    async def _handle_server_message(self, raw: str) -> None:
         try:
             envelope = Envelope.model_validate_json(raw)
             payload = parse_payload(envelope)
@@ -230,22 +256,26 @@ class NodeAgent:
             return
         if envelope.type == MessageType.JOB_ASSIGN:
             assert isinstance(payload, JobAssign)
-            log.info(
-                "job_assign_deferred node=%s job=%s (S4)", self.identity.node_id, payload.job_id
+            log.info("job_assign node=%s job=%s", self.identity.node_id, payload.job_id)
+            asyncio.create_task(
+                self.handler.on_job_assign(payload), name=f"assign-{payload.job_id}"
             )
+        elif envelope.type == MessageType.ACTIVATION_RELAY:
+            assert isinstance(payload, ActivationRelayHeader)
+            await self.handler.on_activation_header(payload)
         else:
             log.info("server_message node=%s type=%s", self.identity.node_id, envelope.type.value)
 
 
-async def run_agent(settings: NodeSettings, executor: Executor) -> int:
+async def run_agent(settings: NodeSettings, handler: JobHandler) -> int:
     stop = StopGuard()
     stop.install()
-    agent = NodeAgent(settings, executor)
-    await agent.executor.warmup()
+    agent = NodeAgent(settings, handler)
+    await agent.handler.warmup()
     try:
         await agent.run(stop.event)
     finally:
-        await agent.executor.shutdown()
+        await agent.handler.shutdown()
         async with httpx.AsyncClient(timeout=3.0) as client:
             await agent.deregister(client)
     log.info("agent_stopped node=%s", agent.identity.node_id)

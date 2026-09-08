@@ -192,3 +192,44 @@ Format: what was done, decisions made, deviations from Docs/stages.md, gate resu
   persistent counters deferred until needed); net BW/latency are configured stubs
   until S10; admin REST stays unauthenticated until S9.
 - Next: **S4 — Single-node inference path** (real model, streaming).
+
+## 2026-09-08 — S4: Single-node inference path ✅
+
+- Common: `TOKEN_BATCH` message family; `ModelManifest` (served by the model store);
+  `ActivationRelayHeader.role` (`hidden` | `sampled_token`); `StageAssignment.expert_ids`
+  (S11 skeleton). Spec §10/§18 amended.
+- Node: torch 2.14.0+cpu + transformers pinned **exactly 4.46.3** (the stage runner uses
+  Llama decoder-layer internals — parity tests are the correctness gate). Modules:
+  `shard_export.py` (seeded dev model `dain-tiny-16L` → per-layer safetensors shards +
+  manifest), `byte_tokenizer.py` (vocab 256, byte 0 = EOS), `model_store` IO in
+  `dain_common.model_store`, `llm.py` (`ModelStoreClient` with sha256-verified shard
+  download/caching; `StageModel` — explicit weight mapping, only assigned layers
+  instantiated; own 4D causal-mask builder — no HF internals; greedy/temperature
+  sampling), `jobs.py` (`JobHandler`: JOB_ASSIGN → generation → TOKEN_BATCH).
+  **Protocol invariant: only the sampling stage emits TOKEN_BATCH**; entry stage owns
+  the loop and reports lifecycle via JOB_STATUS.
+- Coordinator: `connections.py` (per-node WS registry, send locks, disconnect hook),
+  `jobs.py` (`JobTracker` state machine QUEUED→DISPATCHED→RUNNING→STREAMING→
+  COMPLETED/FAILED with idempotent terminal writes + per-job SSE queues;
+  `ActivationRelay` routes hidden/sampled_token chunks between stage nodes),
+  `/v1/completions` (SSE + non-streaming JSON), `/v1/models`, `/v1/jobs/{id}`,
+  `/model/manifest|shard` (node-token authenticated, path-traversal guarded),
+  API-key auth on /v1.
+- Tests: Node 15 (shard parity vs HF reference = **0.000000 max diff**; greedy
+  determinism; 4-stage in-process pipeline parity < 1e-3 + identical greedy tokens;
+  tokenizer/identity/executor), Coordinator 20, Sim e2e checkpoint: coordinator +
+  1 real agent subprocess → ≥20 streamed SSE tokens, valid framing, job COMPLETED,
+  auth 401, non-streaming parity. All gates green.
+- Bring-up lessons (the big one): `sample_token` indexed `logits[0, -1]` assuming
+  [B,T,V], but the runner emits [B,V] — argmax over a scalar silently returned
+  0, which the eos check swallowed as an immediate EOS. Diagnosed by comparing
+  node logits tails against the HF reference (identical!) → the bug was in shape
+  handling, not the model. Also: registration now carries `model_store_url`
+  (derived from request base); node setup failures are reported to the client as
+  error TOKEN_BATCHes instead of dying silently; orphaned agent processes from
+  crashed runs can impersonate a pool (kill strays / use unique join tokens in
+  shared environments).
+- Decisions: dev model is hermetic (seeded tiny Llama) — real TinyLlama/Qwen use the
+  same code path when weights are present; transformers pinned exactly; single-node
+  = a stage covering all layers (one code path for S4/S5).
+- Next: **S5 — Distributed pipeline**.

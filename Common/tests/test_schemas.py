@@ -66,7 +66,7 @@ def test_envelope_round_trip_and_payload_dispatch() -> None:
 
 def test_every_message_family_has_a_payload_model() -> None:
     assert set(PAYLOAD_TYPES) == set(MessageType)
-    assert len(PAYLOAD_TYPES) == 9
+    assert len(PAYLOAD_TYPES) == 10
 
 
 def test_envelope_rejects_wrong_version() -> None:

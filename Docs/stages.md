@@ -97,7 +97,7 @@ Runtime model (dev = everything on one machine):
 | S1 | Protocol & shared schemas (`Common`) | ✅ 2026-09-08 (2983e9a) |
 | S2 | Coordinator core: registry, auth, heartbeats, state machine | ✅ 2026-09-08 |
 | S3 | Node agent skeleton + local cluster sim | ✅ 2026-09-08 |
-| S4 | Single-node inference path (real model, streaming) | ☐ |
+| S4 | Single-node inference path (real model, streaming) | ✅ 2026-09-08 |
 | S5 | Distributed pipeline: partitioning + activation relay | ☐ |
 | S6 | Scoring-driven scheduling, top-K, backups, queueing | ☐ |
 | S7 | Fault tolerance & degraded mode | ☐ |
