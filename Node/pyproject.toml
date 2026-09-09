@@ -30,6 +30,8 @@ explicit = true
 dev = [
     "pytest>=8.3",
     "ruff>=0.6",
+    # Bundles the node agent into a self-contained Windows executable option.
+    "pyinstaller>=6.10",
 ]
 
 [tool.ruff]

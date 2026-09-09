@@ -8,6 +8,7 @@ dependencies = [
     "fastapi>=0.115",
     "pydantic>=2.7,<3",
     "uvicorn>=0.30",
+    "websockets>=12",
 ]
 
 [tool.uv.sources]
