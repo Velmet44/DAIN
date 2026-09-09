@@ -1,0 +1,2 @@
+# SPA fallback: the application is a single view; any path serves index.html.
+/* /index.html 200

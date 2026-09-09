@@ -11,6 +11,7 @@ from dain_common.logging_setup import configure_logging
 from dain_common.model_store import list_models as shard_store_list
 from dain_common.schemas import ModelManifest, NodeState
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from dain_coordinator.api import (
     admin_router,
@@ -26,6 +27,7 @@ from dain_coordinator.ledger import Ledger
 from dain_coordinator.monitor import HeartbeatMonitor
 from dain_coordinator.nodes import NodeService
 from dain_coordinator.partition import PlacementRecorder, recompute_pool
+from dain_coordinator.ratelimit import RateLimiter
 from dain_coordinator.settings import CoordinatorSettings
 from dain_coordinator.store import SQLiteRegistry
 
@@ -107,6 +109,7 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
         app.state.placements = placements
         app.state.faults = faults
         app.state.ledger = ledger
+        app.state.rate_limiter = RateLimiter(settings.rate_limit_per_min)
         app.state.recompute_pool = recompute_pool_events
         monitor = HeartbeatMonitor(service, settings)
         task = asyncio.create_task(monitor.run(), name="heartbeat-monitor")
@@ -122,6 +125,14 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
 
     app = FastAPI(title="DAIN Coordinator", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.cors_origins),
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
     app.include_router(node_router)
     app.include_router(admin_router)
     app.include_router(v1_router)

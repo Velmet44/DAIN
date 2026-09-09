@@ -1,0 +1,14 @@
+# Free SPA hosting (Netlify). Build runs in their CI; the coordinator is NOT in
+# Netlify — it runs on your own PC (see Deploy/Caddyfile for free HTTPS).
+[build]
+  base = "Client"
+  command = "npm ci && npm run build"
+  publish = "dist"
+
+[build.environment]
+  # Browser pages are HTTPS on Netlify; the coordinator must be https:// too or
+  # the browser blocks it as mixed content. Point this at your Caddy domain.
+  VITE_API_URL = "https://dain.example.duckdns.org"
+  VITE_API_KEY = ""
+  VITE_MODEL_ID = "dain-tiny-16L"
+  VITE_DEFAULT_MAX_TOKENS = "64"

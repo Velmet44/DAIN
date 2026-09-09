@@ -56,6 +56,10 @@ class CoordinatorSettings:
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
     # S8 (spec §15): credit weights applied by the ledger (illustrative defaults).
     accounting_weights: CreditWeights = field(default_factory=CreditWeights)
+    # S9: browser client — CORS origins (comma-separated; "*" opens dev) and an
+    # optional per-IP/per-key rate limit for the public completion API (0 off).
+    cors_origins: tuple[str, ...] = ("*",)
+    rate_limit_per_min: int = 0
 
     @property
     def offline_timeout_s(self) -> float:
@@ -88,5 +92,9 @@ class CoordinatorSettings:
             max_stage_attempts=int(env.get("DAIN_MAX_STAGE_ATTEMPTS", "3")),
             max_job_restarts=int(env.get("DAIN_JOB_RESTARTS", "1")),
             min_nodes=int(env.get("DAIN_MIN_NODES", "1")),
+            cors_origins=tuple(
+                o.strip() for o in env.get("DAIN_CORS_ORIGINS", "*").split(",") if o.strip()
+            ),
+            rate_limit_per_min=int(env.get("DAIN_RATE_LIMIT_PER_MIN", "0")),
             log_json=env.get("DAIN_LOG_JSON", "").lower() in ("1", "true", "yes"),
         )

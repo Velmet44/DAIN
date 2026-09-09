@@ -48,7 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dain_coordinator.jobs import ActivationRelay, JobTracker
 from dain_coordinator.nodes import MessageOutcome, NodeService
-from dain_coordinator.partition import plan_placement
+from dain_coordinator.partition import event_view, plan_placement
 from dain_coordinator.store import NodeRow
 
 log = logging.getLogger("dain.coordinator.api")
@@ -293,11 +293,41 @@ def list_models(request: Request) -> dict:
     }
 
 
+@v1_router.get("/nodes")
+def list_public_nodes(request: Request) -> dict:
+    """S9 dashboard feed (spec §12 observability): node rows, last placements,
+    active job count — everything the browser dashboard needs."""
+    service = _service(request)
+    connections = request.app.state.connections
+    rows = service.registry.list_nodes()
+    placements = request.app.state.placements
+    jobs: JobTracker = request.app.state.jobs
+    active = sum(
+        1 for j in jobs.jobs.values() if j.state not in (JobState.COMPLETED, JobState.FAILED)
+    )
+    return {
+        "nodes": [
+            _view(row, connected=connections.is_connected(row.node_id)).model_dump()
+            for row in rows
+        ],
+        "placements": [event_view(e) for e in placements.events()[-16:]],
+        "active_jobs": active,
+    }
+
+
 @v1_router.post("/completions")
 async def completions(payload: CompletionRequest, request: Request):
     settings = request.app.state.settings
     jobs: JobTracker = request.app.state.jobs
     connections = request.app.state.connections
+    limiter = request.app.state.rate_limiter
+    client_ip = request.client.host if request.client else "unknown"
+    if not limiter.allow(f"{client_ip}:{request.headers.get('x-api-key', '')}"):
+        raise HTTPException(
+            status_code=429,
+            detail="rate limit exceeded; slow down",
+            headers={"Retry-After": "60"},
+        )
     manifest = shard_store_load(settings.model_store_dir, payload.model_id)
     if manifest is None:
         raise HTTPException(status_code=404, detail=f"unknown model {payload.model_id!r}")

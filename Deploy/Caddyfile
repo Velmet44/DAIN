@@ -1,0 +1,14 @@
+# Automatic HTTPS for a coordinator running on a home PC.
+#
+# Requirements:
+#  1. A free dynamic-DNS hostname (e.g. DuckDNS "daintest.duckdns.org").
+#  2. Router forwards TCP 80 and 443 to this PC.
+#  3. Caddy installed on the coordinator machine.
+#
+# Then: caddy run --config Deploy/Caddyfile
+# The coordinator itself is started separately:
+#   uv run uvicorn dain_coordinator.app:create_app --factory --host 0.0.0.0 --port 8000
+
+daintest.duckdns.org {
+    reverse_proxy 127.0.0.1:8000
+}
