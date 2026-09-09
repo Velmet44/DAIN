@@ -2,7 +2,7 @@
 
 import dataclasses
 
-from conftest import make_client, make_settings, register_payload, wait_for
+from conftest import ADMIN_HEADERS, make_client, make_settings, register_payload, wait_for
 from dain_common.schemas import Envelope, Heartbeat, MessageType
 
 JOIN = "dain-dev-join-token"
@@ -24,7 +24,7 @@ def test_state_survives_restart(tmp_path) -> None:
 
     # Second process: same DB file, fresh app.
     with make_client(dataclasses.replace(settings, db_path=db)) as client:
-        nodes = client.get("/admin/nodes").json()
+        nodes = client.get("/admin/nodes", headers=ADMIN_HEADERS).json()
         assert [n["node_id"] for n in nodes] == ["node-a"]
         assert nodes[0]["last_seq"] == 0
 
@@ -36,14 +36,14 @@ def test_state_survives_restart(tmp_path) -> None:
             ws.send_text(envelope.model_dump_json())
 
         # History from the first process is intact, including original registration.
-        detail = client.get("/admin/nodes/node-a").json()
+        detail = client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()
         assert detail["history"][0]["to_state"] == "online"
         assert detail["history"][0]["reason"] == "registered"
 
         # The stale node (silent since before the restart) is demoted by the new
         # process's monitor — persistence and detection both work across restarts.
         def timed_out() -> bool:
-            history = client.get("/admin/nodes/node-a").json()["history"]
+            history = client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["history"]
             return any(h["reason"] == "heartbeat_timeout" for h in history)
 
         assert wait_for(timed_out, timeout_s=3.0)

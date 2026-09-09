@@ -16,6 +16,8 @@ from dain_sim.server import start_server, stop_server
 
 JOIN_TOKEN = "dain-dev-join-token"
 API_KEY = "dain-dev-key"
+ADMIN_KEY = "dain-dev-admin-key"
+ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
 
 
 def test_placement_recompute_after_node_loss(tmp_path) -> None:
@@ -29,6 +31,7 @@ def test_placement_recompute_after_node_loss(tmp_path) -> None:
             offline_after_missed=3,
             monitor_tick_s=0.25,
             api_key=API_KEY,
+            admin_api_key=ADMIN_KEY,
             # 4 stages do real CPU inference; on a 4-core host full-suite
             # contention can stretch a non-streaming run well past the default
             # 60 s — match the S5 parity test's generous bound (S5 lesson: tests
@@ -60,7 +63,12 @@ def test_placement_recompute_after_node_loss(tmp_path) -> None:
                     procs[f"node-{i}"] = spawn(f"node-{i}")
                 deadline = time.monotonic() + 30.0
                 while time.monotonic() < deadline:
-                    listing = (await client.get(f"{server.base_url}/admin/nodes")).json()
+                    listing = (
+                        await client.get(
+                            f"{server.base_url}/admin/nodes",
+                            headers=ADMIN_HEADERS,
+                        )
+                    ).json()
                     connected = sum(1 for n in listing if n.get("connected"))
                     if connected >= 5:
                         break
@@ -95,7 +103,12 @@ def test_placement_recompute_after_node_loss(tmp_path) -> None:
                 await asyncio.to_thread(procs[victim].wait)
                 deadline = time.monotonic() + 15.0
                 while time.monotonic() < deadline:
-                    listing = (await client.get(f"{server.base_url}/admin/nodes")).json()
+                    listing = (
+                        await client.get(
+                            f"{server.base_url}/admin/nodes",
+                            headers=ADMIN_HEADERS,
+                        )
+                    ).json()
                     states = {n["node_id"]: n["state"] for n in listing}
                     if states.get(victim) in (None, NodeState.OFFLINE.value):
                         break

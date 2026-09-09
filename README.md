@@ -7,6 +7,40 @@ A coordinator-orchestrated inference network that partitions one large model
 - Development stages: [Docs/stages.md](Docs/stages.md)
 - Work log: [Docs/log.md](Docs/log.md)
 
+## Quick start (same PC, web interface)
+
+Requires [uv](https://docs.astral.sh/uv/) and [Node.js 18+](https://nodejs.org).
+
+```bash
+# 1. Bootstrap everything (one-time)
+powershell -ExecutionPolicy Bypass -File bootstrap.ps1
+
+# 2. Export the dev model (one-time)
+cd Node && uv run python -c "from dain_node.shard_export import export_tiny_llama; export_tiny_llama('../model_store')"
+
+# 3. Start coordinator (terminal 1)
+cd Coordinator
+$env:DAIN_MODEL_STORE_DIR="../model_store"
+uv run python -m dain_coordinator
+
+# 4. Start node agent (terminal 2)
+cd Node
+$env:DAIN_MODEL_STORE_DIR="../model_store"
+uv run python -m dain_node
+
+# 5. Start web client (terminal 3)
+cd Client
+npm run dev
+```
+
+Open **http://localhost:5173/DAIN/** — type a message in the Chat tab.
+
+Or for a one-command cluster (no browser, chat REPL):
+
+```bash
+cd Sim && uv run python -m dain_sim.cluster --nodes 4 --chat
+```
+
 ## Repository layout
 
 The **root holds no buildable code** — only shared docs, config, and the project
@@ -21,8 +55,8 @@ and `tests/`.
 | `Coordinator/` | `dain-coordinator` — control-plane API (FastAPI): registry, scheduling, relay, ledger |
 | `Node/` | `dain-node` — compute-node agent: registration, heartbeats, executors |
 | `Sim/` | `dain-sim` — local multi-process cluster, chaos harness, benchmarks |
-| `Client/` | React + Vite + TypeScript web client (arrives in stage S9) |
-| `Deploy/` | env templates (`.env.example`), systemd units, hosting notes |
+| `Client/` | React + Vite + TypeScript web client (S9) |
+| `Deploy/` | env templates (`.env.example`), Caddyfile, caddy binary |
 | `Builds/` | local build artifacts (gitignored) |
 
 `Coordinator`, `Node`, and `Sim` depend on `dain-common` through an **editable path

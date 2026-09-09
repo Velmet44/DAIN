@@ -399,3 +399,41 @@ Format: what was done, decisions made, deviations from Docs/stages.md, gate resu
   `test_single_node_streaming_e2e` (node WS attach racing the first POST → 429) re-ran green;
   parity test also verified solo.
 - Next: **S9 — Web client + deployment** (needs human-provided hosting credentials §4).
+
+### 2026-09-09 — S9 hardening + CI (session 3)
+
+**Goal:** Complete S9 hardening (admin auth, rate limiting, CORS, Netlify→GitHub Pages
+migration) and add Python CI (step 2).
+
+**S9 hardening:**
+- Added `require_admin` dependency (X-Admin-Key header or Bearer token, timing-safe
+  comparison via `secrets.compare_digest`) to `admin_router` in `api.py:90`.
+- Added `admin_api_key` field to `CoordinatorSettings` (env: `DAIN_ADMIN_API_KEY`, default
+  `dain-dev-admin-key`). Updated `Deploy/.env.example` with the new variable.
+- Changed `rate_limit_per_min` default from `0` (disabled) to `60` (enabled).
+- Updated all test fixtures (`Coordinator/tests/conftest.py`, `Sim/tests/helpers.py`,
+  `Sim/dain_sim/cluster.py`, `Sim/dain_sim/chaos.py`) to set `admin_api_key=ADMIN_KEY`
+  in `CoordinatorSettings` and pass `ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}` to
+  all admin API calls.
+- Updated `Sim/tests/test_20_nodes.py`, `test_reconnect.py`, `test_single_node_e2e.py`,
+  `test_pipeline_parity.py`, `test_admission.py`, `test_placement_recompute.py` with
+  admin auth headers on all `/admin/*` calls.
+
+**GitHub Pages consolidation (replacing Netlify):**
+- Deprecated `netlify.toml` (file retained with deprecation notice, safe to delete).
+- Updated `Client/vite.config.ts`, `Client/.env.example` to remove Netlify references.
+- Updated `.github/workflows/deploy.yml` env section (placeholder URL, correct comments).
+- Updated `Docs/stages.md` S9 section: Netlify → GitHub Pages throughout (task list,
+  checkpoints, status table).
+- Updated `Docs/spec.md` §21 reference stack: Netlify → GitHub Pages.
+- Updated `Deploy/.env.example` with CORS, rate limit, and admin key documentation.
+
+**CI for Python tests (step 2):**
+- Created `.github/workflows/ci.yml`: 4 parallel jobs (Common, Coordinator, Node, Sim)
+  each running `uv sync`, `uv run pytest -q`, `uv run ruff check .` on push/PR to main.
+- Uses `astral-sh/setup-uv@v5` with caching for fast runs.
+
+**Gates:** Common 46, Coordinator 36 — all green, ruff clean across all four packages.
+All 19 lint issues from the admin-auth additions (line length, import ordering) resolved.
+Sim/Node integration tests not run in this session (require model export + torch); they
+are gated by the CI workflow on push.

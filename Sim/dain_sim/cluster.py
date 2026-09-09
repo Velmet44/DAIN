@@ -36,6 +36,8 @@ from dain_sim.server import start_server, stop_server
 
 JOIN_TOKEN = "dain-dev-join-token"
 API_KEY = "dain-dev-key"
+ADMIN_KEY = "dain-dev-admin-key"
+ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
 
 
 @dataclass
@@ -120,7 +122,12 @@ def _print_result(
 async def _summarize(server, procs: list[NodeProc]) -> ClusterReport:
     async with httpx.AsyncClient(timeout=5.0) as client:
         for proc in procs:
-            detail = (await client.get(f"{server.base_url}/admin/nodes/{proc.node_id}")).json()
+            detail = (
+                await client.get(
+                    f"{server.base_url}/admin/nodes/{proc.node_id}",
+                    headers=ADMIN_HEADERS,
+                )
+            ).json()
             proc.final_state = detail["state"]
             proc.transitions = len(detail["history"])
             proc.heartbeats = (detail["last_seq"] or -1) + 1
@@ -143,7 +150,7 @@ async def _summarize(server, procs: list[NodeProc]) -> ClusterReport:
 async def _wait_online(client, base_url: str, timeout_s: float = 40.0) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        listing = (await client.get(f"{base_url}/admin/nodes")).json()
+        listing = (await client.get(f"{base_url}/admin/nodes", headers=ADMIN_HEADERS)).json()
         if sum(1 for n in listing if n["state"] == NodeState.ONLINE.value) >= 1:
             return True
         await asyncio.sleep(0.5)
@@ -217,6 +224,7 @@ async def run_cluster(
         db_path=os.path.join(workdir_root, "coordinator.sqlite3"),
         model_store_dir=store_dir,
         heartbeat_interval_s=heartbeat_s,
+        admin_api_key=ADMIN_KEY,
     )
     server = await start_server(settings)
     print(f"[cluster] coordinator on :{server.port} (db={settings.db_path})")
@@ -247,7 +255,9 @@ async def run_cluster(
             else:
                 while time.monotonic() < stop_at:
                     await asyncio.sleep(min(2.0, max(0.5, duration_s / 20)))
-                    response = await client.get(f"{server.base_url}/admin/nodes")
+                    response = await client.get(
+                        f"{server.base_url}/admin/nodes", headers=ADMIN_HEADERS
+                    )
                     listing = response.json()
                     states = {n["node_id"]: n["state"] for n in listing}
                     online = sum(1 for s in states.values() if s == NodeState.ONLINE.value)

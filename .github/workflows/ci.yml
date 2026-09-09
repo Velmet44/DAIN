@@ -1,0 +1,69 @@
+name: CI — Python tests & lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  common:
+    name: Common
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Common
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: uv run pytest -q
+      - run: uv run ruff check .
+
+  coordinator:
+    name: Coordinator
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Coordinator
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: uv run pytest -q
+      - run: uv run ruff check .
+
+  node:
+    name: Node
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: uv run pytest -q
+      - run: uv run ruff check .
+
+  sim:
+    name: Sim (integration)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Sim
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync
+      - run: uv run pytest -q
+      - run: uv run ruff check .

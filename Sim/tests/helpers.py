@@ -25,6 +25,8 @@ from dain_common.schemas import (
 )
 
 JOIN_TOKEN = "dain-dev-join-token"
+ADMIN_KEY = "dain-dev-admin-key"
+ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
 
 
 async def register_node(

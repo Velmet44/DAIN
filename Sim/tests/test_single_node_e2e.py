@@ -19,6 +19,8 @@ from dain_sim.server import start_server, stop_server
 
 JOIN_TOKEN = "dain-dev-join-token"
 API_KEY = "dain-dev-key"
+ADMIN_KEY = "dain-dev-admin-key"
+ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
 
 
 def test_single_node_streaming_e2e(tmp_path) -> None:
@@ -33,6 +35,7 @@ def test_single_node_streaming_e2e(tmp_path) -> None:
             offline_after_missed=3,
             monitor_tick_s=0.25,
             api_key=API_KEY,
+            admin_api_key=ADMIN_KEY,
             job_timeout_s=60.0,
         )
         server = await start_server(settings)
@@ -54,7 +57,12 @@ def test_single_node_streaming_e2e(tmp_path) -> None:
                 # Wait for the node to register.
                 deadline = time.monotonic() + 20.0
                 while time.monotonic() < deadline:
-                    listing = (await client.get(f"{server.base_url}/admin/nodes")).json()
+                    listing = (
+                        await client.get(
+                            f"{server.base_url}/admin/nodes",
+                            headers=ADMIN_HEADERS,
+                        )
+                    ).json()
                     if any(n["state"] == NodeState.ONLINE.value for n in listing):
                         break
                     await asyncio.sleep(0.25)

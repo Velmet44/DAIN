@@ -9,6 +9,8 @@ import asyncio
 import httpx
 from dain_coordinator.settings import CoordinatorSettings
 from helpers import (
+    ADMIN_HEADERS,
+    ADMIN_KEY,
     cpu_only_manifest,
     fake_node,
     gpu_manifest,
@@ -25,7 +27,8 @@ HEARTBEAT_S = 5.0
 def test_twenty_nodes_sixty_seconds_stable(tmp_path) -> None:
     async def main() -> None:
         settings = CoordinatorSettings(
-            db_path=str(tmp_path / "coordinator.sqlite3")
+            db_path=str(tmp_path / "coordinator.sqlite3"),
+            admin_api_key=ADMIN_KEY,
         )  # production timing
         cluster: ClusterServer = await start_server(settings)
         tokens: dict[str, str] = {}
@@ -66,12 +69,21 @@ def test_twenty_nodes_sixty_seconds_stable(tmp_path) -> None:
                     )
                 )
 
-                listing = (await client.get(f"{cluster.base_url}/admin/nodes")).json()
+                listing = (
+                    await client.get(
+                        f"{cluster.base_url}/admin/nodes", headers=ADMIN_HEADERS
+                    )
+                ).json()
                 assert len(listing) == N_NODES
                 assert all(n["state"] == "online" for n in listing), listing
 
                 for node_id in tokens:
-                    detail = (await client.get(f"{cluster.base_url}/admin/nodes/{node_id}")).json()
+                    detail = (
+                        await client.get(
+                            f"{cluster.base_url}/admin/nodes/{node_id}",
+                            headers=ADMIN_HEADERS,
+                        )
+                    ).json()
                     assert detail["state"] == "online", (node_id, detail)
                     # Exactly one transition each (the registration): no spurious flips.
                     assert len(detail["history"]) == 1, (node_id, detail["history"])

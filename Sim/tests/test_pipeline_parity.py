@@ -22,6 +22,8 @@ from dain_sim.server import start_server, stop_server
 
 JOIN_TOKEN = "dain-dev-join-token"
 API_KEY = "dain-dev-key"
+ADMIN_KEY = "dain-dev-admin-key"
+ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
 PROMPT = "Once upon a time"
 MAX_TOKENS = 24
 
@@ -63,7 +65,7 @@ async def wait_connected(
     """Nodes must not only be registered but have their WS attached (S5 dispatch)."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        listing = (await client.get(f"{server.base_url}/admin/nodes")).json()
+        listing = (await client.get(f"{server.base_url}/admin/nodes", headers=ADMIN_HEADERS)).json()
         connected = sum(1 for n in listing if n.get("connected"))
         if connected >= count:
             return
@@ -76,7 +78,7 @@ async def wait_online(
 ) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        listing = (await client.get(f"{server.base_url}/admin/nodes")).json()
+        listing = (await client.get(f"{server.base_url}/admin/nodes", headers=ADMIN_HEADERS)).json()
         online = sum(1 for n in listing if n["state"] == NodeState.ONLINE.value)
         if online >= count:
             return
@@ -132,6 +134,7 @@ def test_pipeline_parity_four_agents(tmp_path) -> None:
             offline_after_missed=3,
             monitor_tick_s=0.25,
             api_key=API_KEY,
+            admin_api_key=ADMIN_KEY,
             job_timeout_s=90.0,
             layers_per_node_target=4,
         )
@@ -151,7 +154,12 @@ def test_pipeline_parity_four_agents(tmp_path) -> None:
                 procs[0].terminate()
                 deadline = time.monotonic() + 10
                 while time.monotonic() < deadline:
-                    listing = (await client.get(f"{server.base_url}/admin/nodes")).json()
+                    listing = (
+                        await client.get(
+                            f"{server.base_url}/admin/nodes",
+                            headers=ADMIN_HEADERS,
+                        )
+                    ).json()
                     if all(n["state"] != "online" for n in listing):
                         break
                     await asyncio.sleep(0.2)

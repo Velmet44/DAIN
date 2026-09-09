@@ -1,14 +1,20 @@
-# Automatic HTTPS for a coordinator running on a home PC.
+# Caddyfile for DAIN coordinator — automatic HTTPS reverse proxy.
 #
-# Requirements:
-#  1. A free dynamic-DNS hostname (e.g. DuckDNS "daintest.duckdns.org").
-#  2. Router forwards TCP 80 and 443 to this PC.
-#  3. Caddy installed on the coordinator machine.
+# LOCAL DEV (no Caddy needed):
+#   Coordinator runs on http://localhost:8000
+#   Client dev server on http://localhost:5173/DAIN/
+#   Browser connects directly — no HTTPS required for localhost.
 #
-# Then: caddy run --config Deploy/Caddyfile
-# The coordinator itself is started separately:
-#   uv run uvicorn dain_coordinator.app:create_app --factory --host 0.0.0.0 --port 8000
+# PRODUCTION (home PC with DuckDNS):
+#  1. Get a free hostname at duckdns.org (e.g. myname.duckdns.org)
+#  2. Forward TCP 80 and 443 from your router to this PC
+#  3. Update the hostname below
+#  4. Start coordinator: uv run python -m dain_coordinator
+#  5. Start Caddy: Deploy\caddy.exe run --config Deploy\Caddyfile
+#
+# The coordinator itself starts separately:
+#   cd Coordinator && uv run python -m dain_coordinator
 
-daintest.duckdns.org {
+myname.duckdns.org {
     reverse_proxy 127.0.0.1:8000
 }

@@ -7,7 +7,14 @@ heartbeat-timeout path runs in fractions of a second.
 import json
 
 import pytest
-from conftest import cpu_only_manifest, make_client, make_settings, register_payload, wait_for
+from conftest import (
+    ADMIN_HEADERS,
+    cpu_only_manifest,
+    make_client,
+    make_settings,
+    register_payload,
+    wait_for,
+)
 from dain_common.schemas import Envelope, Heartbeat, MessageType, MetricsReport
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
@@ -68,7 +75,7 @@ def test_register_low_score_rejected(client: TestClient, tmp_path) -> None:
         ).json()
     assert ack["accepted"] is False
     assert "score below minimum" in ack["reason"]
-    detail = client.get("/admin/nodes/node-weak").json()
+    detail = client.get("/admin/nodes/node-weak", headers=ADMIN_HEADERS).json()
     assert detail["state"] == "offline"
 
 
@@ -108,7 +115,7 @@ def test_heartbeat_updates_score_and_seq(client: TestClient) -> None:
         1,
         MetricsReport(gpu_util_pct=40.0, vram_free_gb=10.9, net_bw_mbps=290.0),
     )
-    detail = client.get("/admin/nodes/node-a").json()
+    detail = client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()
     assert detail["state"] == "online"
     assert detail["last_seq"] == 1
     assert detail["score"] is not None and 0.0 < detail["score"] < 1.0
@@ -120,13 +127,16 @@ def test_heartbeat_timeout_then_reregister(client: TestClient) -> None:
     """The S2 gate: register → ONLINE → silence → OFFLINE → re-register → ONLINE."""
     ack = client.post("/node/register", json=register_payload("node-a", auth_token=JOIN)).json()
     send_heartbeat(client, "node-a", ack["node_token"], 0)
-    assert client.get("/admin/nodes/node-a").json()["state"] == "online"
+    assert client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["state"] == "online"
 
     # Stop heartbeating: offline after 3 × 0.1 s (monitor ticks every 0.05 s).
     assert wait_for(
-        lambda: client.get("/admin/nodes/node-a").json()["state"] == "offline", timeout_s=2.0
+        lambda: client.get(
+            "/admin/nodes/node-a", headers=ADMIN_HEADERS
+        ).json()["state"] == "offline",
+        timeout_s=2.0,
     )
-    history = client.get("/admin/nodes/node-a").json()["history"]
+    history = client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["history"]
     assert any(h["to_state"] == "offline" and h["reason"] == "heartbeat_timeout" for h in history)
 
     # Re-register with the issued token → ONLINE, history preserved.
@@ -135,7 +145,7 @@ def test_heartbeat_timeout_then_reregister(client: TestClient) -> None:
     ).json()
     assert re_ack["accepted"] is True
     assert re_ack["node_token"] == ack["node_token"]
-    detail = client.get("/admin/nodes/node-a").json()
+    detail = client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()
     assert detail["state"] == "online"
     transitions = [(h["from_state"], h["to_state"], h["reason"]) for h in detail["history"]]
     assert ("online", "offline", "heartbeat_timeout") in transitions
@@ -151,8 +161,8 @@ def test_degraded_on_thermal_then_recovered(client: TestClient) -> None:
         0,
         MetricsReport(gpu_util_pct=40.0, temp_c=95.0),
     )
-    assert client.get("/admin/nodes/node-a").json()["state"] == "degraded"
-    history = client.get("/admin/nodes/node-a").json()["history"]
+    assert client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["state"] == "degraded"
+    history = client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["history"]
     assert any(h["to_state"] == "degraded" and h["reason"] == "thermal" for h in history)
 
     send_heartbeat(
@@ -162,7 +172,7 @@ def test_degraded_on_thermal_then_recovered(client: TestClient) -> None:
         1,
         MetricsReport(gpu_util_pct=40.0, temp_c=55.0),
     )
-    detail = client.get("/admin/nodes/node-a").json()
+    detail = client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()
     assert detail["state"] == "online"
     assert any(
         h["to_state"] == "online" and h["reason"] == "metrics_recovered" for h in detail["history"]
@@ -173,12 +183,12 @@ def test_overload_requires_sustained_strikes(client: TestClient) -> None:
     ack = client.post("/node/register", json=register_payload("node-a", auth_token=JOIN)).json()
     for seq in range(2):  # 2 strikes: below the default threshold of 3
         send_heartbeat(client, "node-a", ack["node_token"], seq, MetricsReport(gpu_util_pct=99.0))
-    assert client.get("/admin/nodes/node-a").json()["state"] == "online"
+    assert client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["state"] == "online"
     send_heartbeat(client, "node-a", ack["node_token"], 2, MetricsReport(gpu_util_pct=99.0))
-    assert client.get("/admin/nodes/node-a").json()["state"] == "degraded"
+    assert client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["state"] == "degraded"
     # A clean report resets strikes and recovers.
     send_heartbeat(client, "node-a", ack["node_token"], 3, MetricsReport(gpu_util_pct=30.0))
-    assert client.get("/admin/nodes/node-a").json()["state"] == "online"
+    assert client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["state"] == "online"
 
 
 # -- deregistration ---------------------------------------------------------------
@@ -194,18 +204,22 @@ def test_deregister_auth_and_states(client: TestClient) -> None:
 
     r = client.post("/node/deregister", json={"node_id": "node-a", "auth_token": ack["node_token"]})
     assert r.status_code == 200 and r.json()["ok"] is True
-    assert client.get("/admin/nodes/node-a").json()["state"] == "offline"
+    assert client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["state"] == "offline"
 
 
 def test_admin_listing_and_filters(client: TestClient) -> None:
     ack_b = client.post("/node/register", json=register_payload("node-b", auth_token=JOIN)).json()
     client.post("/node/register", json=register_payload("node-a", auth_token=JOIN))
     client.post("/node/deregister", json={"node_id": "node-b", "auth_token": ack_b["node_token"]})
-    all_nodes = client.get("/admin/nodes").json()
+    all_nodes = client.get("/admin/nodes", headers=ADMIN_HEADERS).json()
     assert {n["node_id"] for n in all_nodes} == {"node-a", "node-b"}
-    online = client.get("/admin/nodes", params={"state": "online"}).json()
+    online = client.get(
+        "/admin/nodes", params={"state": "online"}, headers=ADMIN_HEADERS
+    ).json()
     assert [n["node_id"] for n in online] == ["node-a"]
-    assert client.get("/admin/nodes", params={"state": "bogus"}).status_code == 400
+    assert client.get(
+        "/admin/nodes", params={"state": "bogus"}, headers=ADMIN_HEADERS
+    ).status_code == 400
 
 
 def test_register_payload_is_wire_valid(client: TestClient) -> None:

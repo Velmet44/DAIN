@@ -38,6 +38,8 @@ from dain_sim.server import start_server, stop_server
 
 JOIN_TOKEN = "dain-dev-join-token"
 API_KEY = "dain-dev-key"
+ADMIN_KEY = "dain-dev-admin-key"
+ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
 
 
 def _spawn_env(port: int, workdir: str, node_id: str) -> dict[str, str]:
@@ -60,7 +62,7 @@ def _spawn_env(port: int, workdir: str, node_id: str) -> dict[str, str]:
 async def _wait_connected(client, base_url: str, count: int, timeout_s: float) -> None:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
-        listing = (await client.get(f"{base_url}/admin/nodes")).json()
+        listing = (await client.get(f"{base_url}/admin/nodes", headers=ADMIN_HEADERS)).json()
         if sum(1 for n in listing if n.get("connected")) >= count:
             return
         await asyncio.sleep(0.2)
@@ -161,6 +163,7 @@ async def run_chaos(
         monitor_tick_s=0.2,
         watchdog_tick_s=0.2,
         api_key=API_KEY,
+        admin_api_key=ADMIN_KEY,
         job_timeout_s=90.0,
         min_nodes=min_nodes,
         layers_per_node_target=layers_per_node_target,
@@ -323,7 +326,7 @@ async def _scenario_reject(client, base_url, procs, job_tokens, prompt) -> dict:
             procs[node_id].kill()
             await asyncio.to_thread(procs[node_id].wait)
     await asyncio.sleep(2.0)
-    listing = (await client.get(f"{base_url}/admin/nodes")).json()
+    listing = (await client.get(f"{base_url}/admin/nodes", headers=ADMIN_HEADERS)).json()
     online = sum(1 for n in listing if n["state"] == NodeState.ONLINE.value)
     status, _job = await _stream_and_view(client, base_url, 4, prompt)
     return {

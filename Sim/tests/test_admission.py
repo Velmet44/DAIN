@@ -20,6 +20,8 @@ from dain_sim.server import start_server, stop_server
 
 JOIN_TOKEN = "dain-dev-join-token"
 API_KEY = "dain-dev-key"
+ADMIN_KEY = "dain-dev-admin-key"
+ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
 
 
 def test_admission_under_load(tmp_path) -> None:
@@ -33,6 +35,7 @@ def test_admission_under_load(tmp_path) -> None:
             offline_after_missed=3,
             monitor_tick_s=0.25,
             api_key=API_KEY,
+            admin_api_key=ADMIN_KEY,
             job_timeout_s=60.0,
             queue_limit=3,
             max_concurrent_per_key=2,
@@ -60,8 +63,16 @@ def test_admission_under_load(tmp_path) -> None:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 deadline = time.monotonic() + 25.0
                 while time.monotonic() < deadline:
-                    listing = (await client.get(f"{server.base_url}/admin/nodes")).json()
-                    online = sum(1 for n in listing if n["state"] == NodeState.ONLINE.value)
+                    listing = (
+                        await client.get(
+                            f"{server.base_url}/admin/nodes",
+                            headers=ADMIN_HEADERS,
+                        )
+                    ).json()
+                    online = sum(
+                        1 for n in listing
+                        if n["state"] == NodeState.ONLINE.value
+                    )
                     if online >= 2:
                         break
                     await asyncio.sleep(0.25)
@@ -92,7 +103,12 @@ def test_admission_under_load(tmp_path) -> None:
                 # The pool recovers: both nodes ONLINE again (not stuck BUSY).
                 deadline = time.monotonic() + 15.0
                 while time.monotonic() < deadline:
-                    listing = (await client.get(f"{server.base_url}/admin/nodes")).json()
+                    listing = (
+                        await client.get(
+                            f"{server.base_url}/admin/nodes",
+                            headers=ADMIN_HEADERS,
+                        )
+                    ).json()
                     if all(n["state"] == NodeState.ONLINE.value for n in listing):
                         break
                     await asyncio.sleep(0.25)

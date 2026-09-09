@@ -16,6 +16,10 @@ from fastapi.testclient import TestClient
 from dain_coordinator.app import create_app
 from dain_coordinator.settings import CoordinatorSettings
 
+# Known test-only admin key used by all Coordinator unit tests.
+ADMIN_KEY = "dain-dev-admin-key"
+ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
+
 
 def gpu(**overrides: Any) -> GPUInfo:
     values = {
@@ -55,6 +59,7 @@ def make_settings(tmp_path, **overrides: Any) -> CoordinatorSettings:
         heartbeat_interval_s=0.1,
         offline_after_missed=3,
         monitor_tick_s=0.05,
+        admin_api_key=ADMIN_KEY,
         **overrides,
     )
 

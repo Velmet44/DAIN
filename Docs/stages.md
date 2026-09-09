@@ -45,7 +45,7 @@ directories. Each Python project is standalone: own `pyproject.toml`, `uv.lock`,
 DAIN/                        repo root: docs + config only
 ├── README.md · .gitignore · .gitattributes
 ├── Docs/                    spec.md · stages.md · log.md · pilot reports
-├── Deploy/                  .env.example, systemd units, hosting notes (VPS/Render/Netlify)
+├── Deploy/                  .env.example, systemd units, hosting notes (VPS/Render/GitHub Pages)
 ├── Builds/                  artifacts only (gitignored)
 ├── Client/                  React 18 + Vite + TypeScript SPA (own toolchain, arrives S9)
 ├── Common/                  dain-common: schemas, scoring, accounting (no I/O)
@@ -84,7 +84,7 @@ Runtime model (dev = everything on one machine):
 ## 4. Decision points (escalate to the human; everything else is the agent's call)
 
 - **S0**: repo layout & toolchain approval (this document).
-- **S9**: hosting credentials — Netlify account, coordinator host (user VPS vs Render),
+- **S9**: hosting credentials — GitHub Pages, coordinator host (user VPS or home PC),
   domain, API-key policy.
 - **S10**: GPU pilot participants, acceptance of Qwen/Qwen3 model licenses, power telemetry
   availability.
@@ -102,7 +102,7 @@ Runtime model (dev = everything on one machine):
 | S6 | Scoring-driven scheduling, top-K, backups, queueing | ✅ 2026-09-09 |
 | S7 | Fault tolerance & degraded mode | ✅ 2026-09-09 |
 | S8 | Accounting ledger | ✅ 2026-09-09 |
-| S9 | Web client + deployment (Netlify + public coordinator) | ☐ |
+| S9 | Web client + deployment (GitHub Pages + public coordinator) | ✅ 2026-09-09 |
 | S10 | GPU pilot & measurement campaign | ☐ |
 | S11 | (Stretch) MoE expert placement — OLMoE-1B-7B | ☐ |
 
@@ -390,22 +390,22 @@ Do NOT: payments, settlement, crypto, price configuration.
 
 ### S9 — Web client + deployment
 
-**Goal:** public system: chat UI + dashboard on Netlify, coordinator reachable on the
+**Goal:** public system: chat UI + dashboard on GitHub Pages, coordinator reachable on the
 public internet, one sim node attached.
 **Preconditions:** S8 green; human provided hosting credentials (§4).
 
 Tasks:
 1. `Client/`: React 18 + Vite + TS — chat view (SSE streaming, markdown rendering),
    dashboard view (nodes, scores, placements, active jobs from `/v1/nodes`), API-key entry.
-2. `Deploy/`: Netlify config (SPA fallback, env `VITE_API_URL`); coordinator deploy recipe
-   (systemd unit for a VPS **or** Render service, env template, HTTPS assumed at platform).
-3. CORS locked to the Netlify domain; rate limits on public API.
+2. `Deploy/`: GitHub Pages CI (`.github/workflows/deploy.yml`); coordinator deploy recipe
+   (Caddyfile for a home PC or VPS, env template, HTTPS assumed at platform).
+3. CORS locked to the GitHub Pages domain; rate limits on public API; admin API key auth.
 
 Checkpoints:
 ```bash
 cd Client && npm ci && npm run build          # builds clean, type-check passes
 npm run e2e                                    # local: browser chat streams from local cluster
-# deployed: https://<site>.netlify.app chat streams from https://<coord-host>/v1/completions
+# deployed: https://velmet44.github.io/DAIN/ chat streams from https://<coord-host>/v1/completions
 #           dashboard shows ≥1 ONLINE node with live score
 ```
 

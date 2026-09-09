@@ -1,11 +1,11 @@
-"""HTTP/WS surface (S2/S4): node registration + heartbeat WS, admin views,
+"""HTTP/WS surface (S2/S4/S9): node registration + heartbeat WS, admin views,
 client inference API (SSE), and the model store.
 
-Auth model (spec §11/§16, MVP): registration requires the shared join token and
+Auth model (spec §11/§16): registration requires the shared join token and
 returns a per-node token; WS connections authenticate with `node_id` + that
 token as query params; deregistration requires the node token; the /v1 client
-API requires an API key; /model/* requires node credentials. Admin endpoints
-are unauthenticated in dev (hardening lands with the public deployment, S9).
+API requires an API key; /model/* requires node credentials; /admin/* requires
+the admin API key (S9 hardening).
 """
 
 from __future__ import annotations
@@ -73,8 +73,21 @@ def require_node(request: Request) -> None:
         raise HTTPException(status_code=401, detail="invalid node credentials")
 
 
+def require_admin(request: Request) -> None:
+    """Admin API auth: requires the admin API key (X-Admin-Key header or Bearer token)."""
+    settings = request.app.state.settings
+    provided = request.headers.get("x-admin-key")
+    if provided is None:
+        auth = request.headers.get("authorization", "")
+        provided = auth.removeprefix("Bearer ").strip() or None
+    if provided is None or not secrets.compare_digest(provided, settings.admin_api_key):
+        raise HTTPException(status_code=401, detail="invalid admin key")
+
+
 node_router = APIRouter(prefix="/node", tags=["node"])
-admin_router = APIRouter(prefix="/admin", tags=["admin"])
+admin_router = APIRouter(
+    prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)]
+)
 v1_router = APIRouter(prefix="/v1", tags=["client"], dependencies=[Depends(require_api_key)])
 model_router = APIRouter(prefix="/model", tags=["model"], dependencies=[Depends(require_node)])
 ledger_router = APIRouter(

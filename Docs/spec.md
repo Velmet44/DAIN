@@ -544,7 +544,7 @@ Locked for the first implementation; changing a choice requires a written ration
 | Concern | Choice | Rationale |
 |---|---|---|
 | Client | React 18 + TypeScript + Vite, static SPA | SSE-streaming chat UI + node dashboard; static build deploys anywhere free; strong tooling |
-| Client hosting | Netlify (static) | Free tier, trivial CI deploys, SSE passthrough works; Render is the fallback |
+| Client hosting | GitHub Pages (static) | Free tier, trivial CI deploys, SSE passthrough works; Render is the fallback |
 | Coordinator | Python 3.11+, FastAPI + Uvicorn, pydantic v2, `websockets` | Orchestration is I/O-bound (no primary compute); async-native SSE/WS; fastest iteration |
 | Coordinator state | SQLite (WAL) → Postgres post-MVP | Zero-ops on a VPS; schema kept portable for the HA path (§5) |
 | Node agent | Python 3.11+, asyncio, PyTorch + transformers, psutil | GPU math runs in CUDA — Python only orchestrates and serializes; one language shares protocol code with the coordinator |
