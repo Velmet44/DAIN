@@ -11,6 +11,15 @@ A coordinator-orchestrated inference network that partitions one large model
 
 Requires [uv](https://docs.astral.sh/uv/) and [Node.js 18+](https://nodejs.org).
 
+### Option A: One-click launcher
+
+Double-click **`start.bat`** — it opens 3 terminals (coordinator, node, web client)
+and launches the browser. Optionally set API keys when prompted (defaults work).
+
+To stop everything: double-click **`stop.bat`**.
+
+### Option B: Manual (3 terminals)
+
 ```bash
 # 1. Bootstrap everything (one-time)
 powershell -ExecutionPolicy Bypass -File bootstrap.ps1
