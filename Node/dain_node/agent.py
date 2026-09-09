@@ -32,6 +32,7 @@ from dain_common.schemas import (
     MetricsReport,
     Register,
     RegisterAck,
+    StageRetry,
     parse_payload,
 )
 from websockets.exceptions import ConnectionClosed, WebSocketException
@@ -263,6 +264,9 @@ class NodeAgent:
         elif envelope.type == MessageType.ACTIVATION_RELAY:
             assert isinstance(payload, ActivationRelayHeader)
             await self.handler.on_activation_header(payload)
+        elif envelope.type == MessageType.STAGE_RETRY:
+            assert isinstance(payload, StageRetry)
+            await self.handler.on_stage_retry(payload)
         else:
             log.info("server_message node=%s type=%s", self.identity.node_id, envelope.type.value)
 

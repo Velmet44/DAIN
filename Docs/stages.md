@@ -100,7 +100,7 @@ Runtime model (dev = everything on one machine):
 | S4 | Single-node inference path (real model, streaming) | ✅ 2026-09-08 |
 | S5 | Distributed pipeline: partitioning + activation relay | ✅ 2026-09-09 |
 | S6 | Scoring-driven scheduling, top-K, backups, queueing | ✅ 2026-09-09 |
-| S7 | Fault tolerance & degraded mode | ☐ |
+| S7 | Fault tolerance & degraded mode | ✅ 2026-09-09 |
 | S8 | Accounting ledger | ☐ |
 | S9 | Web client + deployment (Netlify + public coordinator) | ☐ |
 | S10 | GPU pilot & measurement campaign | ☐ |
@@ -333,6 +333,22 @@ cd Sim && uv run pytest tests/test_chaos_matrix.py -q     # scripted: kill 1 mid
 ```
 
 Do NOT: coordinator HA, cross-node KV migration, consensus.
+
+**Shipped (2026-09-09):**
+- `Coordinator/dain_coordinator/faults.py` — `FaultManager`: `handle_node_lost` (WS disconnect /
+  heartbeat eviction), `tick()` stage watchdog (deadline = 4 × p99 clamped to
+  [stage_deadline_min_s, stage_deadline_max_s]), `_reassign` picking warm backups
+  (online + connected + not already on this job) with per-stage `attempt` counter
+  (max `max_stage_attempts`), `StageRetry` fired at the upstream to replay the buffered prefix.
+- Degraded serving: recompute runs pool-recompute under `min_nodes` so <K-but-healthy pools
+  keep serving; jobs that exhaust retries / have no backup fail cleanly (job FAILED, API 429/503).
+- Node replay: `on_stage_retry` + `_bootstrap_stage` build the reassigned stage then feed the
+  buffered activation through `_run_step` — non-entry replacements resume from the completed
+  prefix instead of stalling; relay buffer only held for hidden roles (sampled_token upstream
+  was clobbering the replay buffer).
+- `Sim/dain_sim/chaos.py` — `run_chaos(...)` harness with deterministic kill schedule
+  (`--nodes N --kill-at T:nodeID [--expect complete|degraded|reject] --tokens`), per-node logs,
+  job-view verification; `Sim/tests/test_chaos_matrix.py` gates the 4 checkpoints below.
 
 ---
 

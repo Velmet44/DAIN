@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import AsyncIterator
 
 from dain_common.logging_setup import configure_logging
@@ -13,12 +14,26 @@ from fastapi import FastAPI
 
 from dain_coordinator.api import admin_router, model_router, node_router, v1_router
 from dain_coordinator.connections import NodeConnections
+from dain_coordinator.faults import FaultManager
 from dain_coordinator.jobs import ActivationRelay, JobTracker
 from dain_coordinator.monitor import HeartbeatMonitor
 from dain_coordinator.nodes import NodeService
 from dain_coordinator.partition import PlacementRecorder, recompute_pool
 from dain_coordinator.settings import CoordinatorSettings
 from dain_coordinator.store import SQLiteRegistry
+
+log = logging.getLogger("dain.coordinator.app")
+
+
+async def _watchdog_loop(faults, settings: CoordinatorSettings) -> None:
+    """Background stage-watchdog task (spec §13 detection)."""
+    while True:
+        await asyncio.sleep(settings.watchdog_tick_s)
+        try:
+            await faults.tick()
+        except Exception:
+            # The watchdog must survive any transient error.
+            log.exception("watchdog_tick_failed")
 
 
 def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
@@ -34,6 +49,7 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
         jobs = JobTracker()
         relay = ActivationRelay(connections)
         placements = PlacementRecorder()
+        faults = FaultManager(settings, jobs, connections, registry, service)
 
         def recompute_pool_events(trigger: str) -> None:
             """Spec §12: recompute placement on join/leave/DEGRADED transitions.
@@ -58,30 +74,37 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
                     min_k=settings.min_stages,
                     max_k=settings.max_stages,
                     backup_count=settings.backup_count,
+                    min_nodes=settings.min_nodes,
                     trigger=trigger,
                     recorder=placements,
                 )
 
         connections.on_disconnect = lambda node_id: (
-            jobs.fail_jobs_of_node(node_id, "node connection lost"),
+            faults.handle_node_lost(node_id),
             recompute_pool_events("leave"),
         )
         service.on_pool_change = lambda node_id, to_state: recompute_pool_events(
             "degraded" if to_state == NodeState.DEGRADED else "recovered"
         )
+        service.on_node_lost = faults.handle_node_lost
         app.state.registry = registry
         app.state.service = service
         app.state.connections = connections
         app.state.jobs = jobs
         app.state.relay = relay
         app.state.placements = placements
+        app.state.faults = faults
         app.state.recompute_pool = recompute_pool_events
         monitor = HeartbeatMonitor(service, settings)
         task = asyncio.create_task(monitor.run(), name="heartbeat-monitor")
+        watchdog = asyncio.create_task(_watchdog_loop(faults, settings), name="stage-watchdog")
         yield
         task.cancel()
+        watchdog.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
+        with contextlib.suppress(asyncio.CancelledError):
+            await watchdog
         registry.close()
 
     app = FastAPI(title="DAIN Coordinator", version="0.1.0", lifespan=lifespan)

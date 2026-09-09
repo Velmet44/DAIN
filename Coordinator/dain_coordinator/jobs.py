@@ -324,9 +324,15 @@ class ActivationRelay:
             ok = await self.connections.send_bytes(target, payload)
         if ok:
             self.relayed_bytes += len(payload)
-        elif job.state == JobState.RETRYING:
-            # Recovery is mid-reassignment for this job; the retried stage's
-            # upstream will re-send once the replacement is in place (§13).
-            log.info("relay_suppressed_during_retry job=%s target=%s", header.job_id, target)
-        else:
-            jobs.fail_job(header.job_id, f"relay target node {target} unreachable")
+            return
+        # Target unreachable. Stage/node-level failure is the FaultManager's
+        # job (spec §13): it detects the loss (disconnect/OFFLINE) or stall
+        # (watchdog) and reassigns the stage onto a backup. Failing the whole
+        # job here would pre-empt a recoverable retry, so we just record it.
+        log.warning(
+            "relay_target_unreachable job=%s target=%s stage=%d role=%s",
+            header.job_id,
+            target,
+            header.stage_idx,
+            header.role,
+        )

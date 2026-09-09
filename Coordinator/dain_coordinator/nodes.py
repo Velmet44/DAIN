@@ -70,6 +70,9 @@ class NodeService:
         # composition* changes for scheduling purposes (DEGRADED entry/recovery,
         # spec §12 placement recompute on DEGRADED transitions).
         self.on_pool_change: Callable[[str, NodeState], None] | None = None
+        # Set by the app: callable(node_id) fired when a node is evicted to
+        # OFFLINE by the heartbeat monitor (S7 fault reassignment on node loss).
+        self.on_node_lost: Callable[[str], None] | None = None
 
     # -- scoring ---------------------------------------------------------------
 
@@ -312,6 +315,12 @@ class NodeService:
             if now - row.heartbeat_ref() > self.settings.offline_timeout_s:
                 if self.transition(row.node_id, NodeState.OFFLINE, "heartbeat_timeout"):
                     evicted.append(row.node_id)
+        for node_id in evicted:
+            if self.on_node_lost is not None:
+                try:
+                    self.on_node_lost(node_id)
+                except Exception:  # noqa: BLE001 — observability hooks must not break the loop
+                    log.exception("on_node_lost_hook_failed node=%s", node_id)
         return evicted
 
     # -- WS message dispatch ----------------------------------------------------------

@@ -315,3 +315,57 @@ Format: what was done, decisions made, deviations from Docs/stages.md, gate resu
   and consumed for reassignment in S7.
 - Next: **S7 — Fault tolerance & degraded mode** (stage watchdog, retry with attempt
   counter, backup reassignment, degraded re-partition, `dain_sim.chaos`).
+
+## 2026-09-09 — S7: Fault tolerance & degraded mode
+
+- **`Coordinator/dain_coordinator/faults.py`** — new `FaultManager` (spec §13):
+  - `handle_node_lost(node_id)`: fires on WS disconnect and on heartbeat-timeout OFFLINE
+    eviction (wired via `connections.on_disconnect` + new `service.on_node_lost` hook in
+    `nodes.py`). Re-assigns **every in-flight stage** hosted on the lost node.
+  - `tick()`: stage watchdog — a stage with no progress for `4 × p99(stage latency)`
+    (clamped to `[stage_deadline_min_s, stage_deadline_max_s]`) is reassigned; a whole-job
+    stall (no token at all since dispatch) restarts from the prompt, bounded by
+    `max_job_restarts`.
+  - `_reassign`: picks a warm backup (ONLINE + live WS + not already on this job), re-sends
+    `JOB_ASSIGN` for the reassigned stage, marks `RETRYING`, increments the per-stage
+    `attempt` (max `max_stage_attempts`), and fires `STAGE_RETRY` at the upstream so the
+    completed prefix is replayed instead of restarting from the prompt.
+  - Idempotency contract: `(job_id, stage_idx, attempt)` stays unique across retries —
+    the S8 ledger uniqueness key.
+- Fixes uncovered by S7 bring-up:
+  - **`dataclasses.replace` vs `StageAssignment`**: `StageAssignment` is a pydantic model,
+    so replacement now uses `model_copy(update={"node_id": replacement})`.
+  - **`recompute_pool` latent bug**: `recompute_pool_events` in `app.py` was calling
+    `recompute_pool` without the required `min_nodes=` keyword (S6 latent) — now explicit.
+  - **Non-entry replacement stall (root cause of the S7 saga)**: on reassignment,
+    `on_job_assign` queued buffered `_early` activations into `rt.inbound`, but only the
+    ENTRY stage consumes `rt.inbound`; a non-entry (e.g. sampling-stage) replacement never
+    processed them → hung until the 90 s `job_timeout_s`. Fix: `_bootstrap_stage(rt,
+    buffered)` builds the stage then feeds each buffered activation through `_run_step`.
+  - **Replay-buffer clobbering**: `_send_activation` now buffers only `role=="hidden"`
+    activations; upstream `sampled_token` relays were overwriting the replay buffer with
+    the token result, so `on_stage_retry` had nothing to replay.
+  - `relay.route` defers with a warning (`relay_target_unreachable`) instead of failing the
+    job when a stage node has just died — the watchdog/reassign path owns recovery.
+- **`Sim/dain_sim/chaos.py`** — rewritten as a harness: `run_chaos(...)` returns a report;
+  `_scenario_complete` streams a job then kills the sampling-stage node at the first token
+  and asserts completion + unique `_attempt` keys; `_scenario_degraded` serves with 3 of 8
+  nodes; `_scenario_reject` expects clean 429/503 below `min_nodes`. `main()` CLI:
+  `--nodes N --kill-at T:nodeID --expect complete|degraded|reject --tokens`. Node
+  subprocesses log to per-node `<node_id>.log` with `PYTHONUNBUFFERED=1` (nodes' own log
+  lines are otherwise invisible in captured test output).
+- **`Sim/tests/test_chaos_matrix.py`** (4 new checkpoint tests): kill 1 of 6 mid-job →
+  completes via backup (single stage-3 retry, verified: `retries={'3': 1}`); kill 3 of 8 →
+  degraded serving continues; kill below `min_nodes` → clean rejection; no duplicate ledger
+  `attempt` keys across the run.
+- Gates: Common 43, Coordinator 30, Node 15, Sim 11 (7 + 4 new) — all green, ruff clean.
+  First full-suite Sim run flaked `test_pipeline_parity`/`test_single_node_e2e` on
+  4-core contention (node WS attach racing the first POST → no connected node → 429);
+  both pass standalone and on a clean full-suite rerun. No code change needed — the
+  per-test `wait_connected` + the first-request path are already state-based.
+- Decisions: reassignment is single-stage (only the failed stage onward is recomputed;
+  the completed prefix is replayed from the upstream's buffer — never a full restart unless
+  the KV-holding/entry node is lost); no coordinator HA / cross-node KV migration / consensus
+  (spec §13 explicitly out of scope for S7).
+- Next: **S8 — Accounting ledger** (`(job_id, stage_idx, attempt)` keys, token/score
+  accounting, settle on completion).

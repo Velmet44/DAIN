@@ -27,6 +27,7 @@ from dain_common.schemas import (
     JobStatus,
     MessageType,
     ModelManifest,
+    StageRetry,
     TokenBatch,
 )
 
@@ -171,7 +172,12 @@ class JobHandler:
             n_bytes=len(tensor_bytes),
             is_final=is_final,
         )
-        rt.buffered = (header, tensor_bytes)  # held until acked (S7 replay)
+        # Buffer only downstream (hidden) activations for S7 replay. Upstream
+        # `sampled_token` returns must NOT clobber this: the replay to a
+        # reassigned downstream stage must always be the hidden activation it
+        # was last asked to process, never a token flowing back toward entry.
+        if role == "hidden":
+            rt.buffered = (header, tensor_bytes)  # held until acked (S7 replay)
         await self._emit(Envelope.wrap(MessageType.ACTIVATION_RELAY, header, ts=time.time()))
         await self._emit_bytes(tensor_bytes)
 
@@ -217,12 +223,19 @@ class JobHandler:
             started_at=time.time(),
         )
         self.jobs[job.job_id] = rt
-        for header, payload in self._early.pop(job.job_id, []):
-            await rt.inbound.put((header, payload))
+        buffered = self._early.pop(job.job_id, [])
         if job.my_stage_idx == 0:
+            for header, payload in buffered:
+                await rt.inbound.put((header, payload))
             rt.task = asyncio.create_task(self._run_entry(rt), name=f"entry-{job.job_id}")
         else:
-            rt.task = asyncio.create_task(self._build_stage(rt), name=f"stage-{job.job_id}")
+            # Non-entry stage: activations that arrived before this runtime was
+            # created (a reassigned stage resuming a stream, S7) were queued in
+            # `_early`. Build the stage, then feed each through the normal step
+            # path so a replacement picks up exactly where the failed stage stopped.
+            rt.task = asyncio.create_task(
+                self._bootstrap_stage(rt, buffered), name=f"stage-{job.job_id}"
+            )
 
     async def on_activation_header(self, header: ActivationRelayHeader) -> None:
         self._pending_header = header
@@ -255,6 +268,50 @@ class JobHandler:
         await self._status(rt, JobState.RUNNING, detail="step_ack")
         asyncio.create_task(self._run_step(rt, header, payload), name=f"step-{header.job_id}")
 
+    async def on_stage_retry(self, retry: StageRetry) -> None:
+        """Coordinator asks us (the failed stage's *upstream*) to replay the
+        activation we are still buffering, so the replacement stage can resume
+        from the completed prefix (spec §13). We are the upstream iff
+        `my_stage_idx == retry.stage_idx - 1`.
+
+        Re-sending increments the header's `attempt` to match the retry counter
+        and routes through the normal relay path, which now points at the
+        reassigned node.
+        """
+        rt = self.jobs.get(retry.job_id)
+        if rt is None or rt.buffered is None:
+            log.warning("stage_retry_ignored job=%s retry_stage=%d", retry.job_id, retry.stage_idx)
+            return
+        if not retry.stage_idx or rt.job.my_stage_idx != retry.stage_idx - 1:
+            log.info(
+                "stage_retry_not_upstream job=%s my_stage=%d retry_stage=%d",
+                retry.job_id,
+                rt.job.my_stage_idx,
+                retry.stage_idx,
+            )
+            return
+        header, payload = rt.buffered
+        replayed = ActivationRelayHeader(
+            job_id=header.job_id,
+            stage_idx=header.stage_idx,
+            attempt=retry.attempt,
+            seq=header.seq,
+            dtype=header.dtype,
+            role=header.role,
+            shape=header.shape,
+            n_bytes=header.n_bytes,
+            is_final=header.is_final,
+        )
+        log.info(
+            "stage_replay job=%s stage=%d attempt=%d bytes=%d",
+            retry.job_id,
+            header.stage_idx,
+            retry.attempt,
+            len(payload),
+        )
+        await self._emit(Envelope.wrap(MessageType.ACTIVATION_RELAY, replayed, ts=time.time()))
+        await self._emit_bytes(payload)
+
     # -- stage execution --------------------------------------------------------------
 
     async def _build_stage(self, rt: JobRuntime) -> StageModel:
@@ -266,6 +323,19 @@ class JobHandler:
         rt.stage = stage
         stage.begin_job()
         return stage
+
+    async def _bootstrap_stage(self, rt: JobRuntime, buffered: list) -> None:
+        """Build a reassigned stage, then replay any activations that arrived
+        before this runtime existed (S7: a replacement resumes mid-stream)."""
+        try:
+            await self._build_stage(rt)
+            for header, payload in buffered:
+                await self._run_step(rt, header, payload)
+        except Exception:  # noqa: BLE001 — surface the failure to the client
+            log.exception("stage_bootstrap_failed job=%s", rt.job.job_id)
+            if rt.last:
+                with contextlib.suppress(Exception):
+                    await self._send_tokens(rt, [], is_final=True, finish_reason="error")
 
     async def _run_entry(self, rt: JobRuntime) -> None:
         """Entry stage: owns the generation loop for the whole job."""
