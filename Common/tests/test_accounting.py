@@ -8,6 +8,7 @@ from dain_common import (
     LedgerEvent,
     TaskOutcome,
     credit,
+    estimate_prompt_tokens,
     flops_for_stages,
     flops_per_token,
     get_model,
@@ -38,7 +39,16 @@ def event(**overrides) -> LedgerEvent:
 
 
 def test_model_registry_reference_models() -> None:
-    assert set(MODELS) == {"tinyllama-1.1b", "qwen2.5-7b", "qwen3-32b", "olmoe-1b-7b"}
+    assert set(MODELS) == {
+        "dain-tiny-16L",
+        "tinyllama-1.1b",
+        "qwen2.5-7b",
+        "qwen3-32b",
+        "olmoe-1b-7b",
+    }
+    dev = MODELS["dain-tiny-16L"]
+    assert dev.layers == 16
+    assert dev.experts is None  # dense dev model
     olmoe = MODELS["olmoe-1b-7b"]
     assert olmoe.experts == 64
     assert olmoe.params_active < olmoe.params_total  # MoE: sparse activation
@@ -69,6 +79,15 @@ def test_flops_for_stages_rejects_bad_layer_count() -> None:
 def test_unknown_model_raises_keyerror() -> None:
     with pytest.raises(KeyError):
         get_model("gpt-99")
+
+
+def test_prompt_token_estimate_golden() -> None:
+    # ~4 chars per token, floor of 1 (coordinator-side tokens_in, spec §15).
+    assert estimate_prompt_tokens("") == 1
+    assert estimate_prompt_tokens("abcd") == 1
+    assert estimate_prompt_tokens("abcdefgh") == 2
+    assert estimate_prompt_tokens("Once upon a time") == 4  # 16 chars → 4 tokens
+    assert estimate_prompt_tokens("a" * 100) == 25
 
 
 # -- credit function (spec §15) -------------------------------------------------

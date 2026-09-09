@@ -17,6 +17,7 @@ import os
 import pathlib
 import secrets
 import time
+from typing import Literal
 
 from dain_common.schemas import (
     ActivationRelayHeader,
@@ -30,6 +31,7 @@ from dain_common.schemas import (
     NodeState,
     Register,
     RegisterAck,
+    TaskOutcome,
     TokenBatch,
 )
 from fastapi import (
@@ -75,6 +77,9 @@ node_router = APIRouter(prefix="/node", tags=["node"])
 admin_router = APIRouter(prefix="/admin", tags=["admin"])
 v1_router = APIRouter(prefix="/v1", tags=["client"], dependencies=[Depends(require_api_key)])
 model_router = APIRouter(prefix="/model", tags=["model"], dependencies=[Depends(require_node)])
+ledger_router = APIRouter(
+    prefix="/ledger", tags=["ledger"], dependencies=[Depends(require_api_key)]
+)
 
 
 class CompletionRequest(BaseModel):
@@ -442,6 +447,95 @@ def job_view(job_id: str, request: Request) -> dict:
     if view is None:
         raise HTTPException(status_code=404, detail="unknown job")
     return view
+
+
+# -- ledger API (S8, spec §15) ---------------------------------------------------
+
+
+def _ledger(request: Request):
+    return request.app.state.ledger  # type: ignore[no-any-return]
+
+
+@ledger_router.get("/node/{node_id}")
+def ledger_node(node_id: str, request: Request) -> list[dict]:
+    return _ledger(request).events_for_node(node_id)
+
+
+@ledger_router.get("/summary")
+def ledger_summary(request: Request, since: float | None = None) -> dict:
+    events = _ledger(request).events_all(since=since)
+    totals: dict[str, dict] = {}
+    for event in events:
+        bucket = totals.setdefault(
+            event["node_id"],
+            {
+                "events": 0,
+                "tokens_in": 0,
+                "tokens_out": 0,
+                "flops_est": 0.0,
+                "compute_seconds": 0.0,
+                "credits": 0.0,
+                "success": 0,
+                "retried_away": 0,
+                "failed": 0,
+                "flagged": 0,
+            },
+        )
+        bucket["events"] += 1
+        bucket["tokens_in"] += event["tokens_in"]
+        bucket["tokens_out"] += event["tokens_out"]
+        bucket["flops_est"] += event["flops_est"]
+        bucket["compute_seconds"] += event["compute_seconds"]
+        bucket["credits"] += event["credit"]
+        bucket["success"] += event["outcome"] == TaskOutcome.SUCCESS.value
+        bucket["retried_away"] += event["outcome"] == TaskOutcome.RETRIED_AWAY.value
+        bucket["failed"] += event["outcome"] == TaskOutcome.FAILED.value
+        if not event["verified"]:
+            bucket["flagged"] += 1
+    return {
+        "generated_at": time.time(),
+        "nodes": [
+            {"node_id": nid, **bucket}
+            for nid, bucket in sorted(totals.items())
+        ],
+        "totals": {
+            "events": sum(b["events"] for b in totals.values()),
+            "credits": round(sum(b["credits"] for b in totals.values()), 6),
+            "tokens_out": sum(b["tokens_out"] for b in totals.values()),
+            "flagged": sum(b["flagged"] for b in totals.values()),
+        },
+    }
+
+
+class ExportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    format: Literal["csv", "json"] = "json"
+    since: float | None = None
+
+
+@ledger_router.post("/export")
+def ledger_export(payload: ExportRequest, request: Request) -> Response:
+    rows = _ledger(request).events_all(since=payload.since)
+    if payload.format == "json":
+        return Response(
+            content=json.dumps(rows, indent=2),
+            media_type="application/json",
+            headers={"Content-Disposition": 'attachment; filename="ledger.json"'},
+        )
+    import csv
+    import io
+
+    buf = io.StringIO()
+    if rows:
+        writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": 'attachment; filename="ledger.csv"'},
+    )
 
 
 # -- model store (node-facing; spec §8/§11) ----------------------------------------

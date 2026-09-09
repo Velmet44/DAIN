@@ -12,10 +12,17 @@ from dain_common.model_store import list_models as shard_store_list
 from dain_common.schemas import ModelManifest, NodeState
 from fastapi import FastAPI
 
-from dain_coordinator.api import admin_router, model_router, node_router, v1_router
+from dain_coordinator.api import (
+    admin_router,
+    ledger_router,
+    model_router,
+    node_router,
+    v1_router,
+)
 from dain_coordinator.connections import NodeConnections
 from dain_coordinator.faults import FaultManager
 from dain_coordinator.jobs import ActivationRelay, JobTracker
+from dain_coordinator.ledger import Ledger
 from dain_coordinator.monitor import HeartbeatMonitor
 from dain_coordinator.nodes import NodeService
 from dain_coordinator.partition import PlacementRecorder, recompute_pool
@@ -50,6 +57,7 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
         relay = ActivationRelay(connections)
         placements = PlacementRecorder()
         faults = FaultManager(settings, jobs, connections, registry, service)
+        ledger = Ledger(settings, registry, jobs)
 
         def recompute_pool_events(trigger: str) -> None:
             """Spec §12: recompute placement on join/leave/DEGRADED transitions.
@@ -87,6 +95,10 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
             "degraded" if to_state == NodeState.DEGRADED else "recovered"
         )
         service.on_node_lost = faults.handle_node_lost
+        jobs.on_terminal = ledger.emit_job_terminal
+        ledger.on_verification_flag = lambda node_id, note: service.apply_verification_penalty(
+            node_id, note
+        )
         app.state.registry = registry
         app.state.service = service
         app.state.connections = connections
@@ -94,6 +106,7 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
         app.state.relay = relay
         app.state.placements = placements
         app.state.faults = faults
+        app.state.ledger = ledger
         app.state.recompute_pool = recompute_pool_events
         monitor = HeartbeatMonitor(service, settings)
         task = asyncio.create_task(monitor.run(), name="heartbeat-monitor")
@@ -113,6 +126,7 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
     app.include_router(admin_router)
     app.include_router(v1_router)
     app.include_router(model_router)
+    app.include_router(ledger_router)
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:

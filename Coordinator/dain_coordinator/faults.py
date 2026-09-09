@@ -172,6 +172,9 @@ class FaultManager:
 
         attempts += 1
         job.retries[stage_idx] = attempts
+        # S8 (spec §15): the ledger attributes the abandoned attempt to the node
+        # that actually served it; the replacement runs the next attempt.
+        job.attempt_nodes[(stage_idx, attempts - 1)] = failed_node
         new_stages = tuple(
             (
                 job.stages[i].model_copy(update={"node_id": replacement})

@@ -25,7 +25,19 @@ class ModelSpec:
 
 
 # Reference models (spec §18). Values match Docs/spec.md §9 feasibility notes.
+# `dain-tiny-16L` is the hermetic dev model (16 layers, hidden 64, byte-level
+# vocab) the simulator partitions across nodes; its parameter count is a
+# first-order constant measured from the generated Llama config.
 MODELS: dict[str, ModelSpec] = {
+    "dain-tiny-16L": ModelSpec(
+        model_id="dain-tiny-16L",
+        name="DAIN tiny dev model",
+        layers=16,
+        hidden=64,
+        params_total=3.1e5,
+        params_active=3.1e5,
+        kv_dim=64,
+    ),
     "tinyllama-1.1b": ModelSpec(
         model_id="tinyllama-1.1b",
         name="TinyLlama-1.1B",
@@ -90,6 +102,17 @@ def flops_for_stages(model_id: str, n_layers: int, tokens: int) -> float:
     if tokens < 0:
         raise ValueError("tokens must be >= 0")
     return 2.0 * (spec.params_active / spec.layers) * n_layers * tokens
+
+
+def estimate_prompt_tokens(prompt: str) -> int:
+    """Deterministic coordinator-side `tokens_in` estimate for the ledger.
+
+    The coordinator has no tokenizer, so it approximates English text at
+    ~4 chars/token (a standard heuristic) with a floor of 1. It is computed
+    from the prompt the coordinator itself received — never node-claimed —
+    so `tokens_in` stays consistent with the client-visible length check (§15).
+    """
+    return max(1, (len(prompt) + 3) // 4)
 
 
 @dataclass(frozen=True)

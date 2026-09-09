@@ -88,6 +88,57 @@ def _attempt_keys(job: dict) -> list[tuple[int, int]]:
     return keys
 
 
+async def _reconcile_ledger(
+    client, base_url: str, job_id: str, attempt_keys: list, stages: list, retries: dict
+) -> dict:
+    """Cross-check the coordinator's accounting ledger (S8, §15) against the job
+    view: exactly one SUCCESS per (job, stage), earlier attempts RETRIED_AWAY,
+    rows unique + verified, and the summary/export APIs consistent."""
+    headers = {"X-API-Key": API_KEY}
+    summary = (await client.get(f"{base_url}/ledger/summary", headers=headers)).json()
+    rows = (
+        await client.post(f"{base_url}/ledger/export", headers=headers, json={"format": "json"})
+    ).json()
+    csv = await client.post(f"{base_url}/ledger/export", headers=headers, json={"format": "csv"})
+
+    job_rows = [r for r in rows if r["job_id"] == job_id]
+    success = [r for r in job_rows if r["outcome"] == "success"]
+    retried_away = [r for r in job_rows if r["outcome"] == "retried_away"]
+    failed = [r for r in job_rows if r["outcome"] == "failed"]
+    keys_rows = [(r["stage_idx"], r["attempt"]) for r in job_rows]
+    per_stage_success: dict[int, int] = {}
+    for r in success:
+        per_stage_success[r["stage_idx"]] = per_stage_success.get(r["stage_idx"], 0) + 1
+    node_credits = {n["node_id"]: n["credits"] for n in summary["nodes"]}
+
+    ok = (
+        summary["totals"]["events"] == len(rows)
+        and abs(sum(node_credits.values()) - sum(r["credit"] for r in rows)) < 1e-6
+        and len(job_rows) == len(attempt_keys)
+        and len(keys_rows) == len(set(keys_rows))
+        and len(per_stage_success) == len(stages)
+        and all(c == 1 for c in per_stage_success.values())
+        and all(r["credit"] > 0 for r in success)
+        and all(r["credit"] == 0.0 for r in failed)
+        and all(r["verified"] is True for r in job_rows)
+        and csv.status_code == 200
+        and csv.text.startswith("node_id,job_id")
+    )
+    return {
+        "ok": ok,
+        "attempt_keys": attempt_keys,
+        "events": len(rows),
+        "job_events": len(job_rows),
+        "success": len(success),
+        "retried_away": len(retried_away),
+        "failed": len(failed),
+        "per_stage_success": per_stage_success,
+        "unique_keys": len(keys_rows) == len(set(keys_rows)),
+        "node_credits": node_credits,
+        "csv_status": csv.status_code,
+    }
+
+
 async def run_chaos(
     *,
     node_count: int,
@@ -207,6 +258,9 @@ async def _scenario_complete(client, base_url, procs, job_tokens, prompt) -> dic
     result["attempt_keys_unique"] = len(keys) == len(set(keys))
     result["attempt_keys"] = keys
     result["completed"] = job.get("state") == "completed"
+    result["ledger"] = await _reconcile_ledger(
+        client, base_url, job_id or "", keys, job.get("stages") or [], job.get("retries") or {}
+    )
     return {"scenario": "complete", **result}
 
 

@@ -101,7 +101,7 @@ Runtime model (dev = everything on one machine):
 | S5 | Distributed pipeline: partitioning + activation relay | ✅ 2026-09-09 |
 | S6 | Scoring-driven scheduling, top-K, backups, queueing | ✅ 2026-09-09 |
 | S7 | Fault tolerance & degraded mode | ✅ 2026-09-09 |
-| S8 | Accounting ledger | ☐ |
+| S8 | Accounting ledger | ✅ 2026-09-09 |
 | S9 | Web client + deployment (Netlify + public coordinator) | ☐ |
 | S10 | GPU pilot & measurement campaign | ☐ |
 | S11 | (Stretch) MoE expert placement — OLMoE-1B-7B | ☐ |
@@ -372,6 +372,17 @@ cd Sim && uv run pytest tests/test_ledger_reconcile.py -q    # replay S7 chaos s
    # SUCCESS event per (job, stage); FAILED/RETRIED_AWAY outcomes weighted per spec §15
 cd Common && uv run pytest tests/test_accounting.py -q       # credit golden tests
 ```
+
+**Status ✅ 2026-09-09** — Ledger live (§15): coordinator emits one append-only row per
+`(job_id, stage_idx, attempt)` on terminal jobs (idempotent — store `UNIQUE` key + `INSERT OR
+IGNORE`, guarded once per job via `ledger_emitted`). FLOPs are coordinator-derived
+(`flops_for_stages`), token counts from the coordinator's own stream (`tokens_out`) and a
+deterministic prompt estimate (`estimate_prompt_tokens`); nodes never self-report (`energy_kwh_est`
+left null). Outcomes per §15: exactly one SUCCESS per finished stage, earlier attempts RETRIED_AWAY
+(×0.2), unfinished stages FAILED (×0.0). Verification cross-checks stage wall time vs the p99
+window (>15 s and >10× p99) and flags score penalties. API: `GET /ledger/node/{id}`,
+`GET /ledger/summary`, `POST /ledger/export` (CSV/JSON). Nodes: 6 new unit tests (Coordinator 36),
+reconcile after a real retry storm (`test_ledger_reconcile`), Common 44, Node 15, Sim 12.
 
 Do NOT: payments, settlement, crypto, price configuration.
 

@@ -292,6 +292,22 @@ class NodeService:
         """Scheduler-facing (S6): ONLINE → BUSY on workload assignment."""
         return self.transition(node_id, NodeState.BUSY, "workload_assigned")
 
+    def apply_verification_penalty(self, node_id: str, note: str) -> None:
+        """S8 (spec §15): a ledger verification flag drags the node's score down
+        by cutting its persisted uptime_ratio below the soft-penalty threshold
+        (scoring applies ×0.5 for uptime_ratio < min_uptime_soft on the next
+        metrics report). The raw value is pinned so repeated flags cap the
+        penalty at the configured soft_penalty."""
+        row = self.registry.get_node(node_id)
+        if row is None:
+            log.warning("verification_penalty_unknown node=%s", node_id)
+            return
+        row.uptime_ratio = min(
+            row.uptime_ratio, self.settings.scoring.min_uptime_soft * 0.75
+        )
+        self.registry.save_node(row)
+        log.warning("verification_penalty node=%s note=%r", node_id, note)
+
     def mark_online(self, node_id: str) -> bool:
         """Scheduler-facing (S6): BUSY → ONLINE when a job finishes."""
         return self.transition(node_id, NodeState.ONLINE, "job_finished")

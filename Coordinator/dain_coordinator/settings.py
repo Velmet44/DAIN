@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass, field
 
+from dain_common.accounting import CreditWeights
 from dain_common.config import ScoringConfig
 
 DEFAULT_JOIN_TOKEN = "dain-dev-join-token"
@@ -53,6 +54,8 @@ class CoordinatorSettings:
     max_job_restarts: int = 1
     min_nodes: int = 1
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
+    # S8 (spec §15): credit weights applied by the ledger (illustrative defaults).
+    accounting_weights: CreditWeights = field(default_factory=CreditWeights)
 
     @property
     def offline_timeout_s(self) -> float:

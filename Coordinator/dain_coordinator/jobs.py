@@ -12,6 +12,7 @@ import asyncio
 import logging
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from dain_common.schemas import (
@@ -54,6 +55,11 @@ class JobRecord:
     restarts: int = 0
     stage_last_activity: dict[int, float] = field(default_factory=dict)
     last_token_at: float | None = None
+    # S8 (spec §15): the ledger is emitted exactly once per terminal job;
+    # `attempt_nodes` records which node actually served each `(stage_idx,
+    # attempt)` so a retried stage logs against the node that ran the work.
+    ledger_emitted: bool = False
+    attempt_nodes: dict[tuple[int, int], str] = field(default_factory=dict)
 
 
 class StageLatencyStats:
@@ -90,6 +96,10 @@ class JobTracker:
         self.jobs: dict[str, JobRecord] = {}
         self._order: list[str] = []
         self.stage_stats = StageLatencyStats()
+        # Set by the app: called once when a job reaches a terminal state, so
+        # the S8 ledger can be emitted exactly once (S7 established the job
+        # tracker as a pure bookkeeper — side effects live elsewhere).
+        self.on_terminal: Callable[[JobRecord], None] | None = None
 
     def create(
         self,
@@ -134,6 +144,7 @@ class JobTracker:
         for stage in stages:
             job.stage_started_at.setdefault(stage.stage_idx, time.time())
             job.stage_last_activity[stage.stage_idx] = time.time()
+            job.attempt_nodes.setdefault((stage.stage_idx, 0), stage.node_id)
 
     def _push(self, job: JobRecord, frame: dict) -> None:
         if job.queue is not None:
@@ -148,8 +159,15 @@ class JobTracker:
             JobState.STREAMING,
         ):
             return  # activity, not a real transition
+        previous = job.state
         job.state = state
         log.info("job_state job=%s state=%s", job.job_id, state.value)
+        if (
+            state in (JobState.COMPLETED, JobState.FAILED)
+            and previous not in (JobState.COMPLETED, JobState.FAILED)
+            and self.on_terminal is not None
+        ):
+            self.on_terminal(job)
 
     def on_job_status(
         self, job_id: str, stage_idx: int, state: JobState, tokens_done: int, detail: str | None

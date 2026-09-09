@@ -369,3 +369,33 @@ Format: what was done, decisions made, deviations from Docs/stages.md, gate resu
   (spec §13 explicitly out of scope for S7).
 - Next: **S8 — Accounting ledger** (`(job_id, stage_idx, attempt)` keys, token/score
   accounting, settle on completion).
+
+## 2026-09-09 — S8: Accounting ledger (spec §15)
+
+- Implemented `Coordinator/dain_coordinator/ledger.py`: coordinator-side `Ledger` emits one
+  append-only event per `(job_id, stage_idx, attempt)` when a job reaches a terminal state
+  (wired via `JobTracker.on_terminal`, guarded once per job). Store adds a `ledger` table with
+  `UNIQUE(job_id, stage_idx, attempt)` + `INSERT OR IGNORE` → retry/replay storms never
+  double-count.
+- Trust model (§15/§16): `flops_est` computed from the Common FLOP tables
+  (`flops_for_stages`, no node-claimed numbers); `tokens_in` from `estimate_prompt_tokens`
+  (≈4 chars/token), `tokens_out` from the coordinator's own stream; `energy_kwh_est` left null
+  until node power telemetry lands. Outcomes: SUCCESS (final attempt of a finished stage, ×1.0),
+  RETRIED_AWAY (abandoned attempts, ×0.2, attributed to the node that actually ran them via
+  `attempt_nodes`), FAILED (unfinished stages, ×0.0). Credit weights configurable via
+  `settings.accounting_weights` (defaults match Common goldens).
+- Verification (§15): each stage's wall time cross-checked vs the p99 latency window; stages
+  >15 s and >10× p99 are flagged (`verified=false`, note) and fire a score-penalty hook
+  (`apply_verification_penalty` pins uptime below `min_uptime_soft × 0.75`). Thresholds loose
+  because 4-core contention legitimately stretches stages.
+- API: `GET /ledger/node/{id}`, `GET /ledger/summary` (per-node credit buckets + flagged
+  counts), `POST /ledger/export` (CSV/JSON), all behind the existing API key.
+- Tests: `Coordinator/tests/test_ledger.py` (6 — emission, dedupe, FAILED×0.0, verification
+  flags, summary/export/CSV, auth) and `Sim/tests/test_ledger_reconcile.py` (reconciles the
+  ledger over HTTP after a real retry storm in the S7 chaos scenario). Added `dain-tiny-16L`
+  ModelSpec + `estimate_prompt_tokens` + goldens in `Common/tests/test_accounting.py`.
+- Gates: Common 44, Coordinator 36 (30 + 6), Node 15, Sim 12 (11 + 1) — all green, ruff clean
+  across all four packages. One contended full-suite Sim flake of
+  `test_single_node_streaming_e2e` (node WS attach racing the first POST → 429) re-ran green;
+  parity test also verified solo.
+- Next: **S9 — Web client + deployment** (needs human-provided hosting credentials §4).

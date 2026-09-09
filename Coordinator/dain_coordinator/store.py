@@ -16,7 +16,7 @@ import threading
 import time
 from dataclasses import dataclass
 
-from dain_common.schemas import CapabilityManifest, MetricsReport, NodeState
+from dain_common.schemas import CapabilityManifest, LedgerEvent, MetricsReport, NodeState
 
 log = logging.getLogger("dain.coordinator.store")
 
@@ -46,6 +46,29 @@ CREATE TABLE IF NOT EXISTS state_history (
     ts          REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_state_history_node ON state_history (node_id, ts);
+CREATE TABLE IF NOT EXISTS ledger (
+    id              INTEGER PRIMARY KEY,
+    node_id         TEXT NOT NULL,
+    job_id          TEXT NOT NULL,
+    model_id        TEXT NOT NULL,
+    stage_idx       INTEGER NOT NULL,
+    attempt         INTEGER NOT NULL,
+    partition_id    TEXT NOT NULL,
+    tokens_in       INTEGER NOT NULL,
+    tokens_out      INTEGER NOT NULL,
+    flops_est       REAL NOT NULL,
+    compute_seconds REAL NOT NULL,
+    gpu_util_avg    REAL,
+    cpu_util_avg    REAL,
+    energy_kwh_est  REAL,
+    outcome         TEXT NOT NULL,
+    verified        INTEGER NOT NULL DEFAULT 1,
+    verification_note TEXT,
+    ts              REAL NOT NULL,
+    UNIQUE(job_id, stage_idx, attempt)
+);
+CREATE INDEX IF NOT EXISTS idx_ledger_node ON ledger (node_id, ts);
+CREATE INDEX IF NOT EXISTS idx_ledger_job ON ledger (job_id);
 """
 
 
@@ -187,6 +210,73 @@ class SQLiteRegistry:
             )
             for r in rows
         ]
+
+    # -- ledger (S8, spec §15) ------------------------------------------------------
+
+    def append_ledger(
+        self, event: LedgerEvent, *, verified: bool = True, note: str | None = None
+    ) -> bool:
+        """Append one ledger event, deduped on `(job_id, stage_idx, attempt)`.
+
+        Returns True when the row was inserted, False when a replay/retry
+        re-delivered an existing key (idempotency contract, §15).
+        """
+        with self._lock:
+            cur = self._require().execute(
+                """
+                INSERT OR IGNORE INTO ledger (
+                    node_id, job_id, model_id, stage_idx, attempt, partition_id,
+                    tokens_in, tokens_out, flops_est, compute_seconds,
+                    gpu_util_avg, cpu_util_avg, energy_kwh_est, outcome,
+                    verified, verification_note, ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    event.node_id,
+                    event.job_id,
+                    event.model_id,
+                    event.stage_idx,
+                    event.attempt,
+                    event.partition_id,
+                    event.tokens_in,
+                    event.tokens_out,
+                    event.flops_est,
+                    event.compute_seconds,
+                    event.gpu_util_avg,
+                    event.cpu_util_avg,
+                    event.energy_kwh_est,
+                    event.outcome.value,
+                    1 if verified else 0,
+                    note,
+                    event.ts,
+                ),
+            )
+            inserted = cur.rowcount > 0
+            self._require().commit()
+        return inserted
+
+    def ledger_rows(
+        self, *, node_id: str | None = None, since: float | None = None
+    ) -> list[dict]:
+        """Raw ledger rows as dicts (an id -> db row store; ordering by ts, id).
+
+        `since` filters to events at or after the epoch timestamp.
+        """
+        clauses: list[str] = []
+        params: list = []
+        if node_id is not None:
+            clauses.append("node_id = ?")
+            params.append(node_id)
+        if since is not None:
+            clauses.append("ts >= ?")
+            params.append(since)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        with self._lock:
+            cur = self._require().execute(
+                f"SELECT * FROM ledger {where} ORDER BY ts, id", params
+            )
+            rows = cur.fetchall()
+        return [dict(r) for r in rows]
 
     # -- helpers --------------------------------------------------------------------
 
