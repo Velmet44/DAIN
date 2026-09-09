@@ -1,17 +1,17 @@
-# DAIN bootstrap — rebuild the full dev environment from a fresh copy.
+# DAIN bootstrap - rebuild the full dev environment from a fresh copy.
 #
-# Run from anywhere inside the repo (it anchors on this file's location):
+# Run from anywhere inside the repo (this script anchors on its own location):
 #     powershell -ExecutionPolicy Bypass -File DAIN\bootstrap.ps1
 # Use -ModelStore <dir> to also export the tiny-llama shards into a folder
 # that a coordinator's DAIN_MODEL_STORE_DIR can point at.
 #
 # Prerequisites on the machine (not installed by this script):
-#   - Python-free: uv  (https://astral.sh/uv)  — drives all Python envs
-#   - Node.js 18+    (https://nodejs.org)      — drives the web client
-#   - git            (optional, only for updating)
+#   - uv (https://astral.sh/uv)     - drives every Python env
+#   - Node.js 18+ (https://nodejs.org) - drives the web client
+#   - git (optional, only to update)
 #
-# Idempotent: safe to re-run; everything resolves from committed lockfiles so
-# no machine-specific absolute paths are ever baked in.
+# Idempotent: safe to re-run; everything resolves from committed lockfiles, so
+# no machine-specific absolute paths are ever baked into the repo.
 
 param(
     [string]$ModelStore = ""
@@ -24,7 +24,7 @@ Write-Host "== DAIN bootstrap ==" -ForegroundColor Cyan
 
 if (-not (Get-Command uv -ErrorAction SilentlyContinue)) {
     Write-Host "uv not found. Install it first:" -ForegroundColor Red
-    Write-Host "  powershell -ExecutionPolicy ByPass -c `"irm https://astral.sh/uv/install.ps1 | iex`""
+    Write-Host '  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"'
     exit 1
 }
 if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
@@ -52,8 +52,8 @@ finally {
     Pop-Location
 }
 
-# --- Smoke test: every package importable from the Sim environment (which
-#     depends on all four as editable path packages) + build a tiny model ---
+# --- Smoke test: every package importable from the Sim environment (Sim
+#     depends on all four as editable path packages) and export tiny model ---
 Write-Host "smoke test: imports" -ForegroundColor Yellow
 & uv run --project (Join-Path $root "Sim") python -c "import dain_sim.cluster, dain_coordinator.app, dain_node.agent, dain_common; print('imports OK')"
 if ($LASTEXITCODE -ne 0) { exit 1 }
@@ -65,4 +65,4 @@ if ($ModelStore) {
     if ($LASTEXITCODE -ne 0) { exit 1 }
 }
 
-Write-Host "== bootstrap OK — environment is self-contained ==" -ForegroundColor Green
+Write-Host "== bootstrap OK - environment is self-contained ==" -ForegroundColor Green
