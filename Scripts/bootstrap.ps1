@@ -1,7 +1,7 @@
 # DAIN bootstrap - rebuild the full dev environment from a fresh copy.
 #
 # Run from anywhere inside the repo (this script anchors on its own location):
-#     powershell -ExecutionPolicy Bypass -File DAIN\bootstrap.ps1
+#     powershell -ExecutionPolicy Bypass -File DAIN\Scripts\bootstrap.ps1
 # Use -ModelStore <dir> to also export the tiny-llama shards into a folder
 # that a coordinator's DAIN_MODEL_STORE_DIR can point at.
 #
@@ -18,7 +18,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$root = $PSScriptRoot
+$root = Split-Path $PSScriptRoot -Parent
 
 Write-Host "== DAIN bootstrap ==" -ForegroundColor Cyan
 

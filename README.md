@@ -11,18 +11,24 @@ A coordinator-orchestrated inference network that partitions one large model
 
 Requires [uv](https://docs.astral.sh/uv/) and [Node.js 18+](https://nodejs.org).
 
-### Option A: One-click launcher
+### Option A: One script
 
-Double-click **`start.bat`** — it opens 3 terminals (coordinator, node, web client)
-and launches the browser. Optionally set API keys when prompted (defaults work).
+Run **`Scripts\start.ps1`**:
 
-To stop everything: double-click **`stop.bat`**.
+```powershell
+powershell -ExecutionPolicy Bypass -File Scripts\start.ps1
+```
+
+It opens the coordinator, N node agents, and the web client (as tabs in the
+same Windows Terminal window if you launch it from there, or in separate windows
+otherwise) and prompts for API keys when asked (Enter accepts the dev defaults).
+Stop everything with **Ctrl+C** in each window.
 
 ### Option B: Manual (3 terminals)
 
 ```bash
 # 1. Bootstrap everything (one-time)
-powershell -ExecutionPolicy Bypass -File bootstrap.ps1
+powershell -ExecutionPolicy Bypass -File Scripts\bootstrap.ps1
 
 # 2. Export the dev model (one-time)
 cd Node && uv run python -c "from dain_node.shard_export import export_tiny_llama; export_tiny_llama('../model_store')"

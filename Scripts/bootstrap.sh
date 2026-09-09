@@ -8,7 +8,7 @@
 # Idempotent; resolves only from committed lockfiles (no absolute paths baked in).
 
 set -euo pipefail
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 model_store=""
 while getopts "m:" opt; do
   case "$opt" in

@@ -32,7 +32,7 @@ class NodeSettings:
 
     @property
     def ws_base_url(self) -> str:
-        return self.coord_url.rstrip("/")
+        return self.coord_url.strip().rstrip("/")
 
     @classmethod
     def from_env(cls) -> NodeSettings:

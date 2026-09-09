@@ -1,6 +1,0 @@
-# DEPRECATED: DAIN uses GitHub Pages for client hosting (see .github/workflows/deploy.yml).
-# This file is retained only as a reference for alternative deployments. Safe to delete.
-[build]
-  base = "Client"
-  command = "npm ci && npm run build"
-  publish = "dist"

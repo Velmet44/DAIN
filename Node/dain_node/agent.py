@@ -165,10 +165,14 @@ class NodeAgent:
     async def run(self, stop_event: asyncio.Event) -> None:
         """Reconnect loop: each session = register + WS heartbeat exchange."""
         backoff = self.settings.reconnect_min_s
+        warmed_up = False
         while not stop_event.is_set():
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
                     await self.register(client)
+                if not warmed_up:
+                    await self.handler.warmup()
+                    warmed_up = True
                 await self._session(stop_event)
                 backoff = self.settings.reconnect_min_s  # clean session end
             except asyncio.CancelledError:
@@ -275,7 +279,6 @@ async def run_agent(settings: NodeSettings, handler: JobHandler) -> int:
     stop = StopGuard()
     stop.install()
     agent = NodeAgent(settings, handler)
-    await agent.handler.warmup()
     try:
         await agent.run(stop.event)
     finally:
