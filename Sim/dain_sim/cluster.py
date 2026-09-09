@@ -5,7 +5,11 @@ subprocesses, watches the registry for the requested duration, shuts everything
 down gracefully (SIGTERM/CTRL_BREAK → agents deregister), prints a health
 summary, and exits 0 only if the cluster was healthy throughout.
 
-Usage: uv run python -m dain_sim.cluster --nodes 12 --duration 60
+With `--chat` it instead runs an interactive REPL: prompts are streamed through
+the same distributed pipeline (`/v1/completions`, SSE) the coordinator serves.
+
+Usage: uv run python -m dain_sim.cluster --nodes 4 --duration 60
+       uv run python -m dain_sim.cluster --nodes 6 --chat
 """
 
 from __future__ import annotations
@@ -13,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -25,10 +30,12 @@ import httpx
 from dain_common.logging_setup import configure_logging
 from dain_common.schemas import NodeState
 from dain_coordinator.settings import CoordinatorSettings
+from dain_node.shard_export import DEV_MODEL_ID, export_tiny_llama
 
 from dain_sim.server import start_server, stop_server
 
 JOIN_TOKEN = "dain-dev-join-token"
+API_KEY = "dain-dev-key"
 
 
 @dataclass
@@ -76,6 +83,8 @@ def _node_env(
             "DAIN_NODE_ID": node_id,
             "DAIN_HEARTBEAT_S": str(heartbeat_s),
             "DAIN_NODE_STATE_PATH": os.path.join(workdir, "node_state.json"),
+            "DAIN_MODEL": DEV_MODEL_ID,
+            "DAIN_MODEL_CACHE": os.path.join(workdir, "shard_cache"),
             # Varied reported bandwidth exercises score differentiation.
             "DAIN_NET_BW_MBPS": str(150 + idx * 25),
             "PYTHONIOENCODING": "utf-8",
@@ -131,12 +140,82 @@ async def _summarize(server, procs: list[NodeProc]) -> ClusterReport:
     return ClusterReport(True, f"{len(procs)}/{len(procs)} nodes stable, clean shutdown", procs)
 
 
-async def run_cluster(nodes_n: int, duration_s: float, heartbeat_s: float, keep_dir: bool) -> int:
+async def _wait_online(client, base_url: str, timeout_s: float = 40.0) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        listing = (await client.get(f"{base_url}/admin/nodes")).json()
+        if sum(1 for n in listing if n["state"] == NodeState.ONLINE.value) >= 1:
+            return True
+        await asyncio.sleep(0.5)
+    return False
+
+
+async def _chat(client, base_url: str, max_tokens: int) -> None:
+    """Interactive REPL: stream each prompt through the real cluster pipeline."""
+    print("\n== chat ==")
+    print(
+        f"model={DEV_MODEL_ID} (hermetic test weights — output is proto-text), "
+        f"max_tokens={max_tokens}"
+    )
+    print("live across the spawned nodes; empty prompt quits.\n")
+    headers = {"X-API-Key": API_KEY}
+    while True:
+        try:
+            prompt = await asyncio.to_thread(input, "> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not prompt.strip():
+            break
+        frames: list[dict] = []
+        async with client.stream(
+            "POST",
+            f"{base_url}/v1/completions",
+            headers=headers,
+            json={
+                "model_id": DEV_MODEL_ID,
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "stream": True,
+            },
+        ) as response:
+            if response.status_code != 200:
+                body = (await response.aread()).decode("utf-8", errors="replace").strip()
+                print(f"[{response.status_code}] {body}")
+                continue
+            async for raw in response.aiter_lines():
+                if not raw.startswith("data: "):
+                    continue
+                payload = raw[len("data: ") :]
+                if payload == "[DONE]":
+                    break
+                frame = json.loads(payload)
+                frames.append(frame)
+                if frame.get("type") == "token" and frame.get("token"):
+                    print(frame["token"], end="", flush=True)
+        final = [f for f in frames if f.get("type") == "final"]
+        usage = final[0].get("usage") or {} if final else {}
+        print(f"\n[tokens={usage.get('tokens', len(frames))}]\n")
+
+
+async def run_cluster(
+    nodes_n: int,
+    duration_s: float,
+    heartbeat_s: float,
+    keep_dir: bool,
+    *,
+    chat: bool = False,
+    max_tokens: int = 40,
+) -> int:
     workdir_root = tempfile.mkdtemp(prefix="dain-cluster-")
     configure_logging()
 
+    store_dir = os.path.join(workdir_root, "model_store")
+    export_tiny_llama(store_dir)
+
     settings = CoordinatorSettings(
         db_path=os.path.join(workdir_root, "coordinator.sqlite3"),
+        model_store_dir=store_dir,
         heartbeat_interval_s=heartbeat_s,
     )
     server = await start_server(settings)
@@ -159,21 +238,28 @@ async def run_cluster(nodes_n: int, duration_s: float, heartbeat_s: float, keep_
 
     stop_at = time.monotonic() + duration_s
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            while time.monotonic() < stop_at:
-                await asyncio.sleep(min(2.0, max(0.5, duration_s / 20)))
-                response = await client.get(f"{server.base_url}/admin/nodes")
-                listing = response.json()
-                states = {n["node_id"]: n["state"] for n in listing}
-                online = sum(1 for s in states.values() if s == NodeState.ONLINE.value)
-                print(f"[cluster] t-{stop_at - time.monotonic():5.0f}s online={online}/{nodes_n}")
-                for proc in procs:
-                    if states.get(proc.node_id) == NodeState.OFFLINE.value:
-                        proc.saw_offline = True
-    except (httpx.HTTPError, OSError) as exc:
-        print(f"[cluster] ERROR while monitoring: {exc}")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if chat:
+                if not await _wait_online(client, server.base_url):
+                    raise AssertionError("no node came ONLINE before the chat timeout")
+                print(f"[cluster] {nodes_n} nodes ready — piping /v1/completions")
+                await _chat(client, server.base_url, max_tokens)
+            else:
+                while time.monotonic() < stop_at:
+                    await asyncio.sleep(min(2.0, max(0.5, duration_s / 20)))
+                    response = await client.get(f"{server.base_url}/admin/nodes")
+                    listing = response.json()
+                    states = {n["node_id"]: n["state"] for n in listing}
+                    online = sum(1 for s in states.values() if s == NodeState.ONLINE.value)
+                    time_left = stop_at - time.monotonic()
+                    print(f"[cluster] t-{time_left:5.0f}s online={online}/{nodes_n}")
+                    for proc in procs:
+                        if states.get(proc.node_id) == NodeState.OFFLINE.value:
+                            proc.saw_offline = True
+    except (httpx.HTTPError, OSError, AssertionError) as exc:
+        print(f"[cluster] ERROR: {exc}")
         await stop_server(server)
-        _print_result(2, "monitor failure", procs, keep_dir, workdir_root)
+        _print_result(2, "chat/monitor failure", procs, keep_dir, workdir_root)
         return 2
 
     # Graceful shutdown: agents deregister on SIGTERM/CTRL_BREAK.
@@ -200,10 +286,23 @@ def main() -> int:
     parser.add_argument("--duration", type=float, default=30.0, help="seconds to run")
     parser.add_argument("--heartbeat-s", type=float, default=5.0)
     parser.add_argument("--keep", action="store_true", help="keep temp artifacts (db, state files)")
+    parser.add_argument(
+        "--chat",
+        action="store_true",
+        help="interactive REPL: stream prompts through the cluster pipeline",
+    )
+    parser.add_argument("--max-tokens", type=int, default=40, help="max tokens per chat reply")
     args = parser.parse_args()
     try:
         return asyncio.run(
-            run_cluster(args.nodes, args.duration, args.heartbeat_s, keep_dir=args.keep)
+            run_cluster(
+                args.nodes,
+                args.duration,
+                args.heartbeat_s,
+                keep_dir=args.keep,
+                chat=args.chat,
+                max_tokens=args.max_tokens,
+            )
         )
     except KeyboardInterrupt:
         print("\n[cluster] interrupted")
