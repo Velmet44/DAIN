@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet("launcher", "coordinator", "node", "client", IgnoreCase = $true)]
     [string]$Mode = "launcher",
     [int]$NodeIndex = 1
@@ -9,22 +9,23 @@ param(
 #
 #  Fully self-contained: every path derives from this file's own location, so
 #  the whole repo folder can be copied anywhere (or to another Windows PC)
-#  and still work — there are no absolute paths baked in.
+#  and still work - there are no absolute paths baked in.
 #
-#  Run it three ways:
-#    powershell -ExecutionPolicy Bypass -File Scripts\start.ps1               # launcher (default)
-#    Double-click the file in Explorer (edit association as needed)            # launcher
-#    powershell -File Scripts\start.ps1 -Mode coordinator                      # one component
+#  Usage:
+#    powershell -ExecutionPolicy Bypass -File Scripts\start-samepc.ps1       # launcher (default)
+#    powershell -File Scripts\start-samepc.ps1 -Mode coordinator             # one component
 #
-#  The launcher starts the coordinator, N node agents, and the web client —
-#  each in its own window/tab. Stop everything with Ctrl+C in each window
-#  (or taskkill /IM python.exe /F as a last resort).
+#  The launcher starts the coordinator, N node agents, and the web client -
+#  each in its own window (or as a tab in this Windows Terminal window when
+#  the launcher is itself running inside Windows Terminal). Stop everything
+#  with Ctrl+C in each window.
 # ============================================================================
 
 $ErrorActionPreference = "Stop"
 
 # --- Self-contained root: parent of the Scripts folder this file lives in ---
-$script:ScriptsDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$script:ScriptPath = $PSCommandPath
+$script:ScriptsDir = Split-Path -Parent $script:ScriptPath
 $script:Root = Split-Path -Parent $script:ScriptsDir
 $script:ModelStore = Join-Path $script:Root "model_store"
 
@@ -118,7 +119,7 @@ $env:DAIN_API_KEY = $clientKey
 $env:DAIN_JOIN_TOKEN = $joinToken
 $env:DAIN_MODEL_STORE_DIR = $script:ModelStore
 
-# Spawn a component in its own window (or a tab when running inside Windows Terminal)
+# Spawn a component in its own window (or a tab in this WT window when inside WT)
 function Start-Component {
     param(
         [string]$Title,
@@ -126,42 +127,62 @@ function Start-Component {
         [int]$NodeIndex = 1
     )
     $childArgs = @(
-        "-NoExit",
+        "-NoProfile", "-NoExit",
         "-ExecutionPolicy", "Bypass",
-        "-File", "`"$($MyInvocation.MyCommand.Path)`"",
+        "-File", "`"$script:ScriptPath`"",
         "-Mode", $Mode,
         "-NodeIndex", "$NodeIndex"
     )
-    if ($env:WT_SESSION) {
-        # Inside Windows Terminal? Add a tab to THIS window.
-        wt -w 0 nt --title $Title -- powershell $childArgs
+    $argString = $childArgs -join " "
+    if ($env:WT_SESSION -and (Get-Command wt -ErrorAction SilentlyContinue)) {
+        # Inside Windows Terminal: add a tab to THIS window.
+        $wtLine = "wt -w 0 new-tab --title `"$Title`" powershell $argString"
+        Start-Process cmd -ArgumentList @("/c", $wtLine) -WindowStyle Hidden
     } else {
         Start-Process powershell -ArgumentList $childArgs
     }
 }
 
-# 1) Coordinator
-Start-Component -Title "DAIN Coordinator" -Mode "coordinator"
-
-# 2) Wait for it, discover its port (coordinator auto-picks a free one)
-Write-Host "`nWaiting for coordinator and detecting its port..." -ForegroundColor Gray
-$coordPort = $null
-$ports = @(8000, 8001, 8002, 8080, 8888, 9000)
-for ($try = 0; $try -lt 25 -and -not $coordPort; $try++) {
-    foreach ($p in $ports) {
-        try {
-            $null = Invoke-WebRequest -UseBasicParsing -TimeoutSec 1 "http://localhost:$p/healthz"
-            $coordPort = $p
-            break
-        } catch { }
+# Fast TCP probe: coordinator bound yet? (milliseconds, not 1s timeouts)
+function Test-DainPort {
+    param([int]$Port)
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $iar = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
+        if (-not $iar.AsyncWaitHandle.WaitOne(300)) { return $false }
+        $client.EndConnect($iar)
+        return $true
+    } catch {
+        return $false
+    } finally {
+        $client.Close()
     }
-    if (-not $coordPort) { Start-Sleep -Seconds 1 }
 }
-if (-not $coordPort) {
-    Write-Host "[WARN] Coordinator not detected after 25s, assuming port 8000." -ForegroundColor Yellow
-    $coordPort = 8000
+
+# Check for an already-running coordinator BEFORE spawning a duplicate.
+$candidates = @(8000, 8001, 8002, 8080, 8888, 9000)
+$existing = $candidates | Where-Object { Test-DainPort -Port $_ } | Select-Object -First 1
+if ($existing) {
+    Write-Host "An existing coordinator is already answering on port $existing - reusing it." -ForegroundColor Yellow
+    $coordPort = $existing
+} else {
+    # 1) Coordinator (auto-picks a free port)
+    Start-Component -Title "DAIN Coordinator" -Mode "coordinator"
+
+    # 2) Wait for it, discover its port
+    Write-Host "`nWaiting for coordinator and detecting its port..." -ForegroundColor Gray
+    $coordPort = $null
+    for ($try = 0; $try -lt 60 -and -not $coordPort; $try++) {
+        $coordPort = $candidates | Where-Object { Test-DainPort -Port $_ } | Select-Object -First 1
+        if (-not $coordPort) { Start-Sleep -Milliseconds 500 }
+    }
+    if (-not $coordPort) {
+        Write-Host "[WARN] Coordinator not detected after 30s, assuming port 8000." -ForegroundColor Yellow
+        $coordPort = 8000
+    }
+    Write-Host "Coordinator lives on port $coordPort." -ForegroundColor Green
 }
-Write-Host "Coordinator lives on port $coordPort." -ForegroundColor Green
+
 $env:DAIN_COORD_URL = "ws://localhost:$coordPort"
 $env:VITE_API_URL = "http://localhost:$coordPort"
 $env:VITE_API_KEY = $clientKey

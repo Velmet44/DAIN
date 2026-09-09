@@ -13,10 +13,10 @@ Requires [uv](https://docs.astral.sh/uv/) and [Node.js 18+](https://nodejs.org).
 
 ### Option A: One script
 
-Run **`Scripts\start.ps1`**:
+Run **`Scripts\start-samepc.ps1`**:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File Scripts\start.ps1
+powershell -ExecutionPolicy Bypass -File Scripts\start-samepc.ps1
 ```
 
 It opens the coordinator, N node agents, and the web client (as tabs in the

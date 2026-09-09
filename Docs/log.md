@@ -464,3 +464,22 @@ are gated by the CI workflow on push.
 
 **GitHub Pages:** deploy workflow re-ran clean; site live at
 https://velmet44.github.io/DAIN/.
+
+### 2026-09-09 — same-PC launcher: fix + verified run (session 5)
+
+**Bug (reported: launcher hung at "Waiting for coordinator..." with no windows):**
+- `Start-Component` used `$MyInvocation.MyCommand.Path`, which is empty inside a
+  function → children launched with `-File ""` → coordinator never started.
+  Replaced with `$script:ScriptPath = $PSCommandPath` captured at script top level.
+- Non-ASCII (em-dash `—`) smugged through an edit → file became unparseable in
+  PowerShell 5.1 (Smart quote bytes break string parsing). Rewrote file as pure
+  ASCII and re-saved with a UTF-8 BOM; `Parser.ParseFile` clean afterwards.
+
+**Verified end-to-end (non-interactive smoke run):**
+- Launcher detected coordinator on port 8000 (auto-port not needed this time),
+  spawned coordinator + 1 node + Vite client.
+- `GET /healthz` → `{"status":"ok"}`; `GET /admin/nodes` (X-Admin-Key) → node
+  `node-DESKTOP-2RFHTDL-5235` online & connected, score 0.30. Node and client
+  processes present. All test processes cleaned up afterwards.
+
+**Gates:** launcher parses clean, full cluster brings itself up on one command.
