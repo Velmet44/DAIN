@@ -437,3 +437,30 @@ migration) and add Python CI (step 2).
 All 19 lint issues from the admin-auth additions (line length, import ordering) resolved.
 Sim/Node integration tests not run in this session (require model export + torch); they
 are gated by the CI workflow on push.
+
+### 2026-09-09 — S9 hardening + same-PC dev launch (session 4)
+
+**Local-run bug fixes (root cause of "node stuck" / "chat shows no model"):**
+- Coordinator bound port found busy (previous orphaned run) → coordinator now
+  auto-picks a free port near 8000 (`_find_open_port` in `__main__.py`).
+- Node got `ws://localhost:8000 ` (trailing space from the old .bat env lines) →
+  `NodeSettings.ws_base_url` now strips whitespace; the launcher no longer leaks
+  trailing spaces (`set "VAR=val"` quoting).
+- Node `warmup_manifest_failed ... err=model store base URL not set yet` → warmup
+  ran before registration (store base URL only arrives in `RegisterAck`). Warmup
+  moved into the reconnect loop, once after first successful register
+  (`NodeAgent.run` / `run_agent` in `agent.py`).
+
+**Script layout — one self-contained launcher (project folder is relocatable):**
+- `bootstrap.ps1`/`bootstrap.sh` moved to `Scripts/` (repo-root anchored via
+  `Split-Path`/`..`).
+- Removed `start.bat`/`stop.bat`; single new **`Scripts/start-samepc.ps1`**
+  launches coordinator + N nodes + web client. No absolute paths in the repo
+  (`rg E:\DAIN` clean) — the folder can be copied anywhere or to another PC.
+- Tabs: spawns each component as a tab of the current Windows Terminal window
+  when `$env:WT_SESSION` is set; falls back to separate windows otherwise.
+- Stopping = Ctrl+C in each window; no stop script.
+- README quick-start updated to point at `Scripts/start-samepc.ps1`.
+
+**GitHub Pages:** deploy workflow re-ran clean; site live at
+https://velmet44.github.io/DAIN/.
