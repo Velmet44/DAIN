@@ -37,6 +37,21 @@ class CoordinatorSettings:
     queue_limit: int = 16
     max_completion_tokens: int = 512
     layers_per_node_target: int = 4
+    max_concurrent_per_key: int = 4
+    backup_count: int = 2
+    # Spec §12 clamps K = ceil(L / layers_per_node_target) to [8, 16] for the
+    # target 8–16 node production pool. The bounds are deployment configuration:
+    # production reference values live in Deploy/.env.example (DAIN_MIN_STAGES=8),
+    # while dev/sim pools are smaller and use a lower floor.
+    min_stages: int = 1
+    max_stages: int = 16
+    # S7 (spec §13): fault tolerance knobs.
+    watchdog_tick_s: float = 0.5
+    stage_deadline_min_s: float = 5.0
+    stage_deadline_max_s: float = 60.0
+    max_stage_attempts: int = 3
+    max_job_restarts: int = 1
+    min_nodes: int = 1
     scoring: ScoringConfig = field(default_factory=ScoringConfig)
 
     @property
@@ -60,5 +75,15 @@ class CoordinatorSettings:
             job_timeout_s=float(env.get("DAIN_JOB_TIMEOUT_S", "120")),
             queue_limit=int(env.get("DAIN_QUEUE_LIMIT", "16")),
             layers_per_node_target=int(env.get("DAIN_LAYERS_PER_NODE", "4")),
+            max_concurrent_per_key=int(env.get("DAIN_MAX_CONCURRENT_PER_KEY", "4")),
+            backup_count=int(env.get("DAIN_BACKUP_COUNT", "2")),
+            min_stages=int(env.get("DAIN_MIN_STAGES", "1")),
+            max_stages=int(env.get("DAIN_MAX_STAGES", "16")),
+            watchdog_tick_s=float(env.get("DAIN_WATCHDOG_TICK_S", "0.5")),
+            stage_deadline_min_s=float(env.get("DAIN_STAGE_DEADLINE_MIN_S", "5")),
+            stage_deadline_max_s=float(env.get("DAIN_STAGE_DEADLINE_MAX_S", "60")),
+            max_stage_attempts=int(env.get("DAIN_MAX_STAGE_ATTEMPTS", "3")),
+            max_job_restarts=int(env.get("DAIN_JOB_RESTARTS", "1")),
+            min_nodes=int(env.get("DAIN_MIN_NODES", "1")),
             log_json=env.get("DAIN_LOG_JSON", "").lower() in ("1", "true", "yes"),
         )

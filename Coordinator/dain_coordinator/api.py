@@ -46,7 +46,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dain_coordinator.jobs import ActivationRelay, JobTracker
 from dain_coordinator.nodes import MessageOutcome, NodeService
-from dain_coordinator.partition import build_placement
+from dain_coordinator.partition import plan_placement
 from dain_coordinator.store import NodeRow
 
 log = logging.getLogger("dain.coordinator.api")
@@ -300,25 +300,37 @@ async def completions(payload: CompletionRequest, request: Request):
     active = sum(
         1 for j in jobs.jobs.values() if j.state not in (JobState.COMPLETED, JobState.FAILED)
     )
+    api_key = request.headers.get("x-api-key") or "anonymous"
+    per_key = sum(
+        1
+        for j in jobs.jobs.values()
+        if j.api_key == api_key and j.state not in (JobState.COMPLETED, JobState.FAILED)
+    )
     service = _service(request)
     rows = [
         r
         for r in service.registry.list_nodes(NodeState.ONLINE)
         if request.app.state.connections.is_connected(r.node_id)
     ]
-    stages = build_placement(manifest, rows, layers_per_node_target=settings.layers_per_node_target)
-    if stages is None:
+    plan = plan_placement(
+        manifest,
+        rows,
+        layers_per_node_target=settings.layers_per_node_target,
+        backup_count=settings.backup_count,
+    )
+    if plan is None:
         raise HTTPException(
             status_code=429,
             detail="no connected node pool can host this model; retry later",
             headers={"Retry-After": "5"},
         )
-    if active >= settings.queue_limit:
+    if active >= settings.queue_limit or per_key >= settings.max_concurrent_per_key:
         raise HTTPException(
             status_code=429,
             detail="server busy: queue limit reached; retry later",
             headers={"Retry-After": "5"},
         )
+    stages = plan.stages
     # Exclusive execution per stage node (MVP has no intra-node batching): a node
     # marked BUSY is excluded from new placements until the job finishes.
     busy_nodes = [s.node_id for s in stages]
@@ -334,6 +346,8 @@ async def completions(payload: CompletionRequest, request: Request):
             "seed": payload.seed,
         },
         manifest,
+        api_key=api_key,
+        backups=plan.backups,
     )
     params = GenerationParams(
         max_tokens=payload.max_tokens,

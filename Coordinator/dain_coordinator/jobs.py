@@ -35,6 +35,8 @@ class JobRecord:
     params: dict
     manifest: ModelManifest
     node_id: str | None = None
+    api_key: str | None = None
+    backups: tuple[str, ...] = ()
     stages: tuple[StageAssignment, ...] = ()
     state: JobState = JobState.QUEUED
     tokens: list[str] = field(default_factory=list)
@@ -47,19 +49,67 @@ class JobRecord:
     queue: asyncio.Queue | None = None
     stage_started_at: dict[int, float] = field(default_factory=dict)
     stage_finished_at: dict[int, float] = field(default_factory=dict)
+    # S7 (spec §13): per-stage retry attempt counters and liveness bookkeeping.
+    retries: dict[int, int] = field(default_factory=dict)
+    restarts: int = 0
+    stage_last_activity: dict[int, float] = field(default_factory=dict)
+    last_token_at: float | None = None
+
+
+class StageLatencyStats:
+    """Rolling stage-latency window → p99 for the watchdog deadline (§13).
+
+    `deadline = 4 × p99(stage latency)` clamped to [min_s, max_s]; before any
+    sample exists the max bound (a plain configured timeout) applies.
+    """
+
+    def __init__(self, window: int = 64) -> None:
+        self._samples: list[float] = []
+        self._window = window
+
+    def observe(self, latency_s: float) -> None:
+        self._samples.append(latency_s)
+        if len(self._samples) > self._window:
+            del self._samples[: len(self._samples) - self._window]
+
+    def p99(self) -> float | None:
+        if not self._samples:
+            return None
+        ordered = sorted(self._samples)
+        return ordered[min(len(ordered) - 1, int(0.99 * len(ordered)))]
+
+    def deadline(self, min_s: float, max_s: float) -> float:
+        p99 = self.p99()
+        if p99 is None:
+            return max_s
+        return min(max(4.0 * p99, min_s), max_s)
 
 
 class JobTracker:
     def __init__(self) -> None:
         self.jobs: dict[str, JobRecord] = {}
         self._order: list[str] = []
+        self.stage_stats = StageLatencyStats()
 
     def create(
-        self, model_id: str, prompt: str, params: dict, manifest: ModelManifest
+        self,
+        model_id: str,
+        prompt: str,
+        params: dict,
+        manifest: ModelManifest,
+        *,
+        api_key: str | None = None,
+        backups: tuple[str, ...] = (),
     ) -> JobRecord:
         job_id = uuid.uuid4().hex[:12]
         record = JobRecord(
-            job_id=job_id, model_id=model_id, prompt=prompt, params=params, manifest=manifest
+            job_id=job_id,
+            model_id=model_id,
+            prompt=prompt,
+            params=params,
+            manifest=manifest,
+            api_key=api_key,
+            backups=backups,
         )
         self.jobs[job_id] = record
         self._order.append(job_id)
@@ -83,6 +133,7 @@ class JobTracker:
         job.dispatched_at = time.time()
         for stage in stages:
             job.stage_started_at.setdefault(stage.stage_idx, time.time())
+            job.stage_last_activity[stage.stage_idx] = time.time()
 
     def _push(self, job: JobRecord, frame: dict) -> None:
         if job.queue is not None:
@@ -92,6 +143,11 @@ class JobTracker:
                 log.warning("sse_queue_full job=%s (client too slow)", job.job_id)
 
     def _transition(self, job: JobRecord, state: JobState) -> None:
+        if state in (JobState.RUNNING, JobState.STREAMING) and job.state in (
+            JobState.RUNNING,
+            JobState.STREAMING,
+        ):
+            return  # activity, not a real transition
         job.state = state
         log.info("job_state job=%s state=%s", job.job_id, state.value)
 
@@ -101,7 +157,12 @@ class JobTracker:
         job = self.jobs.get(job_id)
         if job is None:
             return
-        if state == JobState.RUNNING and job.state in (JobState.DISPATCHED, JobState.QUEUED):
+        job.stage_last_activity[stage_idx] = time.time()
+        if state == JobState.RUNNING and job.state in (
+            JobState.DISPATCHED,
+            JobState.QUEUED,
+            JobState.RETRYING,
+        ):
             self._transition(job, JobState.RUNNING)
         if state == JobState.RUNNING and stage_idx in job.stage_started_at:
             job.stage_finished_at[stage_idx] = time.time()  # last activity per stage
@@ -110,6 +171,7 @@ class JobTracker:
             JobState.FAILED,
         ):
             job.stage_finished_at.setdefault(stage_idx, time.time())
+            self._observe_stage_latencies(job)
             job.finished_at = time.time()
             # Token finals drive the SSE; JOB_STATUS COMPLETED only bookkeeps —
             # but if the client never got a final (e.g. empty output), emit one.
@@ -126,15 +188,22 @@ class JobTracker:
                 )
                 self._transition(job, JobState.COMPLETED)
 
+    def _observe_stage_latencies(self, job: JobRecord) -> None:
+        for stage_idx, started in job.stage_started_at.items():
+            finished = job.stage_finished_at.get(stage_idx)
+            if finished is not None and finished > started:
+                self.stage_stats.observe(finished - started)
+
     def on_token_batch(self, batch: TokenBatch) -> None:
         job = self.jobs.get(batch.job_id)
         if job is None or job.state in (JobState.COMPLETED, JobState.FAILED):
             return
-        if job.state == JobState.STREAMING and batch.is_final:
-            pass
-        if job.state in (JobState.DISPATCHED, JobState.RUNNING):
-            self._transition(job, JobState.STREAMING)
-            job.first_token_at = time.time()
+        job.last_token_at = time.time()
+        if job.state in (JobState.DISPATCHED, JobState.RUNNING, JobState.RETRYING):
+            if job.state != JobState.STREAMING:
+                self._transition(job, JobState.STREAMING)
+            if job.first_token_at is None:
+                job.first_token_at = time.time()
         for token in batch.tokens:
             job.tokens.append(token)
             self._push(job, {"type": "token", "job_id": batch.job_id, "token": token})
@@ -147,6 +216,7 @@ class JobTracker:
             )
             job.finish_reason = batch.finish_reason or "length"
             job.finished_at = time.time()
+            self._observe_stage_latencies(job)
             self._push(
                 job,
                 {
@@ -164,8 +234,14 @@ class JobTracker:
             return
         job.error = detail
         job.finished_at = time.time()
+        self._observe_stage_latencies(job)
         self._push(job, {"type": "error", "job_id": job_id, "detail": detail})
         self._transition(job, JobState.FAILED)
+
+    def active_jobs(self) -> list[JobRecord]:
+        return [
+            j for j in self.jobs.values() if j.state not in (JobState.COMPLETED, JobState.FAILED)
+        ]
 
     def fail_jobs_of_node(self, node_id: str, detail: str) -> int:
         failed = 0
@@ -190,6 +266,9 @@ class JobTracker:
             "tokens_generated": len(job.tokens),
             "finish_reason": job.finish_reason,
             "error": job.error,
+            "backups": list(job.backups),
+            "restarts": job.restarts,
+            "retries": {str(k): v for k, v in sorted(job.retries.items())},
             "created_at": job.created_at,
             "first_token_at": job.first_token_at,
             "finished_at": job.finished_at,
@@ -245,5 +324,9 @@ class ActivationRelay:
             ok = await self.connections.send_bytes(target, payload)
         if ok:
             self.relayed_bytes += len(payload)
+        elif job.state == JobState.RETRYING:
+            # Recovery is mid-reassignment for this job; the retried stage's
+            # upstream will re-send once the replacement is in place (§13).
+            log.info("relay_suppressed_during_retry job=%s target=%s", header.job_id, target)
         else:
             jobs.fail_job(header.job_id, f"relay target node {target} unreachable")

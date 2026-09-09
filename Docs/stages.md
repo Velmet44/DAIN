@@ -99,7 +99,7 @@ Runtime model (dev = everything on one machine):
 | S3 | Node agent skeleton + local cluster sim | ✅ 2026-09-08 |
 | S4 | Single-node inference path (real model, streaming) | ✅ 2026-09-08 |
 | S5 | Distributed pipeline: partitioning + activation relay | ✅ 2026-09-09 |
-| S6 | Scoring-driven scheduling, top-K, backups, queueing | ☐ |
+| S6 | Scoring-driven scheduling, top-K, backups, queueing | ✅ 2026-09-09 |
 | S7 | Fault tolerance & degraded mode | ☐ |
 | S8 | Accounting ledger | ☐ |
 | S9 | Web client + deployment (Netlify + public coordinator) | ☐ |

@@ -31,6 +31,7 @@ class MessageType(StrEnum):
     JOB_STATUS = "job_status"
     ACTIVATION_RELAY = "activation_relay"
     TOKEN_BATCH = "token_batch"
+    STAGE_RETRY = "stage_retry"
     LEDGER_EVENT = "ledger_event"
     SHARD_MANIFEST = "shard_manifest"
 
@@ -225,7 +226,7 @@ class StageAssignment(_Model):
     node_id: str = Field(min_length=3)
     shard_id: str = Field(min_length=1)
     layer_start: int = Field(ge=0)
-    layer_end: int = Field(gt=0, description="Inclusive upper bound")
+    layer_end: int = Field(ge=0, description="Inclusive upper bound")
     # S11 (MoE) skeleton: an expert-set stage hosts these expert indices for the
     # layers in [layer_start, layer_end] instead of all layers in the range.
     expert_ids: tuple[int, ...] | None = None
@@ -308,6 +309,22 @@ class TokenBatch(_Model):
     detail: str | None = None
 
 
+class StageRetry(_Model):
+    """Coordinator → node control message (spec §13 retry, S7).
+
+    Sent to the stage *upstream* of a failed stage: re-send the activation you
+    are still buffering for `job_id` so the replacement stage (or a same-node
+    retry, when `target_node_id` is the receiver itself) can resume from the
+    completed prefix. Dedup on the receiving side is by `seq` — replays of an
+    activation the stage already processed are dropped there.
+    """
+
+    job_id: str = Field(min_length=4, max_length=64)
+    stage_idx: int = Field(ge=0, description="Index of the retried (downstream) stage")
+    attempt: int = Field(ge=0, description="Retry attempt of the downstream stage")
+    reason: Literal["watchdog", "node_lost", "reassign"] = "watchdog"
+
+
 class LedgerEvent(_Model):
     """Append-only accounting record (spec §15). Idempotency key:
     `(job_id, stage_idx, attempt)` — retries never double-count."""
@@ -346,6 +363,7 @@ PAYLOAD_TYPES: dict[MessageType, type[BaseModel]] = {
     MessageType.JOB_STATUS: JobStatus,
     MessageType.ACTIVATION_RELAY: ActivationRelayHeader,
     MessageType.TOKEN_BATCH: TokenBatch,
+    MessageType.STAGE_RETRY: StageRetry,
     MessageType.LEDGER_EVENT: LedgerEvent,
     MessageType.SHARD_MANIFEST: ShardManifest,
 }

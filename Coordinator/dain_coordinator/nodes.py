@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import secrets
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from dain_common.schemas import (
@@ -65,6 +66,10 @@ class NodeService:
     def __init__(self, registry: SQLiteRegistry, settings: CoordinatorSettings) -> None:
         self.registry = registry
         self.settings = settings
+        # Set by the app: callable(node_id, to_state) fired when the *pool
+        # composition* changes for scheduling purposes (DEGRADED entry/recovery,
+        # spec §12 placement recompute on DEGRADED transitions).
+        self.on_pool_change: Callable[[str, NodeState], None] | None = None
 
     # -- scoring ---------------------------------------------------------------
 
@@ -211,6 +216,7 @@ class NodeService:
                 StateChange(row.node_id, row.state, NodeState.DEGRADED, reason, time.time())
             )
             log.warning("degraded node=%s reason=%s", row.node_id, reason)
+            self._notify_pool_change(row.node_id, NodeState.DEGRADED)
             return
 
         if not degraded and row.state == NodeState.DEGRADED:
@@ -226,9 +232,17 @@ class NodeService:
                 )
             )
             log.info("recovered node=%s", row.node_id)
+            self._notify_pool_change(row.node_id, NodeState.ONLINE)
             return
 
         self.registry.save_node(row)
+
+    def _notify_pool_change(self, node_id: str, to_state: NodeState) -> None:
+        if self.on_pool_change is not None:
+            try:
+                self.on_pool_change(node_id, to_state)
+            except Exception:  # noqa: BLE001 — observability hooks must not break the node loop
+                log.exception("pool_change_hook_failed node=%s", node_id)
 
     def _evaluate_degraded(
         self, row: NodeRow, score: ScoreResult, metrics: MetricsReport | None

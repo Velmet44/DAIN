@@ -263,3 +263,55 @@ Format: what was done, decisions made, deviations from Docs/stages.md, gate resu
   the machine has 4 cores — full-suite CPU contention produces timing flakes, so
   tests wait on *state*, with generous bounds, never on sleep().
 - Next: **S6 — Scoring-driven scheduling**.
+
+## 2026-09-09 — S6: Scoring-driven scheduling, top-K, backups, queueing ✅
+
+- `partition.py` (S6 formalization of the S5 sizing): `plan_placement` is a **pure
+  module** over registry snapshots (no I/O — unit-testable) implementing spec §12 in
+  order: feasibility (ONLINE + live WS connection) → score-ranked with deterministic
+  tie-breaks (score desc, throughput desc, node_id) → **top-K** with
+  `K = clamp(ceil(L / layers_per_node_target), min_k, max_k)` → capacity filter
+  (per-stage VRAM/RAM share) → throughput-proportional sizing via largest-remainder
+  integer split (min 1 layer) → **warm backups** (next-ranked nodes up to
+  `backup_count`). Returns None on infeasible / below `min_nodes` (caller → HTTP 429
+  / degraded mode); fewer-than-desired-K plans are flagged `degraded`.
+- `PlacementRecorder` + `PlacementEvent`: ring buffer of recompute events
+  (request/join/leave/degraded/recovered) surfaced via the placement log (spec §12
+  observability).
+- Admission/backpressure (`api.py`): `plan_placement` is called per request; an
+  infeasible pool or a full queue returns HTTP **429 with `Retry-After: 5`**;
+  bounded active jobs (`queue_limit`) and per-key concurrency (`max_concurrent_per_key`)
+  enforce backpressure. Failing dispatch (busy/unreachable stage node) releases nodes
+  and returns 503.
+- Placement recompute on pool changes (`app.py`): `recompute_pool_events` recomputes
+  the plan for every model in the store on node `leave` (WS disconnect) and on
+  `degraded` entry / `recovered` transitions (via `service.on_pool_change`); a store
+  path failure never breaks the triggering path.
+- Common: schema message-family count test updated 10 → 11 (the S5 `SHARD_MANIFEST`
+  addition had drifted an old hard-coded count — the `set(PAYLOAD_TYPES) ==
+  set(MessageType)` assertion was already the correctness gate).
+- Checkpoints:
+  - `Coordinator/tests/test_scheduler.py` (10) — K clamped by target+pool; selection
+    ranks by score; sizing ∝ throughput (fast node > slow, min 1 layer); low-score &
+    capacity-excluded & DEGRADED nodes excluded; None on no-online pool; backups
+    disjoint from stage nodes; small model → single stage / fine-grained spread.
+  - `Sim/tests/test_admission.py` (1) — 50 concurrent requests vs 2-node pool with
+    `queue_limit=3`, `max_concurrent_per_key=2`: every request is 200 or 429, some of
+    each, no crash/deadlock, pool recovers to all-ONLINE after.
+  - `Sim/tests/test_placement_recompute.py` (1) — job1 on 4/5 nodes (backup = the
+    5th); kill the sampling-stage node → it goes OFFLINE; job2's placement excludes
+    the dead node and still covers every layer contiguously.
+- Gates: Common 43, Coordinator 30, Node 15, Sim 7 — all green, ruff clean everywhere.
+- Bring-up lesson (documented 4-core contention): `test_placement_recompute`'s first
+  **non-streaming** job ran 4 stages of real CPU inference on a 4-core host, and under
+  full-suite contention exceeded the default 60 s `job_timeout_s`, surfacing as an
+  httpx `ReadTimeout`. Fixed by aligning with the S5 parity test's `job_timeout_s=90.0`
+  (S5 rule: tests wait on state with generous bounds, never on sleep). The scheduler
+  logic itself was correct — purely a tight inference-bound timeout.
+- Decisions: `min_stages`/`max_stages` are deployment configuration (production
+  reference `DAIN_MIN_STAGES=8` in `Deploy/.env.example`; dev/sim pools use a lower
+  floor); BUSY nodes are excluded from new placements so the no-intra-node-batching
+  MVP cannot deadlock (established in S5); backups are designated at placement time
+  and consumed for reassignment in S7.
+- Next: **S7 — Fault tolerance & degraded mode** (stage watchdog, retry with attempt
+  counter, backup reassignment, degraded re-partition, `dain_sim.chaos`).
