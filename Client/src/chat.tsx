@@ -8,6 +8,7 @@ import {
   type SseFrame,
 } from "./api";
 import { MessageBubble, useLocalStorage } from "./components";
+import { logDebug, logError, logInfo, logOk, logWarn } from "./logs";
 
 interface Props {
   baseUrl: string;
@@ -28,13 +29,20 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
 
   useMemo(() => {
     listModels(baseUrl, apiKey)
-      .then(setModels)
-      .catch((err: Error) => setStatus(`models: ${err.message}`));
+      .then((models) => {
+        logOk(`model picker: ${models.join(", ") || "(none)"}`);
+        setModels(models);
+      })
+      .catch((err: Error) => {
+        logError(`models unavailable: ${err.message}`);
+        setStatus(`models: ${err.message}`);
+      });
   }, [baseUrl, apiKey]);
 
   const send = async (prompt?: string) => {
     const text = (prompt ?? input).trim();
     if (!text || streaming || !modelId) return;
+    logInfo(`send model=${modelId} prompt="${text.slice(0, 80)}${text.length > 80 ? "…" : ""}" maxTokens=${maxTokens}`);
     setInput("");
     setMessages((m) => [
       ...m,
@@ -54,6 +62,7 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
         (frame: SseFrame) => {
           if (frame.token) {
             acc += frame.token;
+            logDebug(`token frame: "${frame.token.length > 40 ? `${frame.token.slice(0, 40)}…` : frame.token}" (total ${acc.length} chars)`);
             setMessages((m) => {
               const tail = [...m];
               tail[tail.length - 1] = { role: "assistant", content: acc, streaming: true };
@@ -61,6 +70,7 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
             });
           }
           if (frame.type === "final" || frame.type === "error") {
+            if (frame.type === "error") logError(`stream error frame: ${frame.detail}`);
             setStatus(`done (${frame.usage?.tokens ?? acc.length} tokens)`);
           }
         },
@@ -71,6 +81,9 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
         return tail;
       });
     } catch (err) {
+      const aborted = controller.signal.aborted;
+      if (aborted) logWarn(`completion aborted, ${acc.length} chars received`);
+      else logError(`completion failed: ${(err as Error).message}`);
       setStatus(`error: ${(err as Error).message}`);
       setMessages((m) => {
         const tail = [...m];
@@ -87,7 +100,10 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
     }
   };
 
-  const stop = () => signal?.abort();
+  const stop = () => {
+    logInfo("stop requested");
+    signal?.abort();
+  };
 
   return (
     <div className="view">

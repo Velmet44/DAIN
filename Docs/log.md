@@ -483,3 +483,32 @@ https://velmet44.github.io/DAIN/.
   processes present. All test processes cleaned up afterwards.
 
 **Gates:** launcher parses clean, full cluster brings itself up on one command.
+
+### 2026-09-10 — web client: stale-config fix + verbose console logging (session 6)
+
+**Bug (reported: launcher opens everything, but browser chat gets `401 Unauthorized` on
+`127.0.0.1:8000/v1/models` and can't send).**
+
+- Root cause: not the launcher env — verified shell `VITE_API_URL`/`VITE_API_KEY` reach
+  the Vite dev server (probed the transformed `src/api.ts`). The failure came from the
+  client's `useLocalStorage`: any stored value (e.g. `dain:base_url=127.0.0.1:8000`,
+  `dain:api_key=""` from earlier dev sessions) **permanently** beat the launcher's
+  per-run env defaults → empty API key → 401, on the hardcoded fallback URL.
+- Fix in `Client/src/components.tsx`: `useLocalStorage` now honors a value only when the
+  user explicitly edited it (stored as JSON `["value", true]`); legacy raw-string or
+  non-edited entries are ignored and the env-provided default wins on every load.
+  `Client/src/App.tsx`, `chat.tsx`, `api.ts`, `dashboard.tsx` unchanged in behavior.
+- After the fix the browser picks up the coordinator URL + API key from the launcher env
+  automatically; no stale storage can pin old values anymore.
+
+**Verbose client console logging (requested):**
+- Added `Client/src/logs.ts`: tagged helpers `logInfo/logOk/logWarn/logError` (always
+  on) and `logDebug` (dev-server only).
+- Wired into: env config on load, base-url/API-key edits, model fetch + picker,
+  completion POST, SSE lifecycle (job dispatched, per-token frames via logDebug, final
+  finish/token counts, `[DONE]`), abort/failure paths, dashboard poll results, and
+  localStorage edit/ignore decisions. API keys are never logged (only `set`/`EMPTY`).
+- `npm run build` (tsc --noEmit + vite) clean — fixed three tsc errors introduced during
+  the edit chain (dropped return, missing `SseFrame.status`, nullable abort signal).
+
+**Gates:** TS strict build green; client bundles successfully.

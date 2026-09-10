@@ -1,3 +1,5 @@
+import { logDebug, logError, logInfo, logOk } from "./logs";
+
 export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
@@ -14,6 +16,7 @@ export interface CompletionRequest {
 export interface SseFrame {
   type?: string;
   job_id?: string;
+  status?: string;
   token?: string;
   finish_reason?: string;
   usage?: { tokens?: number };
@@ -67,15 +70,24 @@ export function defaultMaxTokens(): number {
 }
 
 export async function listModels(baseUrl: string, apiKey: string): Promise<string[]> {
+  logInfo(`GET ${baseUrl}/v1/models (key ${apiKey ? "set" : "EMPTY"})`);
   const resp = await fetch(`${baseUrl}/v1/models`, { headers: { "X-API-Key": apiKey } });
-  if (!resp.ok) throw new Error(`GET /v1/models -> ${resp.status}`);
+  if (!resp.ok) {
+    logError(`GET /v1/models -> ${resp.status}`);
+    throw new Error(`GET /v1/models -> ${resp.status}`);
+  }
   const body = (await resp.json()) as { models: { model_id: string }[] };
+  logOk(`models: ${body.models.length} available`);
   return body.models.map((m) => m.model_id);
 }
 
 export async function clusterStatus(baseUrl: string, apiKey: string): Promise<ClusterStatus> {
+  logDebug(`GET ${baseUrl}/v1/nodes (key ${apiKey ? "set" : "EMPTY"})`);
   const resp = await fetch(`${baseUrl}/v1/nodes`, { headers: { "X-API-Key": apiKey } });
-  if (!resp.ok) throw new Error(`GET /v1/nodes -> ${resp.status}`);
+  if (!resp.ok) {
+    logError(`GET /v1/nodes -> ${resp.status}`);
+    throw new Error(`GET /v1/nodes -> ${resp.status}`);
+  }
   return (await resp.json()) as ClusterStatus;
 }
 
@@ -86,6 +98,9 @@ export async function streamCompletion(
   req: CompletionRequest,
   onFrame: (frame: SseFrame) => void,
 ): Promise<void> {
+  logInfo(
+    `POST ${baseUrl}/v1/completions model=${req.modelId} promptLen=${req.prompt.length} maxTokens=${req.maxTokens}`,
+  );
   const resp = await fetch(`${baseUrl}/v1/completions`, {
     method: "POST",
     headers: {
@@ -109,12 +124,15 @@ export async function streamCompletion(
     } catch {
       /* empty body */
     }
+    logError(`POST /v1/completions -> ${detail}`);
     throw new Error(detail);
   }
   const reader = resp.body?.getReader();
   if (!reader) throw new Error("no response body");
   const decoder = new TextDecoder();
   let buffer = "";
+  let frames = 0;
+  let tokens = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -124,9 +142,19 @@ export async function streamCompletion(
     for (const line of lines) {
       if (!line.startsWith("data: ")) continue;
       const payload = line.slice("data: ".length).trim();
-      if (payload === "[DONE]") return;
+      if (payload === "[DONE]") {
+        logOk(`stream complete: ${frames} frames, ${tokens} tokens`);
+        return;
+      }
       try {
-        onFrame(JSON.parse(payload) as SseFrame);
+        const frame = JSON.parse(payload) as SseFrame;
+        frames += 1;
+        if (frame.token) tokens += 1;
+        if (frame.job_id && frame.status) logOk(`job ${frame.job_id} ${frame.status}`);
+        if (frame.type === "error") logError(`job ${frame.job_id ?? "?"} error: ${frame.detail}`);
+        if (frame.type === "final")
+          logOk(`final finish=${frame.finish_reason} usageTokens=${frame.usage?.tokens ?? tokens}`);
+        onFrame(frame);
       } catch {
         /* ignore malformed frame */
       }

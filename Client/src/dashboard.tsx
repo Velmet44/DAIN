@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { clusterStatus, type ClusterStatus } from "./api";
+import { logDebug, logError, logInfo } from "./logs";
 
 interface Props {
   baseUrl: string;
@@ -17,10 +18,22 @@ export function DashboardView({ baseUrl, apiKey }: Props) {
   }, []);
 
   useEffect(() => {
+    logDebug("dashboard: initial load");
     let live = true;
     clusterStatus(baseUrl, apiKey)
-      .then((s) => live && setStatus(s))
-      .catch((err: Error) => live && setError(err.message));
+      .then((s) => {
+        if (!live) return;
+        logInfo(
+          `dashboard: nodes=${s.nodes.length} online=${s.nodes.filter((n) => n.connected).length} activeJobs=${s.active_jobs} placements=${s.placements.length}`,
+        );
+        setStatus(s);
+        setError("");
+      })
+      .catch((err: Error) => {
+        if (!live) return;
+        logError(`dashboard poll failed: ${err.message}`);
+        setError(err.message);
+      });
     return () => {
       live = false;
     };
