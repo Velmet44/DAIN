@@ -854,3 +854,44 @@ Coordinator endpoints (all under `/admin`, admin-key gated) + UI:
 - **Gates:** Coordinator **79 passed** (70 + 9 new: evict/recover lifecycle, 409s, unknown
   node 409, model list size/delete/rescan, path-traversal, jobs list/cancel/409s/404, logs
   tail), ruff clean. Node/Common untouched.
+
+### 2026-09-10 — hardening sweep: 7 confirmed bug fixes (session 13)
+
+Post-release audit found seven real bugs; all fixed in one pass.
+
+- **Node agent version drift** (`Node/dain_node/agent.py`): `Register.agent_version` was
+  hardcoded `"0.1.0"` while the package is 1.0.0 — the coordinator recorded a wrong version
+  for every node. Now imports `__version__` from `dain_node`.
+- **`_restart_from_entry` never re-dispatched** (`Coordinator/dain_coordinator/faults.py`):
+  the whole-job-stall restart only reset bookkeeping and set the job QUEUED, so it sat until
+  the watchdog failed it. It now re-fires `JOB_ASSIGN` for every stage of the current
+  placement (stage 0 carries the prompt; nodes already replace their runtime for a repeated
+  assign, so this is safe), resets `last_token_at`/`first_token_at`/`dispatched_at`, and
+  transitions to DISPATCHED. Dead nodes' sends fail and the normal watchdog→`_reassign` path
+  picks backups. Also fixed the **double restart increment** (tick + restart both bumped
+  `job.restarts`, so `max_job_restarts=1` gave zero useful restarts): `restarts` is now
+  incremented only inside `_restart_from_entry`, and tick uses `>=`.
+- **Port fallback not advertised** (`Coordinator/dain_coordinator/__main__.py`): when the
+  preferred port was busy, the free port was passed to uvicorn but never written back into
+  settings — the UDP discovery responder told nodes `ws://host:8000` while the server listened
+  on 8001. Settings are now rebuilt with the bound port (`dataclasses.replace`) before
+  `create_app`.
+- **Client disconnect leaked the job** (`Coordinator/dain_coordinator/api.py`): the SSE (and
+  non-streaming) `finally` released the busy nodes but never reached a terminal state, so
+  orphaned jobs burned watchdog restarts and never emitted a ledger event. The `finally` now
+  calls `jobs.fail_job(..., "client disconnected")` when the record is still non-terminal
+  (no-op on the normal completion path).
+- **Shard download tmp-file race** (`Node/dain_node/llm.py`): shard and tokenizer downloads
+  used a fixed `path.tmp`, so two concurrent jobs fetching the same missing shard could
+  interleave writes and cache a corrupt file. Temp names are now unique (`secrets.token_hex`),
+  matching the identity-state pattern.
+- **XSS in chat rendering** (`Client/src/components.tsx`): `marked` output was injected via
+  `dangerouslySetInnerHTML` with no sanitizer. Now passed through DOMPurify (new dependency,
+  bundled types).
+- **Non-ASCII secret headers 500'd** (`Coordinator/dain_coordinator/api.py`):
+  `secrets.compare_digest` raises `TypeError` on non-ASCII `str`, so a header with non-ASCII
+  bytes returned 500 instead of 401. Both `require_api_key` and `require_admin` now compare
+  UTF-8-encoded bytes.
+- **Gates:** Coordinator **78 passed**, Common **54 passed**, Node **25 passed**, ruff clean
+  on all touched Python files; Client `tsc --noEmit` + vite build clean. Sim (subprocess
+  cluster e2e) not re-run this session.

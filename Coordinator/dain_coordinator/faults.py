@@ -96,8 +96,10 @@ class FaultManager:
                 continue
             if job.last_token_at is None and now - (job.dispatched_at or now) > deadline:
                 log.warning("job_stalled job=%s deadline=%.1fs", job.job_id, deadline)
-                job.restarts += 1
-                if job.restarts > self.settings.max_job_restarts:
+                # `restarts` is incremented inside _restart_from_entry — the only
+                # place — so `>=` here means the job gets exactly
+                # `max_job_restarts` useful restarts before being failed.
+                if job.restarts >= self.settings.max_job_restarts:
                     self.jobs.fail_job(job.job_id, "job stalled beyond max restarts")
                 else:
                     self._restart_from_entry(job)
@@ -117,16 +119,41 @@ class FaultManager:
         Re-dispatches the full stage graph on the current placement and resets
         per-stage progress. The KV cache that produced already-streamed context
         is gone, so the job starts over — spec §13 permits restart from prompt
-        only when the KV-cache-holding node is lost.
+        only when the KV-cache-holding node is lost. Stages whose node died in
+        the meantime keep their assignment: the re-sent `JOB_ASSIGN` fails to
+        deliver, and the watchdog reassigns those stages onto warm backups via
+        the normal `_reassign` path.
         """
+        if job.state in (JobState.COMPLETED, JobState.FAILED):
+            return
         log.info("job_restart job=%s", job.job_id)
         now = time.time()
         for stage_idx in range(len(job.stages)):
             job.stage_started_at.pop(stage_idx, None)
             job.stage_finished_at.pop(stage_idx, None)
             job.stage_last_activity[stage_idx] = now
+        job.last_token_at = None
+        job.first_token_at = None
         job.restarts += 1
-        job.state = JobState.QUEUED
+        job.dispatched_at = now
+        job.state = JobState.DISPATCHED
+        # Re-fire JOB_ASSIGN for every stage of the current placement; stage 0
+        # carries the prompt so the graph starts over (nodes replace their
+        # runtime for the same job_id, so repeat assigns are safe).
+        for stage in job.stages:
+            assign = JobAssign(
+                job_id=job.job_id,
+                model_id=job.model_id,
+                my_stage_idx=stage.stage_idx,
+                stages=job.stages,
+                prompt=job.prompt if stage.stage_idx == 0 else None,
+                params=GenerationParams(
+                    max_tokens=int(job.params.get("max_tokens", 64)),
+                    temperature=float(job.params.get("temperature", 0.0)),
+                    seed=job.params.get("seed"),
+                ),
+            )
+            self._fire(MessageType.JOB_ASSIGN, assign, stage.node_id)
 
     def _pick_replacement(self, job: JobRecord, failed_node: str) -> str | None:
         """A warm backup that is ONLINE, connected, and free for this job."""

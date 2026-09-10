@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import DOMPurify from "dompurify";
 import { marked } from "marked";
 import type { ChatMessage } from "./api";
 import { logDebug, logInfo, logWarn } from "./logs";
@@ -10,7 +11,11 @@ export function MessageBubble({
   message: ChatMessage;
   onStop?: () => void;
 }) {
-  const html = marked.parse(message.content || "…", { async: false }) as string;
+  // Model/user content is untrusted: sanitize the rendered markdown before it
+  // touches the DOM (no sanitizer here would be an XSS vector).
+  const html = DOMPurify.sanitize(
+    marked.parse(message.content || "…", { async: false }) as string,
+  );
   return (
     <div className={`bubble ${message.role}`}>
       {message.role === "assistant" && message.streaming && (

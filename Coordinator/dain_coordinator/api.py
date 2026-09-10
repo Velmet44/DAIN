@@ -70,7 +70,9 @@ def require_api_key(request: Request) -> None:
     if provided is None:
         auth = request.headers.get("authorization", "")
         provided = auth.removeprefix("Bearer ").strip() or None
-    if provided is None or not secrets.compare_digest(provided, settings.api_key):
+    if provided is None or not secrets.compare_digest(
+        provided.encode("utf-8"), settings.api_key.encode("utf-8")
+    ):
         raise HTTPException(status_code=401, detail="invalid API key")
 
 
@@ -90,7 +92,9 @@ def require_admin(request: Request) -> None:
     if provided is None:
         auth = request.headers.get("authorization", "")
         provided = auth.removeprefix("Bearer ").strip() or None
-    if provided is None or not secrets.compare_digest(provided, settings.admin_api_key):
+    if provided is None or not secrets.compare_digest(
+        provided.encode("utf-8"), settings.admin_api_key.encode("utf-8")
+    ):
         raise HTTPException(status_code=401, detail="invalid admin key")
 
 
@@ -661,6 +665,11 @@ async def completions(payload: CompletionRequest, request: Request):
                     break
             yield "data: [DONE]\n\n"
         finally:
+            if record.state not in (JobState.COMPLETED, JobState.FAILED):
+                # Client went away mid-stream: reach a terminal state so the
+                # ledger fires exactly once and the watchdog stops restarting
+                # a job nobody is reading (nodes are freed by _release below).
+                jobs.fail_job(record.job_id, "client disconnected")
             _release(request, busy_nodes)
 
     if payload.stream:
@@ -690,6 +699,8 @@ async def completions(payload: CompletionRequest, request: Request):
             elif frame["type"] == "error":
                 raise HTTPException(status_code=502, detail=frame["detail"])
     finally:
+        if record.state not in (JobState.COMPLETED, JobState.FAILED):
+            jobs.fail_job(record.job_id, "client disconnected")
         _release(request, busy_nodes)
     return {
         "job_id": record.job_id,

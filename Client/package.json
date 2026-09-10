@@ -13,6 +13,7 @@
     "e2e": "node scripts/e2e.mjs"
   },
   "dependencies": {
+    "dompurify": "^3.4.15",
     "marked": "^12.0.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"

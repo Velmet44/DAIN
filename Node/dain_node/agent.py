@@ -37,6 +37,7 @@ from dain_common.schemas import (
 )
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
+from dain_node import __version__
 from dain_node.capabilities import probe
 from dain_node.identity import IdentityState
 from dain_node.jobs import JobHandler
@@ -105,7 +106,7 @@ class NodeAgent:
             node_id=self.identity.node_id,
             auth_token=self.identity.node_token or self.settings.join_token,
             manifest=probe(self.settings),
-            agent_version="0.1.0",
+            agent_version=__version__,
         )
         response = await client.post(
             f"{self.settings.http_base_url}/node/register",

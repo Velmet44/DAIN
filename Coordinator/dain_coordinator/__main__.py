@@ -7,6 +7,7 @@ first run) with environment variables winning per-field; see
 
 import logging
 import socket
+from dataclasses import replace
 
 import uvicorn
 
@@ -39,6 +40,9 @@ def main() -> None:
     port = _find_open_port(settings.host, settings.port)
     if port != settings.port:
         print(f"[DAIN] Port {settings.port} busy — using {port}")
+        # Write the port back so the discovery responder and any other
+        # settings consumers advertise the port uvicorn actually binds.
+        settings = replace(settings, port=port)
     uvicorn.run(
         create_app(settings, settings_path=str(path)), host=settings.host, port=port
     )

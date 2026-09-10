@@ -13,6 +13,7 @@ import functools
 import hashlib
 import logging
 import os
+import secrets
 
 import httpx
 import torch
@@ -74,7 +75,10 @@ class ModelStoreClient:
             data = response.content
         if hashlib.sha256(data).hexdigest() != content_hash:
             raise RuntimeError(f"shard {shard_id} failed hash verification")
-        tmp = f"{path}.tmp"
+        # Unique temp name: two jobs can download the same missing shard
+        # concurrently (both are spawned tasks), and a shared ".tmp" would let
+        # their writes interleave into one corrupt file.
+        tmp = f"{path}.{secrets.token_hex(4)}.tmp"
         with open(tmp, "wb") as fh:
             fh.write(data)
         os.replace(tmp, path)
@@ -104,7 +108,7 @@ class ModelStoreClient:
             data = response.content
         if hashlib.sha256(data).hexdigest() != tokenizer_hash:
             raise RuntimeError(f"tokenizer {file_name} failed hash verification")
-        tmp = f"{path}.tmp"
+        tmp = f"{path}.{secrets.token_hex(4)}.tmp"
         with open(tmp, "wb") as fh:
             fh.write(data)
         os.replace(tmp, path)
