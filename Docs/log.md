@@ -520,3 +520,27 @@ launcher flow and the old legacy `dain:model` value was now (correctly) ignored,
 - `chat.tsx`: auto-selects the first model from `/v1/models` when none is chosen
   (logged as `auto-selecting first model`). Send + Enter now work out of the box.
 - Build re-verified clean.
+
+**Follow-up (same run):** first full end-to-end send over the web client. Diagnosis of
+"no streaming / weird logs / node silent":
+
+- **Node gave no console output** — `Node/dain_node/__main__.py` never called
+  `configure_logging`, so info logs were dropped by the root logger's default WARNING
+  level (the coordinator configures it in `app.py`). Now calls
+  `configure_logging(json_mode=settings.log_json, level=INFO)`; node window shows
+  lifecycle + `generation_start` / new `generation_done` job=.. tokens=.. reason=..
+  per job (added in both `_run_single_stage` and the distributed sampler in
+  `Node/dain_node/jobs.py`).
+- **Coordinator INFO spam** — every token batch logged
+  `message_ignored type=token_batch` and every lifecycle `job_status_deferred (S4+)`
+  even though those messages are (correctly) processed by the WS loop in `api.py`.
+  Demoted those four deferred/ignored branches in `Coordinator/dain_coordinator/nodes.py`
+  to DEBUG. Token relay is no longer per-token chatty at INFO.
+- **"No streaming" is not a bug** — the dev model `dain-tiny-16L` (16 layers, hidden=64,
+  random weights) generates 58 tokens in ~8 ms on this CPU; each token IS its own
+  TOKEN_BATCH → SSE frame (visible per-token in the browser console `[dain:debug]`),
+  but all frames land in one read burst so React paints once. Visible streaming
+  appears with a real model (S10). "Random text" is expected: the dev model is
+  untrained seed-initialized proto-text (per chat hint).
+
+**Gates:** ruff clean + node tests (16) and coordinator registration/state tests (17) green.

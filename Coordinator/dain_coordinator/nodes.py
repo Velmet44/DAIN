@@ -364,13 +364,13 @@ class NodeService:
             assert isinstance(payload, Register)
             self.register(payload)
         elif envelope.type == MessageType.JOB_STATUS:
-            log.info("job_status_deferred node=%s (S4+)", node_id)
+            log.debug("job_status_deferred node=%s (processed by api.jobs)", node_id)
         elif envelope.type == MessageType.SHARD_MANIFEST:
-            log.info("shard_manifest_deferred node=%s (S5)", node_id)
+            log.debug("shard_manifest_deferred node=%s", node_id)
         elif envelope.type == MessageType.LEDGER_EVENT:
-            log.info("ledger_event_deferred node=%s (S8)", node_id)
+            log.debug("ledger_event_deferred node=%s", node_id)
         else:
-            log.info("message_ignored node=%s type=%s", node_id, envelope.type.value)
+            log.debug("message_ignored node=%s type=%s", node_id, envelope.type.value)
         return MessageOutcome.OK
 
     # -- helpers ---------------------------------------------------------------------

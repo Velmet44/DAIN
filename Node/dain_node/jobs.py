@@ -392,6 +392,12 @@ class JobHandler:
             if rt.generated >= rt.job.params.max_tokens:
                 finish_reason = "length"
                 break
+        log.info(
+            "generation_done job=%s tokens=%d reason=%s",
+            rt.job.job_id,
+            rt.generated,
+            finish_reason or "length",
+        )
         await self._send_tokens(rt, [], is_final=True, finish_reason=finish_reason or "length")
 
     async def _run_distributed_entry(
@@ -466,6 +472,12 @@ class JobHandler:
                         is_final=finished,
                     )
                     if finished:
+                        log.info(
+                            "generation_done job=%s tokens=%d reason=%s",
+                            rt.job.job_id,
+                            rt.generated,
+                            finish_reason,
+                        )
                         await self._status(
                             rt, JobState.COMPLETED, detail=f"generated={rt.generated}"
                         )
