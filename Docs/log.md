@@ -544,3 +544,16 @@ launcher flow and the old legacy `dain:model` value was now (correctly) ignored,
   untrained seed-initialized proto-text (per chat hint).
 
 **Gates:** ruff clean + node tests (16) and coordinator registration/state tests (17) green.
+
+**Follow-up (same run, 2 nodes):** with `numNodes=2` only one node appeared in the client
+dashboard and the coordinator log showed both registrations with the **same**
+`node_id=node-DESKTOP-2RFHTDL-5235`, followed by `connection_replaced` /
+`heartbeat_seq_gap` ping-pong.
+- Root cause: node identity persists to `node_state.json` and loading it **overrides**
+  the env `DAIN_NODE_ID` (`identity.py`). The launcher started every node window in the
+  same `Node/` cwd with the same default state path, so node N+1 loaded node 1's
+  identity and both claimed one coordinator node.
+- Fix in `Scripts/start-samepc.ps1` (node branch): each node now gets its own
+  `DAIN_NODE_STATE_PATH=node_state-<index>.json` and `DAIN_MODEL_CACHE=shard_cache-<index>`
+  so same-PC nodes keep distinct persisted identities (distinct caches also avoid
+  concurrent shard-write races). Script re-verified with `Parser.ParseFile` (clean, ASCII).

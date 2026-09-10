@@ -46,6 +46,11 @@ function Exec-Component {
         "node" {
             if (-not $env:DAIN_MODEL_STORE_DIR) { $env:DAIN_MODEL_STORE_DIR = $script:ModelStore }
             if (-not $env:DAIN_NODE_ID) { $env:DAIN_NODE_ID = "node-$NodeIndex" }
+            # Per-node identity + cache: every node window must have its own
+            # node_state.json (persisted identity overrides DAIN_NODE_ID) and its
+            # own shard cache, otherwise nodes on the same PC collide on one id.
+            if (-not $env:DAIN_NODE_STATE_PATH) { $env:DAIN_NODE_STATE_PATH = "node_state-$NodeIndex.json" }
+            if (-not $env:DAIN_MODEL_CACHE) { $env:DAIN_MODEL_CACHE = "shard_cache-$NodeIndex" }
             if (-not $env:DAIN_MODEL) { $env:DAIN_MODEL = "dain-tiny-16L" }
             Write-Host "=== DAIN Node $($env:DAIN_NODE_ID) ===" -ForegroundColor Green
             Push-Location (Join-Path $script:Root "Node")
