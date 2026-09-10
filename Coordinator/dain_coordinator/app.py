@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import pathlib
 from collections.abc import AsyncIterator
 
 from dain_common.logging_setup import configure_logging
@@ -12,6 +13,7 @@ from dain_common.model_store import list_models as shard_store_list
 from dain_common.schemas import ModelManifest, NodeState
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from dain_coordinator.api import (
     admin_router,
@@ -32,6 +34,16 @@ from dain_coordinator.settings import CoordinatorSettings
 from dain_coordinator.store import SQLiteRegistry
 
 log = logging.getLogger("dain.coordinator.app")
+
+_UI_HTML: str | None = None
+
+
+def _admin_ui() -> str:
+    """The self-contained admin page (no build step), read once at import."""
+    global _UI_HTML
+    if _UI_HTML is None:
+        _UI_HTML = pathlib.Path(__file__).with_name("admin_ui.html").read_text(encoding="utf-8")
+    return _UI_HTML
 
 
 async def _watchdog_loop(faults, settings: CoordinatorSettings) -> None:
@@ -142,5 +154,11 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/admin", include_in_schema=False)
+    @app.get("/admin/", include_in_schema=False)
+    def admin_ui() -> HTMLResponse:
+        """Served shell only — every data call the page makes is authed separately."""
+        return HTMLResponse(_admin_ui())
 
     return app

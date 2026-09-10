@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAIN Coordinator</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.45 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    background: #0d1117; color: #e6edf3;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 16px;
+    border-bottom: 1px solid #21262d; background: #161b22; position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 15px; margin: 0 12px 0 0; white-space: nowrap; }
+  label { display: flex; align-items: center; gap: 6px; color: #9198a1; font-size: 12px; white-space: nowrap; }
+  input {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3;
+    padding: 4px 8px; width: 170px; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  }
+  input:focus { outline: 1px solid #2f81f7; }
+  button {
+    background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+    padding: 5px 12px; cursor: pointer; font-size: 12px;
+  }
+  button:hover { background: #30363d; }
+  #status { margin-left: auto; font-size: 12px; color: #9198a1; white-space: nowrap; }
+  .err { color: #f85149; }
+  .ok  { color: #3fb950; }
+  .metrics {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px;
+    padding: 12px 16px;
+  }
+  .metric { background: #161b22; border: 1px solid #21262d; border-radius: 8px; padding: 10px 14px; }
+  .metric .v { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .metric .k { color: #9198a1; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
+  main { display: grid; grid-template-columns: 1.4fr 1fr; gap: 12px; padding: 0 16px 16px; }
+  .card { background: #161b22; border: 1px solid #21262d; border-radius: 8px; overflow: hidden; margin-bottom: 12px; }
+  .card h2 { margin: 0; padding: 8px 14px; font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+             color: #9198a1; background: #1c2128; border-bottom: 1px solid #21262d; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #21262d; vertical-align: top; }
+  th { color: #9198a1; font-weight: 500; background: #161b22; position: sticky; top: 38px; }
+  td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tr.node { cursor: pointer; }
+  tr.node:hover { background: #1c2128; }
+  .mono { font-family: ui-monospace, Consolas, monospace; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; }
+  .st-ONLINE { background: #1f6feb22; color: #58a6ff; }
+  .st-BUSY    { background: #d2992222; color: #e3b341; }
+  .st-DEGRADED{ background: #db6d2822; color: #f0883e; }
+  .st-OFFLINE { background: #f8514922; color: #f85149; }
+  .tag { color: #9198a1; }
+  .detail-row { padding: 12px 14px; border-top: 1px solid #21262d; }
+  .comp { display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 12px; }
+  .comp .name { width: 110px; color: #9198a1; }
+  .bar { height: 8px; border-radius: 4px; background: #21262d; flex: 1; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: #2f81f7; }
+  .hist { font-size: 12px; color: #c9d1d9; }
+  .hist li { margin: 3px 0; }
+  ul { margin: 0; padding-left: 18px; }
+  .pl { font-size: 12px; padding: 6px 14px; border-bottom: 1px solid #21262d; }
+  .pl .t { color: #9198a1; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>DAIN Coordinator</h1>
+  <label>Admin key <input id="adminKey" type="password" placeholder="X-Admin-Key"></label>
+  <label>API key <input id="apiKey" type="password" placeholder="X-API-Key"></label>
+  <label><input id="auto" type="checkbox" checked> auto 5s</label>
+  <button id="refresh">Refresh</button>
+  <span id="status"></span>
+</header>
+
+<div class="metrics" id="metrics"></div>
+
+<main>
+  <section>
+    <div class="card">
+      <h2>Nodes</h2>
+      <table>
+        <thead><tr><th>Node</th><th>State</th><th>Score</th><th>GPU</th><th>agent</th><th>Heartbeat</th></tr></thead>
+        <tbody id="nodes"></tbody>
+      </table>
+      <div id="detail" class="detail-row" hidden></div>
+    </div>
+    <div class="card">
+      <h2>Placements</h2>
+      <div id="placements"></div>
+    </div>
+  </section>
+  <section>
+    <div class="card">
+      <h2>Ledger summary</h2>
+      <table>
+        <thead><tr><th>Node</th><th>Success</th><th>Retried</th><th>Failed</th><th>Flagged</th><th>tokens out</th><th>credits</th></tr></thead>
+        <tbody id="ledger"></tbody>
+      </table>
+    </div>
+    <div class="card">
+      <h2>Models</h2>
+      <div id="models" style="padding: 8px 14px; font-size: 12px;"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const keys = {
+  get admin(){ return localStorage.getItem("dain_admin") || ""; },
+  get api(){ return localStorage.getItem("dain_api") || ""; },
+  set admin(v){ localStorage.setItem("dain_admin", v); },
+  set api(v){ localStorage.setItem("dain_api", v); },
+};
+$("adminKey").value = keys.admin;
+$("apiKey").value = keys.api;
+let selectedNode = null;
+
+async function api(url, keyName) {
+  const key = keys[keyName];
+  const headers = key ? { ["X-" + (keyName === "admin" ? "Admin" : "API") + "-Key"]: key } : {};
+  const res = await fetch(url, { headers });
+  if (res.status === 401) throw new Error("401: bad " + keyName + " key");
+  if (!res.ok) throw new Error(url + " -> " + res.status);
+  return res.json();
+}
+
+function ago(s) {
+  if (s == null) return "—";
+  const secs = Math.floor(Date.now() / 1000 - s);
+  const m = Math.floor(secs / 60);
+  if (m >= 60) return m + "m";
+  return m <= 0 ? secs + "s" : m + "m" + (secs % 60) + "s";
+}
+
+const st = s => `<span class="pill st-${s}">${s}</span>`;
+const esc = t => String(t ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const fmtGpu = n => n.gpu ? (n.gpu + (n.vram_free_gb != null ? " · " + n.vram_free_gb.toFixed(1) + "GB free" : "")) : "cpu-only";
+
+function renderNodes(rows) {
+  $("nodes").innerHTML = rows.map(n => `
+    <tr class="node" data-id="${esc(n.node_id)}">
+      <td class="mono">${esc(n.node_id)}</td>
+      <td>${st(n.state)}</td>
+      <td class="num">${n.score != null ? n.score.toFixed(3) : "—"}</td>
+      <td>${esc(fmtGpu(n))}</td>
+      <td class="mono">${esc(n.agent_version || "—")}</td>
+      <td>${ago(n.last_heartbeat)}</td>
+    </tr>`).join("") || `<tr><td colspan="6" class="tag">no nodes registered</td></tr>`;
+  document.querySelectorAll("tr.node").forEach(tr => tr.onclick = () => nodeDetail(tr.dataset.id));
+}
+
+async function nodeDetail(nodeId) {
+  selectedNode = selectedNode === nodeId ? null : nodeId;
+  const d = $("detail");
+  if (!selectedNode) { d.hidden = true; return; }
+  try {
+    const node = await api("/admin/nodes/" + encodeURIComponent(nodeId), "admin");
+    const comps = Object.entries(node.score_components || {});
+    d.innerHTML = `
+      <div class="comp mono" style="font-weight:600">${esc(node.node_id)}
+        ${node.connected ? '<span class="tag">connected</span>' : ""} score=${(node.score ?? 0).toFixed(3)}</div>
+      ${comps.map(([k, v]) => `<div class="comp"><span class="name">${esc(k)}</span>
+        <div class="bar"><i style="width:${Math.min(100, Math.max(0, v * 100)).toFixed(0)}%"></i></div>
+        <span class="mono">${Number(v).toFixed(3)}</span></div>`).join("")}
+      <ul class="hist">${node.history.map(h =>
+        `<li>${ago(h.ts)} — <b>${esc(h.from_state || "—")}</b> → <b>${esc(h.to_state)}</b>${h.reason ? " · " + esc(h.reason) : ""}</li>`).join("")}</ul>`;
+    d.hidden = false;
+  } catch (e) { fail(e); }
+}
+
+function renderLedger(data) {
+  const rows = (data.nodes || []).map(b => `
+    <tr>
+      <td class="mono">${esc(b.node_id)}</td>
+      <td class="num">${b.success}</td>
+      <td class="num">${b.retried_away}</td>
+      <td class="num">${b.failed}</td>
+      <td class="num">${b.flagged}</td>
+      <td class="num">${b.tokens_out}</td>
+      <td class="num">${Number(b.credits).toFixed(2)}</td>
+    </tr>`).join("");
+  const t = data.totals || {};
+  $("ledger").innerHTML = rows +
+    `<tr style="font-weight:600"><td>total</td><td>${t.success ?? ""}</td><td></td><td></td>
+     <td class="num">${t.flagged ?? 0}</td><td class="num">${t.tokens_out ?? 0}</td>
+     <td class="num">${Number(t.credits ?? 0).toFixed(2)}</td></tr>` ||
+    `<tr><td colspan="7" class="tag">no ledger events yet</td></tr>`;
+}
+
+function renderPlacements(pl) {
+  $("placements").innerHTML = pl.map(e => `
+    <div class="pl">${ago(e.ts)} <span class="t">trigger=${esc(e.trigger)} model=${esc(e.model_id)}
+      k=${e.k ?? "—"} ${e.degraded ? "· DEGRADED" : ""}</span>
+      <br>${(e.node_ids || []).map(x => `<span class="mono">${esc(x)}</span>`).join(" → ")}${(e.backups||[]).length ? ` <span class="tag">bak: ${e.backups.map(esc).join(", ")}</span>` : ""}</div>`).join("") ||
+    `<div class="pl tag">no placements yet</div>`;
+}
+
+function renderModels(models) {
+  $("models").innerHTML = models.length
+    ? models.map(m => `<div class="mono">${esc(m.model_id)} <span class="tag">${esc(m.name)} · ${m.layers}L · hidden ${m.hidden}</span></div>`).join("")
+    : `<span class="tag">model store empty — export a model first</span>`;
+}
+
+function renderMetrics(m) {
+  $("metrics").innerHTML = [
+    ["models", m.models], ["nodes online", m.online], ["other", m.other],
+    ["active jobs", m.active_jobs], ["total credits", Number(m.credits).toFixed(2)],
+  ].map(([k, v]) => `<div class="metric"><div class="v">${esc(v)}</div><div class="k">${k}</div></div>`).join("");
+}
+
+let failTimer = 0;
+function fail(e) {
+  $("status").className = "err";
+  $("status").textContent = String(e.message || e);
+  clearTimeout(failTimer); failTimer = setTimeout(() => $("status").textContent = "", 4000);
+}
+
+async function refresh() {
+  $("status").textContent = "loading…";
+  try {
+    const [nodes, feed, ledger, models] = await Promise.all([
+      api("/admin/nodes", "admin"),
+      api("/v1/nodes", "api"),
+      api("/ledger/summary", "api"),
+      api("/v1/models", "api"),
+    ]);
+    renderNodes(nodes);
+    renderPlacements(feed.placements || []);
+    renderLedger(ledger);
+    renderModels((models.models || []).map(m => m));
+    renderMetrics({
+      models: (models.models || []).length,
+      online: nodes.filter(n => n.state === "ONLINE").length,
+      other: nodes.filter(n => n.state !== "ONLINE").length,
+      active_jobs: feed.active_jobs,
+      credits: (ledger.totals || {}).credits || 0,
+    });
+    $("status").className = "ok";
+    $("status").textContent = new Date().toLocaleTimeString();
+  } catch (e) { fail(e); }
+}
+
+$("adminKey").addEventListener("input", e => { keys.admin = e.target.value; });
+$("apiKey").addEventListener("input", e => { keys.api = e.target.value; });
+$("refresh").onclick = refresh;
+setInterval(() => { if ($("auto").checked) refresh(); }, 5000);
+refresh();
+</script>
+</body>
+</html>

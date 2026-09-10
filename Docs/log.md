@@ -650,6 +650,29 @@ rotated between jobs (job1 stage0=node-1, job2 stage0=node-2), i.e. placement ba
   `uv sync` and `Client/node_modules` via `npm ci`). Agreed with the earlier session-4
   decision that the repo contains no absolute paths (`rg E:\DAIN` clean) so the folder
   is relocatable.
+
+### 2026-09-10 — coordinator admin web UI (session 8)
+
+- Added a **self-contained admin SPA** served by the coordinator at `GET /admin` and
+  `GET /admin/` (`Coordinator/dain_coordinator/admin_ui.html`, zero build step, vanilla
+  JS + CSS, dark theme, ASCII). Read once at import via `_admin_ui()` in `app.py`;
+  excluded from the OpenAPI schema (`include_in_schema=False`).
+- **Security model:** the HTML is an unauthenticated shell — every data call it makes
+  is individually authed, so nothing leaks. The page takes two keys (X-Admin-Key for
+  `/admin/*`, X-API-Key for `/v1/*` + `/ledger/*`), persisted in `localStorage`
+  (`dain_admin` / `dain_api`); 401s surface as a hint banner.
+- **What it shows** (polled every 5 s, pausable, manual refresh): metric strip (models,
+  online/other nodes, active jobs, total credits), nodes table (state pill, score, GPU/
+  VRAM, agent version, last-heartbeat age), click-to-expand node detail (score-component
+  bars + full state-history trail), recent placement events, ledger summary per unit
+  (success/retried/failed/flagged/credits + totals), model list. Data feeds:
+  `GET /admin/nodes`, `/admin/nodes/{id}`, `/v1/nodes`, `/ledger/summary`, `/v1/models`.
+- Tests: `Coordinator/tests/test_admin_ui.py` (4 — page served with the right content
+  type, slashless `/admin` alias, no-auth shell, and the data APIs staying locked to
+  their own keys incl. wrong-key 401).
+- Gates: Coordinator **40 passed** (+4), ruff clean.
+- Answer to the earlier admin question: the coordinator now has a browser page —
+  open `http://<coord-host>:8000/admin/` and enter the admin + API keys.
 ### 2026-09-10 - real-model path: export_hf_model + HF tokenizer (session 8)
 
 - Implemented the real-model path end to end so actual Hugging Face checkpoints (Llama family) can
