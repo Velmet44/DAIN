@@ -713,3 +713,42 @@ rotated between jobs (job1 stage0=node-1, job2 stage0=node-2), i.e. placement ba
   runtime defaults are cwd-relative (`model_store`, `node_state.json`, `shard_cache`), so
   the folder still works when moved to another location or machine after
   `Scripts/bootstrap.ps1`.
+
+### 2026-09-10 — LAN coordinator auto-discovery (session 9, commit 2e7becf)
+
+**Problem:** a node's `config.json` defaulted to `ws://localhost:8000`, so every LAN node
+needed a hand-typed coordinator IP (`coord_url`) before it could join.
+
+**Solution — UDP broadcast probe (stdlib-only, no new deps):**
+- **Common (`dain_common/node_discovery.py`):** v1 protocol — node broadcasts
+  `{"v":1,"op":"discover","k":"<join_token>"}` (≤512 B JSON datagrams); coordinator replies
+  unicast `{"v":1,"op":"hello","port":8000}`. The node builds
+  `ws://<reply-source-ip>:<port>` where the source address is *authoritative* — it is the
+  interface that can actually reach that node, so a multi-homed / DHCP coordinator always
+  advertises the right address. Token check is timing-safe (`secrets.compare_digest`).
+  WAN/public: disable discovery and set `coord_url` explicitly (subnet-scoped by design).
+- **Coordinator (`dain_coordinator/discovery.py`):** `DiscoveryResponder` — non-blocking UDP
+  socket, answers only authenticated probes, drops malformed/wrong-token silently, logs
+  `discovery_request source=`. Wired into `create_app`'s lifespan (start/run/close); an
+  occupied discovery port logs `discovery_disabled bind_failed` and the coordinator keeps
+  running. New settings: `DAIN_DISCOVERY_PORT=8456`, `DAIN_DISCOVERY_ENABLED=true`.
+- **Node (`dain_node/discovery.py`):** `discover_coordinator()` broadcasts the probe, collects
+  replies until timeout, returns the best `ws://…`. Handles the Windows ICMP quirk where a
+  silent host's "port unreachable" surfaces as `ConnectionResetError` on `recvfrom`
+  (swallowed, keep listening).
+- **`__main__.py`:** on startup in standalone mode, an empty `coord_url` triggers one probe
+  (≤2 s); on success the URL is written into `config.json` atomically (`write_config`, tmp +
+  replace) so later runs skip the probe and the user can read exactly what the node joined.
+  ConfigWatcher baseline is taken *after* the write, so the auto-write never looks like a
+  user edit. Empty `coord_url` in `NodeSettings.from_config()` falls back to localhost.
+- **`Scripts/build-node.ps1`**: new default config ships `coord_url=""` (auto-discover);
+  publish message updated ("extract the zip and run DainNode.exe — it auto-discovers the
+  coordinator on the LAN; edit config.json only for remote/WAN use"). `Deploy/.env.example`
+  documents the two new discovery vars.
+- **Also committed (was seated in the working tree):** the `/msg` chat UI
+  (`chat_ui.html`, `app.py` route, `Coordinator/tests/test_chat_ui.py`) per user decision.
+- **Gates:** Common **54 passed** ✓, Coordinator **48 passed** ✓, Node **25 passed** ✓,
+  ruff clean across all three (Sim suite left to the usual manual/CI run).
+- WIP context: user's next focus is WAN (TLS/wss via reverse proxy, per-node credentials,
+  outbound-only nodes); LAN improvements after this are coordinator IP stability/DNS and
+  flaky-WiFi heartbeat tolerance.
