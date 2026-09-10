@@ -752,3 +752,38 @@ needed a hand-typed coordinator IP (`coord_url`) before it could join.
 - WIP context: user's next focus is WAN (TLS/wss via reverse proxy, per-node credentials,
   outbound-only nodes); LAN improvements after this are coordinator IP stability/DNS and
   flaky-WiFi heartbeat tolerance.
+
+### 2026-09-10 — coordinator config.json: all options, auto-created (session 10, commit 180c241)
+
+**Problem:** the coordinator only accepted env vars (`DAIN_*`), so every run needed a long
+env block (it was "annoying to put env vars every time"). The node already had config.json;
+the coordinator ended up with the same pattern.
+
+- **`settings.py`:** added `from_config(data, base_dir)` covering **every** field (verified by
+  `test_env_map_covers_every_default_key` — no setting can exist only in env or only in the
+  file), plus `DEFAULT_CONFIG` (the full 36-option file) and `COORDINATOR_ENV` (field → env
+  var map). Also plugged five env gaps that previously had *no* env mapping at all:
+  `DAIN_MONITOR_TICK_S`, `DAIN_UPTIME_ALPHA`, `DAIN_OVERLOAD_UTIL_PCT`, `DAIN_OVERLOAD_STRIKES`,
+  `DAIN_TEMP_DEGRADE_C`, `DAIN_MAX_COMPLETION_TOKENS`. `_truthy()` accepts JSON booleans and
+  "1"/"true"/"yes"/"on". Relative `db_path`/`model_store_dir` resolve against the config's
+  folder; unknown keys are ignored (extra doc fields never break loading); `cors_origins`
+  accepts a list *or* a comma string.
+- **`config.py` (new):** `find_base_dir()` (dev → `Coordinator/`) and `resolve_settings()`:
+  if `Coordinator/config.json` is missing it **writes a full default config** on first run
+  (`config_created` logged, message "edit it and restart"), then overlays environment
+  variables per-field so launchers (`Scripts/start-samepc.ps1`, Sim harness env) keep their
+  precedence — config provides defaults, env wins when set.
+- **`__main__.py`:** `python -m dain_coordinator` now just works — no env needed; logs
+  `coordinator_start host=… port=… config=… config_created=…`.
+- **`.gitignore`:** `Coordinator/config.json` (machine-specific, auto-generated).
+- **Not file-configurable (kept as code defaults):** `scoring`/`accounting_weights` are
+  nested config objects — reference values already live in `Deploy/.env.example`/Common.
+- **Tests:** `Coordinator/tests/test_coordinator_config.py` (13: round-trip of every default,
+  full override, comma-vs-list CORS, relative/absolute path resolution, default-file
+  creation, existing-file use, env-over-config, env-over-missing-file, env-map coverage,
+  base-dir sanity). Real smoke: first `resolve_settings()` in `Coordinator/` created the
+  36-key `config.json` exactly as intended.
+- **Gates:** Coordinator **61 passed** ✓ (48 + 13), ruff clean. Common/Node untouched.
+- Behavior notes for the user: changing `Coordinator/config.json` takes effect on the next
+  start (read once, no watchdog — a mid-flight reload could strand running jobs); env vars
+  still override individual fields; `scoring`/`accounting_weights` stay code-level.
