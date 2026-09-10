@@ -62,6 +62,23 @@ Or for a one-command cluster (no browser, chat REPL):
 cd Sim && uv run python -m dain_sim.cluster --nodes 4 --chat
 ```
 
+### Importing GGUF models
+
+Drop any **Llama-architecture** `.gguf` file into `model_store/` and convert it to
+DAIN's sharded safetensors + manifest format:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Scripts\import-gguf.ps1
+```
+
+That imports every pending `.gguf` in the store (pass `-GgufFile <file>`,
+`-ModelId`, `-Dtype fp16|fp32`, `-Tokenizer <hf-repo>` to customize). It is
+idempotent — already-imported files are skipped (`-Force` re-imports). The same
+converter is available from the coordinator's admin page (**Models → GGUF files**),
+which shells out to the Node converter without pulling torch into the
+coordinator. Note that DAIN executes fp16/fp32, not GGUF quants: a Q4 7B
+(~4 GB) becomes ~14 GB of fp16 shards.
+
 ## Repository layout
 
 The **root holds no buildable code** — only shared docs, config, and the project

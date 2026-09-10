@@ -58,6 +58,7 @@ COORDINATOR_ENV: dict[str, str] = {
     "admin_api_key": "DAIN_ADMIN_API_KEY",
     "discovery_enabled": "DAIN_DISCOVERY_ENABLED",
     "discovery_port": "DAIN_DISCOVERY_PORT",
+    "node_project_dir": "DAIN_NODE_PROJECT_DIR",
 }
 
 # Default config.json written next to the coordinator on first run.  Key names
@@ -97,6 +98,7 @@ DEFAULT_CONFIG: dict[str, object] = {
     "admin_api_key": DEFAULT_ADMIN_API_KEY,
     "discovery_enabled": True,
     "discovery_port": 8456,
+    "node_project_dir": "",
 }
 
 
@@ -156,6 +158,10 @@ class CoordinatorSettings:
     # they never need a hand-typed coord_url. Disable for public/WAN deploys.
     discovery_enabled: bool = True
     discovery_port: int = 8456
+    # GGUF import (session 14): the Node project the admin page shells out to
+    # (`uv run --project <dir> python -m dain_node.import_gguf`). Empty = the
+    # sibling `Node/` directory next to the coordinator.
+    node_project_dir: str = ""
 
     @property
     def offline_timeout_s(self) -> float:
@@ -202,6 +208,7 @@ class CoordinatorSettings:
             discovery_enabled=env.get("DAIN_DISCOVERY_ENABLED", "true").lower()
             in ("1", "true", "yes"),
             discovery_port=int(env.get("DAIN_DISCOVERY_PORT", "8456")),
+            node_project_dir=env.get("DAIN_NODE_PROJECT_DIR", ""),
             log_json=env.get("DAIN_LOG_JSON", "").lower() in ("1", "true", "yes"),
         )
 
@@ -262,4 +269,5 @@ class CoordinatorSettings:
             admin_api_key=str(data.get("admin_api_key", DEFAULT_ADMIN_API_KEY)),
             discovery_enabled=_truthy(data.get("discovery_enabled", True)),
             discovery_port=int(data.get("discovery_port", 8456)),
+            node_project_dir=str(data.get("node_project_dir", "") or ""),
         )

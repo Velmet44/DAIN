@@ -53,6 +53,7 @@
   .st-busy    { background: #d2992222; color: #e3b341; }
   .st-degraded{ background: #db6d2822; color: #f0883e; }
   .st-offline { background: #f8514922; color: #f85149; }
+  .st-pending { background: #21262d; color: #9198a1; }
   .tag { color: #9198a1; }
   .detail-row { padding: 12px 14px; border-top: 1px solid #21262d; }
   .comp { display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 12px; }
@@ -134,9 +135,14 @@
     <div class="card">
       <h2>Models</h2>
       <div id="models" style="padding: 8px 14px; font-size: 12px;"></div>
+      <div id="ggufWrap" style="border-top:1px solid #21262d;">
+        <div class="pl tag" style="border-bottom:none;">GGUF files in the model store</div>
+        <div id="ggufs" style="padding: 0 14px 8px 14px; font-size: 12px;"></div>
+      </div>
       <div class="keys" style="border-top:1px solid #21262d;">
         <div class="kactions">
           <button id="rescanModels">Rescan placements</button>
+          <button id="importGgufs">Import pending GGUFs</button>
           <button id="exportJson">Export ledger JSON</button>
           <button id="exportCsv">Export ledger CSV</button>
         </div>
@@ -407,6 +413,44 @@ $("rescanModels").onclick = async () => {
   catch (e) { fail(e); }
 };
 
+// -- GGUF import ------------------------------------------------------------
+const GGUF_PILL = {
+  imported:  '<span class="pill st-online">imported</span>',
+  importing: '<span class="pill st-busy">importing…</span>',
+  pending:   '<span class="pill st-pending">pending</span>',
+};
+
+function renderGgufs(r) {
+  const rows = r.imports || [];
+  $("ggufWrap").style.display = rows.length || r.error ? "" : "none";
+  $("ggufs").innerHTML = rows.map(g => `
+    <div class="pl" style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:none;">
+      <span class="mono" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:200px" title="${esc(g.filename)}">${esc(g.filename)}</span>
+      <span class="tag">${fmtBytes(g.size_bytes)}</span>
+      ${g.model_id ? `<span class="tag mono">${esc(g.model_id)}</span>` : ""}
+      <span style="margin-left:auto">${GGUF_PILL[g.status] || ""}</span>
+      ${g.status === "pending" ? `<button class="gimp" data-f="${esc(g.filename)}">Import</button>` : ""}
+    </div>`).join("") + (r.error ? `<div class="err">${esc(r.error)}</div>` : "") ||
+    `<span class="tag">no .gguf files — drop one into the model store directory</span>`;
+  document.querySelectorAll(".gimp").forEach(b => b.onclick = () => importGguf(b.dataset.f));
+}
+
+async function loadGgufs() {
+  if (!keys.admin) return;
+  try { renderGgufs(await api("/admin/models/imports", "admin")); }
+  catch (e) { /* card stays hidden on failure */ }
+}
+
+async function importGguf(filename) {
+  try {
+    await api("/admin/models/import", "admin", { method: "POST", body: filename ? { filename } : {} });
+    ok("GGUF import started — follow progress in Logs");
+    loadGgufs();
+  } catch (e) { fail(e); }
+}
+
+$("importGgufs").onclick = () => importGguf(null);
+
 async function refresh() {
   $("status").textContent = "loading…";
   try {
@@ -436,6 +480,7 @@ async function refresh() {
       renderJobs(await api("/admin/jobs", "admin"));
       if ($("logAuto").checked) await loadLogs();
       await loadKeys();
+      await loadGgufs();
     }
   } catch (e) { fail(e); }
 }

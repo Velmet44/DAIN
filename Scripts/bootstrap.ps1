@@ -33,9 +33,17 @@ if (-not (Get-Command npm -ErrorAction SilentlyContinue)) {
 }
 
 # --- Python envs (uv sync reads .python-version + uv.lock: exact, portable) ---
+# A .venv moved here from another machine/location can be stale or broken
+# (foreign interpreter paths, mismatched wheels). Self-heal: if sync or the
+# smoke test fails, delete the venv and rebuild it from the lockfile.
 foreach ($pkg in "Common", "Node", "Coordinator", "Sim") {
+    $proj = Join-Path $root $pkg
     Write-Host "uv sync: $pkg" -ForegroundColor Yellow
-    & uv sync --project (Join-Path $root $pkg) --quiet
+    & uv sync --project $proj --quiet
+    if ($LASTEXITCODE -ne 0) { Write-Host "sync failed - rebuilding venv" -ForegroundColor Red }
+    else { continue }
+    Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $proj ".venv")
+    & uv sync --project $proj
     if ($LASTEXITCODE -ne 0) { exit 1 }
 }
 
@@ -56,7 +64,19 @@ finally {
 #     depends on all four as editable path packages) and export tiny model ---
 Write-Host "smoke test: imports" -ForegroundColor Yellow
 & uv run --project (Join-Path $root "Sim") python -c "import dain_sim.cluster, dain_coordinator.app, dain_node.agent, dain_common; print('imports OK')"
-if ($LASTEXITCODE -ne 0) { exit 1 }
+if ($LASTEXITCODE -ne 0) {
+    # Same self-heal path as above: a broken venv (e.g. moved from elsewhere)
+    # gets rebuilt once before giving up.
+    Write-Host "smoke test failed - rebuilding all venvs" -ForegroundColor Red
+    foreach ($pkg in "Common", "Node", "Coordinator", "Sim") {
+        $proj = Join-Path $root $pkg
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue (Join-Path $proj ".venv")
+        & uv sync --project $proj
+        if ($LASTEXITCODE -ne 0) { exit 1 }
+    }
+    & uv run --project (Join-Path $root "Sim") python -c "import dain_sim.cluster, dain_coordinator.app, dain_node.agent, dain_common; print('imports OK')"
+    if ($LASTEXITCODE -ne 0) { exit 1 }
+}
 
 if ($ModelStore) {
     Write-Host "export tiny llama -> $ModelStore" -ForegroundColor Yellow

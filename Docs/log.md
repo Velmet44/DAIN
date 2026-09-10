@@ -895,3 +895,50 @@ Post-release audit found seven real bugs; all fixed in one pass.
 - **Gates:** Coordinator **78 passed**, Common **54 passed**, Node **25 passed**, ruff clean
   on all touched Python files; Client `tsc --noEmit` + vite build clean. Sim (subprocess
   cluster e2e) not re-run this session.
+
+### 2026-09-10 — GGUF import: converter + script + admin trigger (session 14)
+
+Drop a Llama-family `.gguf` into `model_store/`, run one command (or click one
+button on the admin page), get DAIN sharded safetensors + manifest. Idempotent.
+
+- **Converter** (`Node/dain_node.import_gguf`, new): reads GGUF metadata
+  (rejects non-llama architectures), dequantizes to fp32, then reuses
+  `shard_export._write_shards` unchanged (fp16 default, `--layers-per-shard`,
+  `--model-id`, `--tokenizer <hf-repo>` fallback for SPM vocabs, `--force`).
+  Loading deliberately bypasses `from_pretrained(gguf_file=...)`: that path's
+  accelerate meta-device init **segfaults** on the pinned torch-CPU/Windows
+  stack (verified against transformers 4.46.3) — instead
+  `load_gguf_checkpoint` + `load_state_dict(assign=True)`, which round-trips
+  weights exactly (incl. the llama.cpp q/k rope half-split permute, GQA-aware).
+  Tied embeddings synthesize `lm_head` like `export_hf_model`. New deps: `gguf`
+  (no accelerate — dropped after the segfault finding).
+- **Idempotency**: `model_store/.gguf-imports.json` maps file name → sha256 +
+  model_id. Skip while the model dir has a manifest AND the sha matches;
+  deleting the dir or changing the file re-imports. `--force` overrides.
+- **Script** (`Scripts/import-gguf.ps1`, new): `-GgufFile/-ModelStore/-ModelId/
+  -Dtype/-LayersPerShard/-Tokenizer/-Force`, anchors on its own location.
+- **Admin trigger** (coordinator, no torch added): `GET /admin/models/imports`
+  (lists `*.gguf` with pending/importing/imported status from the converter
+  marker, `node_project` capability, last error) + `POST /admin/models/import`
+  (filename path-traversal-guarded to a store-local basename; 409 while a run
+  is active; 503 with clear reason when no Node checkout/uv). Runs
+  `uv run --project <Node> python -m dain_node.import_gguf` as a subprocess,
+  streaming output into the ring log (visible on the admin Logs card), then
+  auto-recomputes placements. `node_project_dir` setting (config.json key +
+  `DAIN_NODE_PROJECT_DIR` env) overrides the default sibling `Node/`.
+  Test seam: `app.state.gguf_runner` (async callable replacing the subprocess).
+- **Admin UI**: Models card gains a GGUF section — per-file status pills
+  (pending/importing…/imported), per-file Import button, "Import pending
+  GGUFs" action, last error line; hidden when there are no .gguf files.
+- **Portability hardening**: `bootstrap.ps1` now self-heals a moved/broken
+  `.venv` — on sync or smoke-test failure it deletes venvs and re-syncs from
+  the lockfile once before giving up (verified: fresh-clone and moved-venv
+  scenarios both pass; uv venvs point outside the project dir).
+- **Gates:** Node **29 passed** (4 new GGUF tests: exact round-trip incl. GQA
+  permute, idempotency/lifecycle, non-llama rejection, CLI), Coordinator
+  **83 passed** (5 new endpoint tests: listing status classification,
+  filename validation 400/404, subprocess argv + 409-busy + auto-rescan,
+  failure reporting, 503 without Node project), Common 54, ruff clean
+  everywhere. **Live smoke**: real `.gguf` in `model_store/` →
+  `Scripts/import-gguf.ps1` → 2 shards + tokenizer + manifest, second run
+  skips, `list_models` sees the import, artifacts cleaned up.

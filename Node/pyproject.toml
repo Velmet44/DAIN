@@ -13,6 +13,7 @@ dependencies = [
     "torch>=2.5,<3",
     "transformers==4.46.3",
     "safetensors>=0.4",
+    "gguf>=0.6",
 ]
 
 [tool.uv.sources]

@@ -48,7 +48,7 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from dain_coordinator.config import persist_config
+from dain_coordinator.config import find_base_dir, persist_config
 from dain_coordinator.jobs import ActivationRelay, JobTracker
 from dain_coordinator.logs import snapshot as log_snapshot
 from dain_coordinator.nodes import MessageOutcome, NodeService
@@ -499,6 +499,173 @@ def admin_logs(request: Request, lines: int = 200) -> dict:
     """Tail of the in-process coordinator log ring."""
     lines = max(1, min(lines, 2000))
     return {"logs": log_snapshot(lines)}
+
+
+# -- admin: GGUF import (session 14) ------------------------------------------------
+
+
+class GgufImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str | None = Field(default=None, min_length=1)
+    model_id: str | None = Field(default=None, min_length=1)
+    tokenizer: str | None = Field(default=None, min_length=1)
+    dtype: Literal["fp16", "fp32"] = "fp16"
+    layers_per_shard: int = Field(default=4, ge=1, le=64)
+    force: bool = False
+
+
+def _resolve_node_project(settings) -> pathlib.Path | None:
+    """The Node project whose converter the admin page shells out to (uv run)."""
+    candidate = (
+        pathlib.Path(settings.node_project_dir)
+        if settings.node_project_dir
+        else find_base_dir().parent / "Node"
+    )
+    return candidate if (candidate / "pyproject.toml").is_file() else None
+
+
+def _gguf_marker(store: pathlib.Path) -> dict[str, dict]:
+    """The converter's .gguf-imports.json (file -> sha256/model_id), if present."""
+    try:
+        with open(store / ".gguf-imports.json", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+@admin_router.get("/models/imports")
+def admin_gguf_imports(request: Request) -> dict:
+    """GGUF files sitting in the model store + their import status."""
+    settings = request.app.state.settings
+    store = pathlib.Path(settings.model_store_dir)
+    marker = _gguf_marker(store)
+    active = getattr(request.app.state, "gguf_import", None)
+    files = []
+    for f in sorted(store.glob("*.gguf")) if store.is_dir() else []:
+        entry = marker.get(f.name)
+        imported = bool(
+            entry and (store / str(entry.get("model_id", "?")) / "manifest.json").is_file()
+        )
+        if active is not None and active.get("filename") in (None, f.name):
+            status = "importing"
+        elif imported:
+            status = "imported"
+        else:
+            status = "pending"
+        files.append(
+            {
+                "filename": f.name,
+                "size_bytes": f.stat().st_size,
+                "model_id": entry.get("model_id") if entry else None,
+                "status": status,
+                "imported_at": entry.get("imported_at") if entry else None,
+            }
+        )
+    node_dir = _resolve_node_project(settings)
+    return {
+        "imports": files,
+        "busy": active is not None,
+        "error": getattr(request.app.state, "gguf_import_error", None),
+        "node_project": str(node_dir) if node_dir else None,
+    }
+
+
+@admin_router.post("/models/import")
+async def admin_import_gguf(payload: GgufImportRequest, request: Request) -> dict:
+    """Convert .gguf files in the model store via the Node converter.
+
+    The coordinator stays lightweight (no torch): it runs
+    `uv run --project <Node> python -m dain_node.import_gguf` as a subprocess
+    and streams its output into the ring log. Only one import runs at a time.
+    """
+    settings = request.app.state.settings
+    if getattr(request.app.state, "gguf_import", None) is not None:
+        raise HTTPException(status_code=409, detail="a GGUF import is already running")
+    store = pathlib.Path(settings.model_store_dir)
+    if not store.is_dir():
+        raise HTTPException(status_code=404, detail="model store directory not found")
+    if payload.filename:
+        if payload.filename != pathlib.Path(payload.filename).name or not (
+            payload.filename.endswith(".gguf")
+        ):
+            raise HTTPException(
+                status_code=400, detail="filename must be a .gguf directly inside the model store"
+            )
+        if not (store / payload.filename).is_file():
+            raise HTTPException(
+                status_code=404, detail=f"{payload.filename!r} not found in the model store"
+            )
+    node_dir = _resolve_node_project(settings)
+    if node_dir is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Node project not found (set node_project_dir / DAIN_NODE_PROJECT_DIR); "
+            "run Scripts/import-gguf.ps1 on a machine with the DAIN checkout instead",
+        )
+    uv_bin = shutil.which("uv")
+    if uv_bin is None:
+        raise HTTPException(status_code=503, detail="uv not found on PATH")
+
+    argv = [
+        uv_bin,
+        "run",
+        "--project",
+        str(node_dir),
+        "python",
+        "-m",
+        "dain_node.import_gguf",
+        str(store),
+    ]
+    if payload.filename:
+        argv.append(payload.filename)
+    if payload.model_id:
+        argv += ["--model-id", payload.model_id]
+    if payload.tokenizer:
+        argv += ["--tokenizer", payload.tokenizer]
+    if payload.force:
+        argv.append("--force")
+    argv += ["--dtype", payload.dtype, "--layers-per-shard", str(payload.layers_per_shard)]
+
+    request.app.state.gguf_import = {"filename": payload.filename, "started_at": time.time()}
+    asyncio.create_task(_run_gguf_import(request.app, argv))
+    log.info(
+        "admin_gguf_import_start file=%s node_project=%s", payload.filename or "all", node_dir
+    )
+    return {"ok": True, "started": payload.filename or "all pending", "node_project": str(node_dir)}
+
+
+async def _run_gguf_import(app, argv: list[str]) -> None:
+    try:
+        runner = getattr(app.state, "gguf_runner", None)
+        rc = await runner(argv) if runner is not None else _subprocess_import(argv)
+        if rc == 0:
+            app.state.gguf_import_error = None
+            app.state.recompute_pool("gguf_import")
+            log.info("gguf_import_done rc=0")
+        else:
+            app.state.gguf_import_error = f"converter exited with code {rc} (see logs)"
+            log.error("gguf_import_failed rc=%d", rc)
+    except Exception as exc:  # noqa: BLE001 — background task must never crash the loop
+        app.state.gguf_import_error = str(exc)
+        log.exception("gguf_import_error")
+    finally:
+        app.state.gguf_import = None
+
+
+async def _subprocess_import(argv: list[str]) -> int:
+    env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=env,
+    )
+    assert proc.stdout is not None
+    async for raw in proc.stdout:
+        log.info("gguf_import %s", raw.decode("utf-8", "replace").rstrip())
+    return await proc.wait()
 
 
 # -- client API (S4): SSE streaming completions ----------------------------------
