@@ -587,3 +587,16 @@ rotated between jobs (job1 stage0=node-1, job2 stage0=node-2), i.e. placement ba
   difference, not a data-loss bug.
 - A stale `node-DESKTOP-2RFHTDL-5235` (pre-fix shared-identity era) is age-out cleanup
   at startup; coordinator marks it offline and it no longer re-registers.
+
+### 2026-09-10 — public client on GitHub Pages: endpoint verified (session 6 follow-up)
+
+- Deployment mode decision (user): **GitHub Pages only** — the web client is public at
+  **https://velmet44.github.io/DAIN/**, but there is **no public coordinator** yet.
+  The client is a static SPA; the coordinator URL is entered in the Chat tab
+  (`dain:base_url` localStorage, launcher-provided default). Pages is a green field; the
+  repo has **no** `deploy.yml` workflow (deploy is manual/pages-configured, not CI).
+- Verified: `https://velmet44.github.io/DAIN/` returns the built SPA
+  (`/DAIN/assets/index-*.js` + `*.css`, React 18.3.1 production bundle) with HTTP 200;
+  assets resolve. Chat/dashboard will only show data once a coordinator URL that is
+  reachable from the browser is entered.
+- README updated with the public endpoint under "Quick start".

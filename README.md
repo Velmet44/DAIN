@@ -50,6 +50,12 @@ npm run dev
 
 Open **http://localhost:5173/DAIN/** — type a message in the Chat tab.
 
+### Public client (GitHub Pages)
+
+**https://velmet44.github.io/DAIN/** — static build of the same SPA. Enter a
+coordinator URL in the Chat tab to connect (default `http://127.0.0.1:8000`; with no
+public coordinator, point it at a reachable home/VPS coordinator).
+
 Or for a one-command cluster (no browser, chat REPL):
 
 ```bash
