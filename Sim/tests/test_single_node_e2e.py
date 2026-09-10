@@ -54,7 +54,10 @@ def test_single_node_streaming_e2e(tmp_path) -> None:
         proc = subprocess.Popen([sys.executable, "-m", "dain_node"], cwd=workdir, env=env)
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                # Wait for the node to register.
+                # Wait for the node to register AND attach its live WS. Registration
+                # (state=ONLINE) alone is not enough: /v1/completions only dispatches
+                # to a *connected* node, so firing before the WS handshake finishes
+                # races into "no connected node pool" (429).
                 deadline = time.monotonic() + 20.0
                 while time.monotonic() < deadline:
                     listing = (
@@ -63,11 +66,14 @@ def test_single_node_streaming_e2e(tmp_path) -> None:
                             headers=ADMIN_HEADERS,
                         )
                     ).json()
-                    if any(n["state"] == NodeState.ONLINE.value for n in listing):
+                    if any(
+                        n["state"] == NodeState.ONLINE.value and n.get("connected")
+                        for n in listing
+                    ):
                         break
                     await asyncio.sleep(0.25)
                 else:
-                    raise AssertionError("node never came ONLINE")
+                    raise AssertionError("node never came ONLINE with a live WS")
 
                 # Auth is enforced on the client API.
                 unauth = await client.post(

@@ -144,9 +144,11 @@ def test_pipeline_parity_four_agents(tmp_path) -> None:
         workdir.mkdir()
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
-                # Single-node reference.
+                # Single-node reference. Wait for the live WS too: registration
+                # alone can race the /v1/completions dispatch (429 if not connected).
                 procs.append(spawn_agent(server.port, workdir, "node-solo"))
                 await wait_online(client, server, 1)
+                await wait_connected(client, server, 1)
                 text_ref, _ = await complete(client, server, stream=False)
                 assert len(text_ref) >= 20
 

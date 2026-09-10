@@ -70,10 +70,10 @@ def test_admission_under_load(tmp_path) -> None:
                         )
                     ).json()
                     online = sum(
-                        1 for n in listing
-                        if n["state"] == NodeState.ONLINE.value
+                        1 for n in listing if n["state"] == NodeState.ONLINE.value
                     )
-                    if online >= 2:
+                    connected = sum(1 for n in listing if n.get("connected"))
+                    if online >= 2 and connected >= 2:
                         break
                     await asyncio.sleep(0.25)
                 else:
