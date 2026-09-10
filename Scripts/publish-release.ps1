@@ -47,14 +47,19 @@ $currentVer = $match.Matches[0].Groups[1].Value
 if ($currentVer -ne $Version) {
     Write-Host "  Updating __init__.py: $currentVer -> $Version"
     $content = Get-Content -LiteralPath $initPy -Raw
-    $content = $content -replace $pattern, "__version__ = `"$Version`""
-    Set-Content -LiteralPath $initPy -Value $content -NoNewline -Encoding UTF8
-    # Also update pyproject.toml version field
+    $content = $content -replace '__version__\s*=\s*"[^"]+"', "__version__ = `"$Version`""
+    # PowerShell 5.1 Set-Content -Encoding UTF8 writes a UTF-8 BOM, which Python's
+    # tomllib rejects in pyproject.toml — write BOM-less UTF-8 explicitly.
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($initPy, $content, $utf8NoBom)
+    # Also update pyproject.toml version field.
     $pyproject = Join-Path $root "Node\pyproject.toml"
     if (Test-Path -LiteralPath $pyproject) {
         $ptContent = Get-Content -LiteralPath $pyproject -Raw
-        $ptContent = $ptContent -replace 'version\s*=\s*"[^"]*"', "version = `"$Version`""
-        Set-Content -LiteralPath $pyproject -Value $ptContent -NoNewline -Encoding UTF8
+        # Anchored to the start of the line so `target-version`/`max-version`
+        # keys are never clobbered.
+        $ptContent = $ptContent -replace '(?m)^version\s*=\s*"[^"]+"', "version = `"$Version`""
+        [System.IO.File]::WriteAllText($pyproject, $ptContent, $utf8NoBom)
     }
 } else {
     Write-Host "  __init__.py already at $Version"
