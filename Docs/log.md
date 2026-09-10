@@ -787,3 +787,41 @@ the coordinator ended up with the same pattern.
 - Behavior notes for the user: changing `Coordinator/config.json` takes effect on the next
   start (read once, no watchdog — a mid-flight reload could strand running jobs); env vars
   still override individual fields; `scoring`/`accounting_weights` stay code-level.
+- Key defaults are now random 8-char strings (part of the same session-10 work) —
+  `DEFAULT_JOIN_TOKEN=Jj3L7ewD`, `DEFAULT_API_KEY=DzOjEXqs`,
+  `DEFAULT_ADMIN_API_KEY=2UPZQJln` — applied to coordinator + node code defaults,
+  `Coordinator/config.json`, `Scripts/build-node.ps1`, `Scripts/start-samepc.ps1` prompts,
+  and `Deploy/.env.example`. Sim/Coordinator test fixtures keep their own explicit word keys
+  (`conftest`/`helpers` pass them in `make_settings`), so suites are untouched by default
+  changes.
+
+### 2026-09-10 — admin page: rotate/reset keys at runtime (session 11, commit 962512c)
+
+**Problem:** changing the join token or API keys meant editing `config.json` and restarting —
+the admin page could see nodes but not manage the cluster's own credentials.
+
+- **Admin API:**
+  - `GET /admin/settings/keys` → current `join_token`/`api_key`/`admin_api_key` plus their
+    shipped defaults, which fields are env-overridden at startup, and whether a config file is
+    writable.
+  - `PUT /admin/settings/keys` → set any of the three (min 8 chars via pydantic, unknown keys
+    422) or restore any of them to default via `reset_<field>: true`. Changes apply
+    **immediately** by swapping the live settings object (`app.state.settings` +
+    `NodeService.settings`) — auth checks read it per request; the discovery responder's token
+    rotates through a new `set_join_token()`. Existing node sessions are untouched (they use
+    per-node tokens).
+  - Persistence: written atomically into the coordinator's `config.json` (merge + tmpfile+
+    replace in `config.persist_config`). A first-ever edit bootstraps the file *from the live
+    settings*, so unrelated keys don't silently snap back to defaults. Without a config file
+    (`writable: false`) changes are in-memory only. If the field came from an env var at
+    startup, the response notes "env still wins at restart".
+- **Admin UI:** new "Keys & tokens" card — three fields prefilled with the current values, a
+  per-key **Reset** button (restores the shipped default), and **Apply changes** (PUTs the
+  three values; the page then re-keys its own session with the new client/admin key so it keeps
+  working mid-session). Auto-visible whenever an admin key is provided; a note line explains
+  persistence + env-override behavior.
+- **Settings:** `DEFAULT_JOIN_TOKEN`/`DEFAULT_API_KEY`/`DEFAULT_ADMIN_API_KEY` now exist as
+  named constants so "reset to default" and code defaults can never drift.
+- **Gates:** Coordinator **70 passed** (61 + 9 new key tests covering rotate API/admin/
+  join-token, short-key 422, unknown-key 422, reset, restart persistence, in-memory-only,
+  no-op unchanged, first-edit bootstrap), ruff clean. Node/Common untouched.
