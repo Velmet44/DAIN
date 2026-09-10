@@ -5,12 +5,16 @@ Auth model (spec §11/§16): registration requires the shared join token and
 returns a per-node token; WS connections authenticate with `node_id` + that
 token as query params; deregistration requires the node token; the /v1 client
 API requires an API key; /model/* requires node credentials; /admin/* requires
-the admin API key (S9 hardening).
+the admin API key (S9 hardening). Exception (session 15): same-machine
+requests to /v1 and /admin are trusted without keys — guarded by loopback
+peer + localhost Host (DNS-rebinding) + Origin (drive-by CSRF) checks, see
+`_local_trusted`.
 """
 
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -20,6 +24,7 @@ import shutil
 import time
 from dataclasses import replace as dataclass_replace
 from typing import Literal
+from urllib.parse import urlparse
 
 from dain_common.schemas import (
     ActivationRelayHeader,
@@ -64,12 +69,53 @@ from dain_coordinator.store import NodeRow
 log = logging.getLogger("dain.coordinator.api")
 
 
-def require_api_key(request: Request) -> None:
-    settings = request.app.state.settings
-    provided = request.headers.get("x-api-key")
+def _loopback(host: str) -> bool:
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False  # e.g. TestClient's "testclient"
+
+
+def _local_trusted(request: Request) -> bool:
+    """True for a same-machine request that a browser cannot forge.
+
+    Keyless localhost admin (session 15): the admin page on 127.0.0.1 works
+    without keys. Three checks make that safe:
+    - the socket peer is loopback (direct local connection only);
+    - the Host header is localhost (defeats DNS rebinding, where a remote
+      site resolves a domain to 127.0.0.1 — the browser then sends *its*
+      hostname as Host);
+    - a cross-site drive-by POST from a visited web page always carries an
+      Origin header, so a non-localhost Origin is rejected. Absent Origin
+      (curl, the local SPA's same-origin fetches in some browsers) passes.
+    """
+    client = request.client
+    if client is None or not _loopback(client.host):
+        return False
+    host = (request.headers.get("host") or "").lower().rsplit(":", 1)[0]
+    if host not in ("127.0.0.1", "localhost", "[::1]", "::1"):
+        return False
+    origin = request.headers.get("origin")
+    if origin:
+        o = urlparse(origin)
+        if (o.hostname or "") not in ("127.0.0.1", "localhost", "::1"):
+            return False
+    return True
+
+
+def _provided_key(request: Request, header: str) -> str | None:
+    provided = request.headers.get(header)
     if provided is None:
         auth = request.headers.get("authorization", "")
         provided = auth.removeprefix("Bearer ").strip() or None
+    return provided or None  # an empty header value counts as "not provided"
+
+
+def require_api_key(request: Request) -> None:
+    settings = request.app.state.settings
+    provided = _provided_key(request, "x-api-key")
+    if provided is None and _local_trusted(request):
+        return
     if provided is None or not secrets.compare_digest(
         provided.encode("utf-8"), settings.api_key.encode("utf-8")
     ):
@@ -86,12 +132,11 @@ def require_node(request: Request) -> None:
 
 
 def require_admin(request: Request) -> None:
-    """Admin API auth: requires the admin API key (X-Admin-Key header or Bearer token)."""
+    """Admin API auth: admin key, or keyless from a trusted localhost request."""
     settings = request.app.state.settings
-    provided = request.headers.get("x-admin-key")
-    if provided is None:
-        auth = request.headers.get("authorization", "")
-        provided = auth.removeprefix("Bearer ").strip() or None
+    provided = _provided_key(request, "x-admin-key")
+    if provided is None and _local_trusted(request):
+        return
     if provided is None or not secrets.compare_digest(
         provided.encode("utf-8"), settings.admin_api_key.encode("utf-8")
     ):

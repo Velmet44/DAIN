@@ -182,7 +182,10 @@ let selectedNode = null;
 
 async function api(url, keyName, opts = {}) {
   const key = keys[keyName];
-  const headers = { ["X-" + (keyName === "admin" ? "Admin" : "API") + "-Key"]: key };
+  const headers = {};
+  // Keyless localhost: the coordinator trusts same-machine requests without
+  // keys; the header is only sent when the user supplied one.
+  if (key) headers["X-" + (keyName === "admin" ? "Admin" : "API") + "-Key"] = key;
   if (opts.body) headers["Content-Type"] = "application/json";
   const res = await fetch(url, Object.assign({ headers, method: opts.method || "GET" }, opts.body ? { body: JSON.stringify(opts.body) } : {}));
   if (res.status === 401) throw new Error("401: bad " + keyName + " key");
@@ -316,11 +319,14 @@ function renderJobs(data) {
 }
 
 async function loadLogs() {
-  if (!keys.admin) return;
   try {
     const r = await api("/admin/logs?lines=" + ($("logLines").value || 200), "admin");
     $("logview").textContent = (r.logs || []).join("\n");
-  } catch (e) { $("logview").textContent = String(e.message || e); }
+  } catch (e) {
+    $("logview").textContent = String(e.message || e).startsWith("401")
+      ? "(admin key required — keyless access is localhost-only)"
+      : String(e.message || e);
+  }
 }
 
 async function exportLedger(format) {
@@ -377,10 +383,18 @@ function paintKeys(state) {
 }
 
 async function loadKeys() {
-  if (!keys.admin) { $("keysCard").hidden = true; return; }
-  try { paintKeys(await api("/admin/settings/keys", "admin")); }
-  catch (e) {
+  try {
+    paintKeys(await api("/admin/settings/keys", "admin"));
+  } catch (e) {
     if (String(e.message || e).startsWith("404")) { $("keysCard").hidden = true; return; }
+    if (String(e.message || e).startsWith("401")) {
+      // Locked (remote host, or wrong key): keep the card visible so the
+      // admin key can be entered above.
+      $("keysCard").hidden = false;
+      $("keysNote").textContent =
+        "unauthorized — enter the admin key above (keyless access is localhost-only)";
+      return;
+    }
     throw e;
   }
 }
@@ -436,9 +450,8 @@ function renderGgufs(r) {
 }
 
 async function loadGgufs() {
-  if (!keys.admin) return;
   try { renderGgufs(await api("/admin/models/imports", "admin")); }
-  catch (e) { /* card stays hidden on failure */ }
+  catch (e) { /* card stays hidden while unauthorized */ }
 }
 
 async function importGguf(filename) {
@@ -454,11 +467,12 @@ $("importGgufs").onclick = () => importGguf(null);
 async function refresh() {
   $("status").textContent = "loading…";
   try {
-    const modelsP = keys.admin
-      ? api("/admin/models", "admin").then(r => r.models.map(m => Object.assign(m, { can_delete: true })))
-      : api("/v1/models", "api").then(r => (r.models || []).map(m => m));
+    const modelsP = api("/admin/models", "admin")
+      .then(r => r.models.map(m => Object.assign(m, { can_delete: true })))
+      .catch(() => api("/v1/models", "api").then(r => (r.models || []).map(m => m)));
+    const nodesP = api("/admin/nodes", "admin").catch(() => api("/v1/nodes", "api"));
     const [nodes, feed, ledger, models] = await Promise.all([
-      api("/admin/nodes", "admin"),
+      nodesP,
       api("/v1/nodes", "api"),
       api("/ledger/summary", "api"),
       modelsP,
@@ -476,12 +490,12 @@ async function refresh() {
     });
     $("status").className = "ok";
     $("status").textContent = new Date().toLocaleTimeString();
-    if (keys.admin) {
-      renderJobs(await api("/admin/jobs", "admin"));
-      if ($("logAuto").checked) await loadLogs();
-      await loadKeys();
-      await loadGgufs();
-    }
+    // Admin-only extras degrade gracefully while unauthorized (401).
+    try { renderJobs(await api("/admin/jobs", "admin")); }
+    catch (e) { if (!String(e.message || e).startsWith("401")) throw e; }
+    if ($("logAuto").checked) loadLogs();
+    await loadKeys();
+    await loadGgufs();
   } catch (e) { fail(e); }
 }
 

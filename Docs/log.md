@@ -942,3 +942,32 @@ button on the admin page), get DAIN sharded safetensors + manifest. Idempotent.
   everywhere. **Live smoke**: real `.gguf` in `model_store/` →
   `Scripts/import-gguf.ps1` → 2 shards + tokenizer + manifest, second run
   skips, `list_models` sees the import, artifacts cleaned up.
+
+### 2026-09-10 — keyless localhost admin (session 15)
+
+The admin page (and the coordinator's chat page) now work with **no keys at
+all** when opened on the same machine — remote hosts still need keys.
+
+- **Server** (`api.py`): `_local_trusted(request)` grants keyless access to
+  `/admin/*` and `/v1/*` only when ALL of these hold:
+  1. the socket peer is a loopback address (direct local connection);
+  2. the `Host` header is `127.0.0.1` / `localhost` / `[::1]` — defeats DNS
+     rebinding, where a visited site resolves its own domain to 127.0.0.1 and
+     the browser sends *that* hostname as Host;
+  3. if an `Origin` header is present it is localhost — a cross-site drive-by
+     POST from any visited web page always carries its own Origin, so it is
+     rejected; curl / same-origin local requests pass.
+  An empty key header value counts as "not provided" (so the local UI works
+  with blank key fields). An explicit *wrong* key is still 401 even from
+  localhost. Node auth (`/model/*`, WS) is untouched — nodes are remote.
+- **Admin UI** (`admin_ui.html`): no more "enter key first" gating — every
+  card loads keylessly; the API key header is only sent when the user typed
+  one. On 401 (opened remotely, or revoked) the page degrades gracefully:
+  models/nodes fall back to the public `/v1` views, and the keys card shows
+  "unauthorized — enter the admin key above".
+- **Tests** (`tests/test_admin_localhost.py`, 5 new): keyless admin + client
+  API from loopback; empty-header ≙ absent; DNS-rebinding Host blocked;
+  cross-site Origin blocked while localhost Origins pass; remote peer 401
+  without key / 200 with key; wrong key still 401 locally.
+- **Gates:** Coordinator **88 passed** (83 + 5), ruff clean. Node/Common/
+  Client untouched.
