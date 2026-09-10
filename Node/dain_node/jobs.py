@@ -38,6 +38,13 @@ log = logging.getLogger("dain.node.jobs")
 
 _INT64 = struct.Struct("<q")
 
+# Hidden activations are relayed in the model's dtype (fp32 dev model, fp16 for
+# fp16 shards); `sampled_token` returns are always int64.
+_ACTIVATION_DTYPES: dict[str, torch.dtype] = {
+    "fp32": torch.float32,
+    "fp16": torch.float16,
+}
+
 
 class ByteStreamer:
     """Incremental UTF-8 decode: multi-byte characters survive byte-granular streaming."""
@@ -47,6 +54,17 @@ class ByteStreamer:
 
     def feed(self, token_id: int) -> str:
         return self._decoder.decode(bytes([token_id & 0xFF]))
+
+
+class TokenStreamer:
+    """Token-granular streamer for real models: decode each sampled id via the
+    stage's HF tokenizer (Byte-Level subpieces concatenate across tokens)."""
+
+    def __init__(self, tokenizer) -> None:
+        self._tokenizer = tokenizer
+
+    def feed(self, token_id: int) -> str:
+        return self._tokenizer.feed(token_id)
 
 
 @dataclass
@@ -321,6 +339,9 @@ class JobHandler:
             stage, _paths = await fetch_stage(self.store, rt.manifest, rt.layer_start, rt.layer_end)
             self._stages[key] = stage
         rt.stage = stage
+        if rt.manifest.tokenizer_file is not None and not isinstance(rt.streamer, TokenStreamer):
+            # Real model: stream token-granular fragments instead of UTF-8 bytes.
+            rt.streamer = TokenStreamer(stage.tokenizer)
         stage.begin_job()
         return stage
 
@@ -409,7 +430,7 @@ class JobHandler:
             role="hidden",
             tensor_bytes=hidden.contiguous().numpy().tobytes(),
             shape=tuple(hidden.shape),
-            dtype="fp32",
+            dtype=stage.dtype_label,
             is_final=False,
         )
         while True:
@@ -426,7 +447,7 @@ class JobHandler:
                 role="hidden",
                 tensor_bytes=hidden.contiguous().numpy().tobytes(),
                 shape=tuple(hidden.shape),
-                dtype="fp32",
+                dtype=stage.dtype_label,
                 is_final=False,
             )
 
@@ -437,9 +458,10 @@ class JobHandler:
         try:
             async with self.node_lock:
                 stage = rt.stage or await self._build_stage(rt)
-                hidden = torch.frombuffer(bytearray(payload), dtype=torch.float32).reshape(
-                    tuple(header.shape)
-                )
+                hidden = torch.frombuffer(
+                    bytearray(payload),
+                    dtype=_ACTIVATION_DTYPES.get(header.dtype, torch.float32),
+                ).reshape(tuple(header.shape))
                 out = stage.forward_hidden(hidden)
                 if rt.last:
                     logits = stage.logits_from(out)[:, -1, :]
@@ -487,7 +509,7 @@ class JobHandler:
                         role="hidden",
                         tensor_bytes=out.contiguous().numpy().tobytes(),
                         shape=tuple(out.shape),
-                        dtype="fp32",
+                        dtype=stage.dtype_label,
                         is_final=header.is_final,
                     )
         except Exception:  # noqa: BLE001

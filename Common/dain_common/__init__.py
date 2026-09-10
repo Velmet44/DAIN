@@ -45,6 +45,7 @@ from dain_common.schemas import (
     LedgerEvent,
     MessageType,
     MetricsReport,
+    ModelManifest,
     NetInfo,
     NodeState,
     PowerInfo,

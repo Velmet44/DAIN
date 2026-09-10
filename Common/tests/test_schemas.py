@@ -16,6 +16,7 @@ from dain_common import (
     JobState,
     LedgerEvent,
     MessageType,
+    ModelManifest,
     NetInfo,
     NodeState,
     Register,
@@ -243,3 +244,45 @@ def test_activation_relay_header_defaults() -> None:
     )
     assert header.dtype == "fp32"
     assert header.is_final is False
+
+
+# -- model manifest tokenizer fields (S18 real-model path) -------------------
+
+
+def model_manifest(**overrides) -> ModelManifest:
+    values = {
+        "model_id": "llama-3.2-3b",
+        "name": "Llama 3.2 3B",
+        "layers": 28,
+        "hidden": 3072,
+        "heads": 24,
+        "kv_heads": 8,
+        "intermediate": 8192,
+        "vocab_size": 128256,
+        "eos_token_id": 128001,
+    }
+    values.update(overrides)
+    return ModelManifest(**values)
+
+
+def test_manifest_defaults_to_byte_tokenizer() -> None:
+    m = model_manifest()
+    assert m.tokenizer_file is None
+    assert m.tokenizer_hash is None
+    assert m.dtype == "fp32"
+
+
+def test_manifest_accepts_tokenizer_pair() -> None:
+    m = model_manifest(
+        tokenizer_file="tokenizer.json",
+        tokenizer_hash="a" * 64,
+        dtype="fp16",
+    )
+    assert m.tokenizer_file == "tokenizer.json"
+    assert m.tokenizer_hash == "a" * 64
+    assert m.dtype == "fp16"
+
+
+def test_manifest_rejects_half_tokenizer_tuple() -> None:
+    with pytest.raises(ValidationError, match="set together"):
+        model_manifest(tokenizer_file="tokenizer.json")

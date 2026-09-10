@@ -586,6 +586,13 @@ def _shard_path(settings, model_id: str, shard_id: str) -> str:
     return os.path.join(settings.model_store_dir, model_id, f"{shard_id}.safetensors")
 
 
+def _model_dir(settings, model_id: str) -> str:
+    safe = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+    if not set(model_id) <= safe:
+        raise HTTPException(status_code=400, detail="invalid model id")
+    return os.path.join(settings.model_store_dir, model_id)
+
+
 @model_router.get("/manifest/{model_id}")
 def get_manifest(model_id: str, request: Request) -> ModelManifest:
     settings = request.app.state.settings
@@ -604,6 +611,24 @@ def get_shard(model_id: str, shard_id: str, request: Request) -> Response:
     return Response(
         content=path.read_bytes(),
         media_type="application/octet-stream",
+    )
+
+
+@model_router.get("/tokenizer/{model_id}")
+def get_tokenizer(model_id: str, request: Request) -> Response:
+    """Serve the model's fast tokenizer.json so nodes can verify + cache it
+    (spec §11); byte-level dev models have none → 404."""
+    settings = request.app.state.settings
+    manifest = shard_store_load(settings.model_store_dir, model_id)
+    if manifest is None or manifest.tokenizer_file is None:
+        raise HTTPException(status_code=404, detail="model has no tokenizer")
+    file_name = os.path.basename(manifest.tokenizer_file)
+    path = pathlib.Path(os.path.join(_model_dir(settings, model_id), file_name))
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="tokenizer file missing")
+    return Response(
+        content=path.read_bytes(),
+        media_type="application/json",
     )
 
 

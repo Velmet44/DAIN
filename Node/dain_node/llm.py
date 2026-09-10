@@ -9,6 +9,7 @@ explicit weight mapping — only assigned layers are ever instantiated.
 from __future__ import annotations
 
 import asyncio
+import functools
 import hashlib
 import logging
 import os
@@ -26,6 +27,7 @@ from transformers.models.llama.modeling_llama import (
 )
 
 from dain_node.byte_tokenizer import ByteTokenizer
+from dain_node.hf_tokenizer import HFTokenizer
 
 log = logging.getLogger("dain.node.llm")
 
@@ -84,6 +86,31 @@ class ModelStoreClient:
         with open(path, "rb") as fh:
             return hashlib.sha256(fh.read()).hexdigest()
 
+    async def ensure_tokenizer(
+        self, model_id: str, tokenizer_file: str, tokenizer_hash: str
+    ) -> str:
+        """Download + verify the model's tokenizer.json; returns its cache path."""
+        model_cache = os.path.join(self.cache_dir, model_id)
+        file_name = os.path.basename(tokenizer_file)
+        path = os.path.join(model_cache, file_name)
+        if os.path.exists(path) and self._hash_file(path) == tokenizer_hash:
+            return path
+        if self.base_url is None:
+            raise RuntimeError("model store base URL not set yet")
+        os.makedirs(model_cache, exist_ok=True)
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(f"{self.base_url}/tokenizer/{model_id}", headers=self.auth)
+            response.raise_for_status()
+            data = response.content
+        if hashlib.sha256(data).hexdigest() != tokenizer_hash:
+            raise RuntimeError(f"tokenizer {file_name} failed hash verification")
+        tmp = f"{path}.tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+        log.info("tokenizer_cached model=%s file=%s bytes=%d", model_id, file_name, len(data))
+        return path
+
 
 def causal_mask(dtype: torch.dtype, q_len: int, past_len: int) -> torch.Tensor:
     """Additive 4D causal mask [1, 1, q_len, past+q_len] — no HF internals."""
@@ -111,6 +138,7 @@ class StageModel:
         state: dict[str, torch.Tensor],
         *,
         device: str = "cpu",
+        tokenizer_path: str | None = None,
     ) -> None:
         if not 0 <= layer_start <= layer_end < manifest.layers:
             raise ValueError(f"invalid layer range [{layer_start}, {layer_end}]")
@@ -131,12 +159,14 @@ class StageModel:
         )
         self.cfg = cfg
         self.device = device
-        dtype = torch.float32
+        dtype_label = manifest.dtype or "fp32"
+        dtype = torch.float16 if dtype_label == "fp16" else torch.float32
         self.dtype = dtype
+        self.dtype_label = "fp16" if dtype is torch.float16 else "fp32"
 
         self.layers: list[LlamaDecoderLayer] = []
         for global_idx in range(layer_start, layer_end + 1):
-            layer = LlamaDecoderLayer(cfg, layer_idx=global_idx).to(device)
+            layer = LlamaDecoderLayer(cfg, layer_idx=global_idx).to(device=device, dtype=dtype)
             local_idx = global_idx - layer_start
             layer.self_attn.layer_idx = local_idx
             prefix = f"model.layers.{global_idx}."
@@ -151,21 +181,28 @@ class StageModel:
         self.rotary = LlamaRotaryEmbedding(config=cfg, device=device)
         self.embed = None
         if self.first:
-            self.embed = torch.nn.Embedding(manifest.vocab_size, manifest.hidden).to(device)
+            self.embed = torch.nn.Embedding(manifest.vocab_size, manifest.hidden).to(
+                device=device, dtype=dtype
+            )
             with torch.no_grad():
                 self.embed.weight.copy_(state["model.embed_tokens.weight"].to(dtype))
         self.norm = None
         self.lm_head = None
         if self.last:
-            self.norm = LlamaRMSNorm(manifest.hidden, eps=cfg.rms_norm_eps).to(device)
+            self.norm = LlamaRMSNorm(manifest.hidden, eps=cfg.rms_norm_eps).to(
+                device=device, dtype=dtype
+            )
             self.lm_head = torch.nn.Linear(manifest.hidden, manifest.vocab_size, bias=False).to(
-                device
+                device=device, dtype=dtype
             )
             with torch.no_grad():
                 self.norm.weight.copy_(state["model.norm.weight"].to(dtype))
                 self.lm_head.weight.copy_(state["lm_head.weight"].to(dtype))
         self.cache: DynamicCache | None = None
-        self.tokenizer = ByteTokenizer(manifest.vocab_size, manifest.eos_token_id)
+        if tokenizer_path is not None:
+            self.tokenizer = HFTokenizer(tokenizer_path)
+        else:
+            self.tokenizer = ByteTokenizer(manifest.vocab_size, manifest.eos_token_id)
 
     # -- cache lifecycle ---------------------------------------------------------
 
@@ -264,6 +301,14 @@ async def fetch_stage(
         path = await store.ensure_shard(manifest.model_id, shard_id, content_hash)
         shard_paths[shard_id] = path
         state.update(load_file(path))
+    tokenizer_path: str | None = None
+    if manifest.tokenizer_file is not None and manifest.tokenizer_hash is not None:
+        tokenizer_path = await store.ensure_tokenizer(
+            manifest.model_id, manifest.tokenizer_file, manifest.tokenizer_hash
+        )
     loop = asyncio.get_running_loop()
-    stage = await loop.run_in_executor(None, StageModel, manifest, layer_start, layer_end, state)
+    build = functools.partial(
+        StageModel, manifest, layer_start, layer_end, state, tokenizer_path=tokenizer_path
+    )
+    stage = await loop.run_in_executor(None, build)
     return stage, shard_paths

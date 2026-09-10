@@ -650,3 +650,43 @@ rotated between jobs (job1 stage0=node-1, job2 stage0=node-2), i.e. placement ba
   `uv sync` and `Client/node_modules` via `npm ci`). Agreed with the earlier session-4
   decision that the repo contains no absolute paths (`rg E:\DAIN` clean) so the folder
   is relocatable.
+### 2026-09-10 - real-model path: export_hf_model + HF tokenizer (session 8)
+
+- Implemented the real-model path end to end so actual Hugging Face checkpoints (Llama family) can
+  run through the distributed pipeline (S18; first step of S10 real-model bring-up).
+- **Common:** `ModelManifest` gained optional `tokenizer_file` + `tokenizer_hash` (must be set
+  together; None = dev byte-level tokenizer); fixed `dain_common/__init__.py` to actually export
+  `ModelManifest` (it was in `__all__` but missing from the import list).
+- **Node export:** `shard_export.py` refactored byte/embed/layer shard writing into a shared
+  `_write_shards`; added `export_hf_model(out_dir, model_id, model=, tokenizer=, dtype=)` for
+  Llama-family checkpoints (constructing a model/tokenizer locally makes tests hermetic;
+  `hf_name` pulls from the Hub). Stores the fast `tokenizer.json` beside the shards and records
+  its sha256 in the manifest. Rejects non-Llama architectures (Qwen2 = S10 future stage).
+- **Node tokenizer:** new `dain_node/hf_tokenizer.py` (`HFTokenizer`: encode/decode/feed via
+  `tokenizers.Tokenizer.from_file`); `StageModel` now takes the dtype from `manifest.dtype`
+  (fp16 supported; rope verified to cast to input dtype) and builds an HFTokenizer when a
+  tokenizer path is given, else the ByteTokenizer.
+- **Node distribution:** `ModelStoreClient.ensure_tokenizer` downloads + verifies the
+  tokenizer over the store HTTP API; `jobs.py` streams real tokens via a `TokenStreamer`
+  (swapped in when the manifest carries a tokenizer) and the activation relay now uses the
+  stage dtype (was hardcoded fp32) - both send sites and the receiver in `_run_step` are
+  dtype-aware (`_ACTIVATION_DTYPES`).
+- **Coordinator:** `GET /model/tokenizer/{model_id}` serves the model's tokenizer.json
+  (404 for byte-level models), with the same safe-id guard as shards.
+- **Tests:** Common 47 (+3 manifest tokenizer-field tests), Coordinator 36, Node 20 (+4 new
+  in `tests/test_hf_export.py`: fp16 shard export, tokenizer round-trip/feed, fp16 StageModel
+  load + forward, non-Llama rejection - the BPE tokenizer is trained on a tiny local corpus
+  so no hub access is needed). New Sim e2e `tests/test_hf_model_e2e.py`: 2 agents split a
+  12-layer fp16 Llama (2 stages x 6 layers), streamed completion equals a greedy HF
+  reference decoded with the same tokenizer. Full Sim job-path regressions (pipeline parity,
+  single-node e2e, reconnect/replay) still pass; the remaining heavy Sim suite is a manual
+  user run.
+- **Fixes found while testing:** e2e 429 was a registration-to-WS race (nodes listed ONLINE
+  a moment before the WebSocket was counted as connected) - hardened with a
+  `wait_connected` gate like the parity test. `httpx.ResponseNotRead` was a test bug
+  (reading `.text` on a streamed response).
+- **Portability (user requirement, refreshed):** no absolute paths anywhere in code
+  (`rg E:\DAIN` hits only this log), bootstrap scripts anchor on their own location, and all
+  runtime defaults are cwd-relative (`model_store`, `node_state.json`, `shard_cache`), so
+  the folder still works when moved to another location or machine after
+  `Scripts/bootstrap.ps1`.

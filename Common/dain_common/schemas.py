@@ -180,7 +180,18 @@ class ModelManifest(_Model):
     eos_token_id: int = Field(ge=0)
     rope_theta: float = Field(default=10000.0, gt=0)
     dtype: str = Field(default="fp32")
+    # Real-model deployments carry an HF fast tokenizer served by the model
+    # store; `tokenizer_file=None` means the dev byte-level tokenizer (vocab
+    # 256). `tokenizer_hash` lets nodes verify the downloaded file (spec §11).
+    tokenizer_file: str | None = Field(default=None, min_length=1)
+    tokenizer_hash: str | None = Field(default=None, min_length=8)
     shards: tuple[ShardRef, ...] = ()
+
+    @model_validator(mode="after")
+    def _tokenizer_consistent(self) -> ModelManifest:
+        if (self.tokenizer_file is None) != (self.tokenizer_hash is None):
+            raise ValueError("tokenizer_file and tokenizer_hash must be set together")
+        return self
 
 
 # ---------------------------------------------------------------------------
