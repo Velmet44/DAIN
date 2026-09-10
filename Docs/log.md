@@ -601,6 +601,24 @@ rotated between jobs (job1 stage0=node-1, job2 stage0=node-2), i.e. placement ba
   reachable from the browser is entered.
 - README updated with the public endpoint under "Quick start".
 
+### 2026-09-10 — pre-S10 gate sweep + hygiene (session 6 follow-up)
+
+- **Local gate sweep:** Common **44 passed** ✓ (ruff clean), Coordinator **36 passed** ✓
+  (ruff clean), Node **17 passed** ✓ (ruff clean); Sim integration suite **left to a
+  manual run** (pytest too slow inside the sandbox; CI is green with the SIGBREAK fix).
+- **Coordinator format drift:** `ruff format` normalized 6 files (incl. a stray UTF-8 BOM
+  at the top of `tests/test_ledger.py`); tests re-passed after the reformat.
+- **Hygiene:** deleted the stale shared-era `Node/node_state.json`; gitignored
+  `node_state-*.json` and `shard_cache*/` so per-machine identities and caches can never
+  be committed.
+- **Decisions (user):** CI confirmed green; **coordinator runs on the user's own PC for
+  now** (no public coordinator — GitHub Pages hosts the client only). Multi-PC testing is
+  viable immediately: node agents connect **outbound** (NAT-friendly, spec §10), so any
+  machine running the packaged node (`Scripts` portable `DAIN.zip`, commit bce1ecd) can
+  register against the home-PC coordinator over LAN; shards are pulled over HTTP from the
+  coordinator's model store (one-time per-node cache). This is the S10 onboarding path
+  minus GPUs.
+
 ### 2026-09-10 — dev tooling: cache cleanup + portable packaging scripts (session 7)
 
 - Added **`Scripts/clean_cache.bat`** — removes all regenerable cache/build artifacts,
