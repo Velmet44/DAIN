@@ -131,9 +131,9 @@ def test_heartbeat_timeout_then_reregister(client: TestClient) -> None:
 
     # Stop heartbeating: offline after 3 × 0.1 s (monitor ticks every 0.05 s).
     assert wait_for(
-        lambda: client.get(
-            "/admin/nodes/node-a", headers=ADMIN_HEADERS
-        ).json()["state"] == "offline",
+        lambda: (
+            client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["state"] == "offline"
+        ),
         timeout_s=2.0,
     )
     history = client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["history"]
@@ -213,13 +213,12 @@ def test_admin_listing_and_filters(client: TestClient) -> None:
     client.post("/node/deregister", json={"node_id": "node-b", "auth_token": ack_b["node_token"]})
     all_nodes = client.get("/admin/nodes", headers=ADMIN_HEADERS).json()
     assert {n["node_id"] for n in all_nodes} == {"node-a", "node-b"}
-    online = client.get(
-        "/admin/nodes", params={"state": "online"}, headers=ADMIN_HEADERS
-    ).json()
+    online = client.get("/admin/nodes", params={"state": "online"}, headers=ADMIN_HEADERS).json()
     assert [n["node_id"] for n in online] == ["node-a"]
-    assert client.get(
-        "/admin/nodes", params={"state": "bogus"}, headers=ADMIN_HEADERS
-    ).status_code == 400
+    assert (
+        client.get("/admin/nodes", params={"state": "bogus"}, headers=ADMIN_HEADERS).status_code
+        == 400
+    )
 
 
 def test_register_payload_is_wire_valid(client: TestClient) -> None:

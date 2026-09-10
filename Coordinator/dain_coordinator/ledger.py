@@ -80,9 +80,7 @@ class Ledger:
                 if event is None:
                     continue
                 verified, note = self._verify(event, stage_idx)
-                inserted = self.registry.append_ledger(
-                    event, verified=verified, note=note
-                )
+                inserted = self.registry.append_ledger(event, verified=verified, note=note)
                 if inserted:
                     log.info(
                         "ledger_event job=%s stage=%d attempt=%d node=%s outcome=%s "
@@ -99,9 +97,7 @@ class Ledger:
                 if not verified and self.on_verification_flag is not None:
                     self.on_verification_flag(node_id, note or "verification flag")
 
-    def _outcome(
-        self, job: JobRecord, stage_idx: int, attempt: int
-    ) -> TaskOutcome:
+    def _outcome(self, job: JobRecord, stage_idx: int, attempt: int) -> TaskOutcome:
         """§15: exactly one SUCCESS per finished stage; earlier attempts and
         unfinished stages degrade to RETRIED_AWAY / FAILED."""
         final_attempt = job.retries.get(stage_idx, 0)

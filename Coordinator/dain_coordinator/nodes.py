@@ -302,9 +302,7 @@ class NodeService:
         if row is None:
             log.warning("verification_penalty_unknown node=%s", node_id)
             return
-        row.uptime_ratio = min(
-            row.uptime_ratio, self.settings.scoring.min_uptime_soft * 0.75
-        )
+        row.uptime_ratio = min(row.uptime_ratio, self.settings.scoring.min_uptime_soft * 0.75)
         self.registry.save_node(row)
         log.warning("verification_penalty node=%s note=%r", node_id, note)
 

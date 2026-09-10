@@ -255,9 +255,7 @@ class SQLiteRegistry:
             self._require().commit()
         return inserted
 
-    def ledger_rows(
-        self, *, node_id: str | None = None, since: float | None = None
-    ) -> list[dict]:
+    def ledger_rows(self, *, node_id: str | None = None, since: float | None = None) -> list[dict]:
         """Raw ledger rows as dicts (an id -> db row store; ordering by ts, id).
 
         `since` filters to events at or after the epoch timestamp.
@@ -272,9 +270,7 @@ class SQLiteRegistry:
             params.append(since)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         with self._lock:
-            cur = self._require().execute(
-                f"SELECT * FROM ledger {where} ORDER BY ts, id", params
-            )
+            cur = self._require().execute(f"SELECT * FROM ledger {where} ORDER BY ts, id", params)
             rows = cur.fetchall()
         return [dict(r) for r in rows]
 

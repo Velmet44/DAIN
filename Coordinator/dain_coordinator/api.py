@@ -85,9 +85,7 @@ def require_admin(request: Request) -> None:
 
 
 node_router = APIRouter(prefix="/node", tags=["node"])
-admin_router = APIRouter(
-    prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)]
-)
+admin_router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_admin)])
 v1_router = APIRouter(prefix="/v1", tags=["client"], dependencies=[Depends(require_api_key)])
 model_router = APIRouter(prefix="/model", tags=["model"], dependencies=[Depends(require_node)])
 ledger_router = APIRouter(
@@ -320,8 +318,7 @@ def list_public_nodes(request: Request) -> dict:
     )
     return {
         "nodes": [
-            _view(row, connected=connections.is_connected(row.node_id)).model_dump()
-            for row in rows
+            _view(row, connected=connections.is_connected(row.node_id)).model_dump() for row in rows
         ],
         "placements": [event_view(e) for e in placements.events()[-16:]],
         "active_jobs": active,
@@ -537,10 +534,7 @@ def ledger_summary(request: Request, since: float | None = None) -> dict:
             bucket["flagged"] += 1
     return {
         "generated_at": time.time(),
-        "nodes": [
-            {"node_id": nid, **bucket}
-            for nid, bucket in sorted(totals.items())
-        ],
+        "nodes": [{"node_id": nid, **bucket} for nid, bucket in sorted(totals.items())],
         "totals": {
             "events": sum(b["events"] for b in totals.values()),
             "credits": round(sum(b["credits"] for b in totals.values()), 6),

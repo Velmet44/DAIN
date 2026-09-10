@@ -1,4 +1,4 @@
-﻿"""S8 checkpoint: accounting ledger (spec §15) — emission, dedupe, verification,
+"""S8 checkpoint: accounting ledger (spec §15) — emission, dedupe, verification,
 and the export API. Jobs are driven through the JobTracker directly (no real
 nodes); the Ledger derivation is coordinator-side and must match the Common
 credit goldens.
@@ -115,6 +115,7 @@ def failed_job(jobs) -> str:
     jobs.fail_job(record.job_id, "stage 1 exhausted retries")
     return record.job_id
 
+
 # -- emission & outcome derivation ----------------------------------------------
 
 
@@ -139,8 +140,7 @@ def test_ledger_emits_one_success_per_stage_with_retried_away(client: TestClient
     # and the stored credit matches an independent recompute from the row.
     # (rel is loose enough to absorb the read path's round(..., 6).)
     assert all(
-        e["credit"] == pytest.approx(ledger.credit(ledger._from_row(e)), rel=1e-5)
-        for e in events
+        e["credit"] == pytest.approx(ledger.credit(ledger._from_row(e)), rel=1e-5) for e in events
     )
     assert min(e["credit"] for e in success) > max(e["credit"] for e in retried)
     assert min(e["credit"] for e in success) > 0
