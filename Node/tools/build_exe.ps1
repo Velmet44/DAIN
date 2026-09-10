@@ -32,16 +32,28 @@ if ($LASTEXITCODE -ne 0) { exit 1 }
 
 $flag = if ($Mode -eq "onefile") { "--onefile" } else { "--onedir" }
 
+# Anchors the build: PyInstaller writes build/, dist/ and the .spec next to the
+# *caller's* working directory by default, so running from Scripts/ would scatter
+# output there. Pin every output path to the Node/ project root instead.
+Push-Location $root
+try {
 # --paths $root keeps dain_common importable from physical source regardless of
 # how the editable dependency is laid out in site-packages.
-&  uv run --project $root python -m PyInstaller `
-    --noconfirm --clean `
-    $flag `
-    --name dain-node `
-    --paths $root `
-    --collect-all transformers `
-    "$here\node_entry.py"
-if ($LASTEXITCODE -ne 0) { exit 1 }
+    &  uv run --project $root python -m PyInstaller `
+        --noconfirm --clean `
+        $flag `
+        --name dain-node `
+        --paths $root `
+        --collect-all transformers `
+        --distpath "$root\dist" `
+        --workpath "$root\build" `
+        --specpath "$root" `
+        "$here\node_entry.py"
+    if ($LASTEXITCODE -ne 0) { exit 1 }
+}
+finally {
+    Pop-Location
+}
 
 if ($Mode -eq "onedir") {
     Write-Host "OK: $root\dist\dain-node\dain-node.exe" -ForegroundColor Green
