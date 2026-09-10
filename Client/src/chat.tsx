@@ -32,6 +32,10 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
       .then((models) => {
         logOk(`model picker: ${models.join(", ") || "(none)"}`);
         setModels(models);
+        if (models.length > 0 && !modelId) {
+          logInfo(`auto-selecting first model: ${models[0]}`);
+          setModelId(models[0]);
+        }
       })
       .catch((err: Error) => {
         logError(`models unavailable: ${err.message}`);

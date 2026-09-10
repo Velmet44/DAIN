@@ -512,3 +512,11 @@ https://velmet44.github.io/DAIN/.
   the edit chain (dropped return, missing `SseFrame.status`, nullable abort signal).
 
 **Gates:** TS strict build green; client bundles successfully.
+
+**Follow-up (same run):** after the localStorage fix the 401 was gone (models load,
+key set) but Send/Enter still did nothing. Cause: `VITE_MODEL_ID` is empty in the
+launcher flow and the old legacy `dain:model` value was now (correctly) ignored, so
+`modelId` stayed `""` and `send()` early-returned at `!modelId` with no feedback.
+- `chat.tsx`: auto-selects the first model from `/v1/models` when none is chosen
+  (logged as `auto-selecting first model`). Send + Enter now work out of the box.
+- Build re-verified clean.
