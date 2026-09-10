@@ -557,3 +557,21 @@ dashboard and the coordinator log showed both registrations with the **same**
   `DAIN_NODE_STATE_PATH=node_state-<index>.json` and `DAIN_MODEL_CACHE=shard_cache-<index>`
   so same-PC nodes keep distinct persisted identities (distinct caches also avoid
   concurrent shard-write races). Script re-verified with `Parser.ParseFile` (clean, ASCII).
+
+**Follow-up (same run, CI red):** GitHub Actions "Python tests & lint / Sim (integration)"
+failed — every spawned node crashed on POSIX, so nodes never came ONLINE and all Sim e2e
+tests (admission, chaos matrix, ledger reconcile, pipeline parity, reconnect, single-node)
+cascade-failed.
+- Root cause: `Node/dain_node/agent.py` `StopGuard.install()` referenced
+  `signal.SIGBREAK` unconditionally; `SIGBREAK` is Windows-only and does not exist on
+  Linux/CI (Ubuntu), so the import-time attribute lookup raised `AttributeError` and the
+  agent died before registering. `test_reconnect.py` already guarded its own SIGBREAK use
+  via `os.name == "nt"`; the agent's signal list did not.
+- Fix: `StopGuard.install()` now uses `getattr(signal, "SIGBREAK", None)` so the
+  Windows-only signal is skipped on POSIX (existing `if sig is None: continue` guard then
+  handles it).
+- Regression test added: `Node/tests/test_agent.py` — `test_stopguard_install_is_portable`
+  installs `StopGuard` under a running loop and asserts no exception (would have failed on
+  any CI node run).
+
+**Gates:** ruff clean + node tests (17) green.

@@ -59,7 +59,7 @@ class StopGuard:
 
     def install(self) -> None:
         self._loop = asyncio.get_running_loop()
-        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGBREAK):
+        for sig in (signal.SIGINT, signal.SIGTERM, getattr(signal, "SIGBREAK", None)):
             if sig is None:
                 continue
             with contextlib.suppress(OSError, ValueError, NotImplementedError):
