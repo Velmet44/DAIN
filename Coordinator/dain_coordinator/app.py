@@ -27,6 +27,7 @@ from dain_coordinator.discovery import DiscoveryResponder
 from dain_coordinator.faults import FaultManager
 from dain_coordinator.jobs import ActivationRelay, JobTracker
 from dain_coordinator.ledger import Ledger
+from dain_coordinator.logs import attach_ring
 from dain_coordinator.monitor import HeartbeatMonitor
 from dain_coordinator.nodes import NodeService
 from dain_coordinator.partition import PlacementRecorder, recompute_pool
@@ -72,6 +73,7 @@ def create_app(
 ) -> FastAPI:
     settings = settings or CoordinatorSettings.from_env()
     configure_logging(json_mode=settings.log_json)
+    attach_ring()
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:

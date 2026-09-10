@@ -16,6 +16,7 @@ import logging
 import os
 import pathlib
 import secrets
+import shutil
 import time
 from dataclasses import replace as dataclass_replace
 from typing import Literal
@@ -49,6 +50,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from dain_coordinator.config import persist_config
 from dain_coordinator.jobs import ActivationRelay, JobTracker
+from dain_coordinator.logs import snapshot as log_snapshot
 from dain_coordinator.nodes import MessageOutcome, NodeService
 from dain_coordinator.partition import event_view, plan_placement
 from dain_coordinator.settings import (
@@ -384,6 +386,115 @@ def update_keys(payload: KeysUpdate, request: Request) -> KeyState:
     for field in updates:
         log.info("admin_key_updated field=%s persisted=%s", field, persisted)
     return _key_state(request)
+
+
+# -- admin controls: nodes, jobs, models, logs ------------------------------------
+
+
+@admin_router.post("/nodes/{node_id}/offline")
+def evict_node(node_id: str, request: Request) -> dict:
+    """Force a node OFFLINE and fail its active jobs (admin eviction)."""
+    service = _service(request)
+    jobs: JobTracker = request.app.state.jobs
+    failed = jobs.fail_jobs_of_node(node_id, "admin eviction")
+    moved = service.transition(node_id, NodeState.OFFLINE, "admin_evict")
+    if not moved:
+        raise HTTPException(status_code=409, detail="no transition to OFFLINE")
+    log.warning("admin_evict node=%s jobs_failed=%d", node_id, failed)
+    return {"ok": True, "node_id": node_id, "state": NodeState.OFFLINE.value, "jobs_failed": failed}
+
+
+@admin_router.post("/nodes/{node_id}/online")
+def recover_node(node_id: str, request: Request) -> dict:
+    """Force a node back ONLINE (admin recovery; real liveness still enforced)."""
+    service = _service(request)
+    moved = service.transition(node_id, NodeState.ONLINE, "admin_recover")
+    if not moved:
+        raise HTTPException(status_code=409, detail="no transition to ONLINE")
+    log.warning("admin_recover node=%s", node_id)
+    return {"ok": True, "node_id": node_id, "state": NodeState.ONLINE.value}
+
+
+@admin_router.get("/jobs")
+def admin_jobs(request: Request) -> dict:
+    """Recent + active job list, newest first."""
+    tracker: JobTracker = request.app.state.jobs
+    recent = list(reversed(tracker._order))[:50]  # noqa: SLF001 — tracker is app-internal
+    jobs = [tracker.view(jid) for jid in recent if tracker.get(jid) is not None]
+    return {"jobs": [j for j in jobs if j is not None], "active": len(tracker.active_jobs())}
+
+
+@admin_router.post("/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, request: Request) -> dict:
+    """Cancel an active job: release its stage nodes and mark it FAILED."""
+    tracker: JobTracker = request.app.state.jobs
+    job = tracker.get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="unknown job")
+    if job.state in (JobState.COMPLETED, JobState.FAILED):
+        raise HTTPException(status_code=409, detail="job already terminal")
+    service = _service(request)
+    for stage in job.stages:
+        service.release_node(stage.node_id)
+    tracker.fail_job(job_id, "cancelled by admin")
+    log.warning("admin_cancel job=%s model=%s", job_id, job.model_id)
+    return {"ok": True, "job_id": job_id}
+
+
+@admin_router.get("/models")
+def admin_models(request: Request) -> dict:
+    """Model-store listing with on-disk sizes."""
+    settings = request.app.state.settings
+    models = []
+    for manifest_model in shard_store_list(settings.model_store_dir):
+        model_dir = pathlib.Path(settings.model_store_dir) / manifest_model.model_id
+        size = (
+            sum(f.stat().st_size for f in model_dir.rglob("*") if f.is_file())
+            if model_dir.is_dir()
+            else 0
+        )
+        models.append(
+            {
+                "model_id": manifest_model.model_id,
+                "name": manifest_model.name,
+                "layers": manifest_model.layers,
+                "hidden": manifest_model.hidden,
+                "size_bytes": size,
+            }
+        )
+    return {"models": models}
+
+
+@admin_router.post("/models/rescan")
+def rescan_models(request: Request) -> dict:
+    """Recompute every model's placement plan immediately."""
+    request.app.state.recompute_pool("admin_rescan")
+    log.info("admin_rescan")
+    return {"ok": True}
+
+
+@admin_router.post("/models/{model_id}/delete")
+def delete_model(model_id: str, request: Request) -> dict:
+    """Delete a model from the coordinator's store and recompute placements."""
+    settings = request.app.state.settings
+    safe = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
+    if not set(model_id) <= safe:
+        raise HTTPException(status_code=400, detail="invalid model id")
+    root = pathlib.Path(settings.model_store_dir).resolve()
+    target = (root / model_id).resolve()
+    if root not in target.parents or not target.is_dir():
+        raise HTTPException(status_code=404, detail="unknown model")
+    shutil.rmtree(target)
+    request.app.state.recompute_pool("admin_delete")
+    log.warning("admin_model_deleted model=%s", model_id)
+    return {"ok": True, "model_id": model_id}
+
+
+@admin_router.get("/logs")
+def admin_logs(request: Request, lines: int = 200) -> dict:
+    """Tail of the in-process coordinator log ring."""
+    lines = max(1, min(lines, 2000))
+    return {"logs": log_snapshot(lines)}
 
 
 # -- client API (S4): SSE streaming completions ----------------------------------

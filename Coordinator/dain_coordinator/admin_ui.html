@@ -49,10 +49,10 @@
   tr.node:hover { background: #1c2128; }
   .mono { font-family: ui-monospace, Consolas, monospace; }
   .pill { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; }
-  .st-ONLINE { background: #1f6feb22; color: #58a6ff; }
-  .st-BUSY    { background: #d2992222; color: #e3b341; }
-  .st-DEGRADED{ background: #db6d2822; color: #f0883e; }
-  .st-OFFLINE { background: #f8514922; color: #f85149; }
+  .st-online  { background: #1f6feb22; color: #58a6ff; }
+  .st-busy    { background: #d2992222; color: #e3b341; }
+  .st-degraded{ background: #db6d2822; color: #f0883e; }
+  .st-offline { background: #f8514922; color: #f85149; }
   .tag { color: #9198a1; }
   .detail-row { padding: 12px 14px; border-top: 1px solid #21262d; }
   .comp { display: flex; align-items: center; gap: 8px; margin: 3px 0; font-size: 12px; }
@@ -134,6 +134,29 @@
     <div class="card">
       <h2>Models</h2>
       <div id="models" style="padding: 8px 14px; font-size: 12px;"></div>
+      <div class="keys" style="border-top:1px solid #21262d;">
+        <div class="kactions">
+          <button id="rescanModels">Rescan placements</button>
+          <button id="exportJson">Export ledger JSON</button>
+          <button id="exportCsv">Export ledger CSV</button>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Jobs <span class="tag" id="jobsCount"></span></h2>
+      <div id="jobs" style="padding: 8px 14px; font-size: 12px;"></div>
+    </div>
+    <div class="card">
+      <h2>Logs</h2>
+      <div class="keys" style="border-bottom:1px solid #21262d;">
+        <div class="krow">
+          <label>Log lines</label>
+          <input id="logLines" type="number" value="200" min="10" max="2000" step="10">
+          <label><input id="logAuto" type="checkbox" checked> auto</label>
+          <button id="refreshLogs">Refresh</button>
+        </div>
+      </div>
+      <pre id="logview" class="mono" style="max-height:320px; overflow:auto; padding:8px 14px; font-size:11px; line-height:1.5; margin:0;"></pre>
     </div>
   </section>
 </main>
@@ -196,11 +219,23 @@ async function nodeDetail(nodeId) {
     d.innerHTML = `
       <div class="comp mono" style="font-weight:600">${esc(node.node_id)}
         ${node.connected ? '<span class="tag">connected</span>' : ""} score=${(node.score ?? 0).toFixed(3)}</div>
+      <div class="kactions" style="margin:6px 0">
+        <button data-act="online">Recover (ONLINE)</button>
+        <button data-act="offline">Evict (OFFLINE)</button>
+      </div>
       ${comps.map(([k, v]) => `<div class="comp"><span class="name">${esc(k)}</span>
         <div class="bar"><i style="width:${Math.min(100, Math.max(0, v * 100)).toFixed(0)}%"></i></div>
         <span class="mono">${Number(v).toFixed(3)}</span></div>`).join("")}
-      <ul class="hist">${node.history.map(h =>
-        `<li>${ago(h.ts)} — <b>${esc(h.from_state || "—")}</b> → <b>${esc(h.to_state)}</b>${h.reason ? " · " + esc(h.reason) : ""}</li>`).join("")}</ul>`;
+      ${node.history.length ? `<ul class="hist" style="margin-top:8px">${node.history.map(h =>
+        `<li>${ago(h.ts)} — <b>${esc(h.from_state || "—")}</b> → <b>${esc(h.to_state)}</b>${h.reason ? " · " + esc(h.reason) : ""}</li>`).join("")}</ul>` : '<div class="tag">no state history</div>'}`;
+    d.querySelectorAll("button[data-act]").forEach(b => b.onclick = async () => {
+      const act = b.dataset.act;
+      try {
+        await api("/admin/nodes/" + encodeURIComponent(nodeId) + "/" + act, "admin", { method: "POST" });
+        ok(nodeId + " -> " + act);
+        refresh();
+      } catch (e) { fail(e); }
+    });
     d.hidden = false;
   } catch (e) { fail(e); }
 }
@@ -233,9 +268,70 @@ function renderPlacements(pl) {
 }
 
 function renderModels(models) {
-  $("models").innerHTML = models.length
-    ? models.map(m => `<div class="mono">${esc(m.model_id)} <span class="tag">${esc(m.name)} · ${m.layers}L · hidden ${m.hidden}</span></div>`).join("")
-    : `<span class="tag">model store empty — export a model first</span>`;
+  if (!models.length) { $("models").innerHTML = '<span class="tag">model store empty — export a model first</span>'; return; }
+  $("models").innerHTML = models.map(m => `
+    <div class="pl" style="display:flex;align-items:center;gap:8px;">
+      <span class="mono">${esc(m.model_id)}</span>
+      <span class="tag">${esc(m.name || "")} · ${m.layers}L · h${m.hidden}</span>
+      <span style="margin-left:auto" class="tag">${m.size_bytes != null ? fmtBytes(m.size_bytes) : ""}</span>
+      ${m.can_delete ? '<button class="mdel" data-m="' + esc(m.model_id) + '">Delete</button>' : ""}
+    </div>`).join("");
+  document.querySelectorAll(".mdel").forEach(b => b.onclick = async () => {
+    if (!confirm("Delete model " + b.dataset.m + " from the coordinator store?")) return;
+    try {
+      await api("/admin/models/" + encodeURIComponent(b.dataset.m) + "/delete", "admin", { method: "POST" });
+      ok("model deleted");
+      refresh();
+    } catch (e) { fail(e); }
+  });
+}
+
+const fmtBytes = b => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
+  : b >= 1048576 ? (b / 1048576).toFixed(1) + " MiB"
+  : (b / 1024).toFixed(0) + " KiB";
+
+function renderJobs(data) {
+  $("jobsCount").textContent = "(" + data.active + " active)";
+  const rows = data.jobs || [];
+  if (!rows.length) { $("jobs").innerHTML = '<span class="tag">no jobs yet</span>'; return; }
+  $("jobs").innerHTML = rows.map(j => `
+    <div class="pl">
+      ${ago(j.created_at)} <b>${esc(j.state)}</b>
+      <span class="t">${esc(j.model_id)} · ${j.tokens_generated}t · ${esc(j.node_id || "unassigned")}</span>
+      ${"queued,dispatched,running,streaming,retrying".split(",").includes(j.state) ? `<button class="jc" data-j="${esc(j.job_id)}">Cancel</button>` : ""}
+      ${j.error ? ' <span class="err">' + esc(j.error) + "</span>" : ""}
+    </div>`).join("");
+  document.querySelectorAll(".jc").forEach(b => b.onclick = async () => {
+    try {
+      await api("/admin/jobs/" + encodeURIComponent(b.dataset.j) + "/cancel", "admin", { method: "POST" });
+      ok("job cancelled");
+    } catch (e) { fail(e); }
+  });
+}
+
+async function loadLogs() {
+  if (!keys.admin) return;
+  try {
+    const r = await api("/admin/logs?lines=" + ($("logLines").value || 200), "admin");
+    $("logview").textContent = (r.logs || []).join("\n");
+  } catch (e) { $("logview").textContent = String(e.message || e); }
+}
+
+async function exportLedger(format) {
+  try {
+    const res = await fetch("/ledger/export", {
+      method: "POST",
+      headers: { "X-API-Key": keys.api, "Content-Type": "application/json" },
+      body: JSON.stringify({ format }),
+    });
+    if (res.status === 401) throw new Error("401: bad api key");
+    if (!res.ok) throw new Error("export -> " + res.status);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(await res.blob());
+    a.download = "ledger." + format;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  } catch (e) { fail(e); }
 }
 
 function renderMetrics(m) {
@@ -303,21 +399,32 @@ $("applyKeys").onclick = async () => {
   } catch (e) { fail(e); }
 };
 
+$("refreshLogs").onclick = loadLogs;
+$("exportJson").onclick = () => exportLedger("json");
+$("exportCsv").onclick = () => exportLedger("csv");
+$("rescanModels").onclick = async () => {
+  try { await api("/admin/models/rescan", "admin", { method: "POST" }); ok("placements rescanned"); }
+  catch (e) { fail(e); }
+};
+
 async function refresh() {
   $("status").textContent = "loading…";
   try {
+    const modelsP = keys.admin
+      ? api("/admin/models", "admin").then(r => r.models.map(m => Object.assign(m, { can_delete: true })))
+      : api("/v1/models", "api").then(r => (r.models || []).map(m => m));
     const [nodes, feed, ledger, models] = await Promise.all([
       api("/admin/nodes", "admin"),
       api("/v1/nodes", "api"),
       api("/ledger/summary", "api"),
-      api("/v1/models", "api"),
+      modelsP,
     ]);
     renderNodes(nodes);
     renderPlacements(feed.placements || []);
     renderLedger(ledger);
-    renderModels((models.models || []).map(m => m));
+    renderModels(models);
     renderMetrics({
-      models: (models.models || []).length,
+      models: models.length,
       online: nodes.filter(n => n.state === "ONLINE").length,
       other: nodes.filter(n => n.state !== "ONLINE").length,
       active_jobs: feed.active_jobs,
@@ -325,7 +432,11 @@ async function refresh() {
     });
     $("status").className = "ok";
     $("status").textContent = new Date().toLocaleTimeString();
-    if (keys.admin) await loadKeys();
+    if (keys.admin) {
+      renderJobs(await api("/admin/jobs", "admin"));
+      if ($("logAuto").checked) await loadLogs();
+      await loadKeys();
+    }
   } catch (e) { fail(e); }
 }
 
