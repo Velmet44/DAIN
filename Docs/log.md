@@ -600,3 +600,35 @@ rotated between jobs (job1 stage0=node-1, job2 stage0=node-2), i.e. placement ba
   assets resolve. Chat/dashboard will only show data once a coordinator URL that is
   reachable from the browser is entered.
 - README updated with the public endpoint under "Quick start".
+
+### 2026-09-10 — dev tooling: cache cleanup + portable packaging scripts (session 7)
+
+- Added **`Scripts/clean_cache.bat`** — removes all regenerable cache/build artifacts,
+  recursive from the repo root: `__pycache__`, `.pytest_cache`, `.ruff_cache`,
+  `.mypy_cache`, `Node/build`, `Node/dist`, `Client/dist`, `Client/node_modules/.vite`,
+  `Node/node_state-*.json`, `Node/shard_cache*`. **Keeps** all `.venv` environments and
+  the SQLite databases (explicit user requirement). Prints a per-item removal list + a
+  summary count, then pauses.
+- Added **`Scripts/package.bat`** + **`Scripts/package.ps1`** — packages the whole
+  relocatable project into a zip at the repo root, auto-bumping the name if present
+  (`DAIN.zip` → `DAIN1.zip` → `DAIN2.zip` …). Staging strategy: recursive copy to a
+  temp dir that **prunes excluded names at each directory level** (never descends into
+  excluded trees), then zips via .NET `ZipFile.CreateFromDirectory` (includes hidden
+  files like `.gitignore`).
+- **Excluded** (recreatable/ignoreable): `__pycache__`, `.pytest_cache`, `.ruff_cache`,
+  `.mypy_cache`, `.venv`, `node_modules`, `.git`, `build/`, `dist/`, `shard_cache*`,
+  `node_state*.json`, `*.sqlite3*`, `*.pyc`, `*.spec`, `.DS_Store`, `Thumbs.db`,
+  previous `DAIN*.zip`.
+- **Included even though gitignored**: `model_store/dain-tiny-16L` (the dev model is
+  essential for a fresh machine to infer). `Deploy/caddy.exe` ships too (needed for the
+  prod edge, no download step).
+- Verified end-to-end in a test run: `Scripts/package.bat` produced a 19.38 MB zip with
+  124 entries; zip contents audited — all six projects (`Common/Coordinator/Node/Sim/
+  Client/Deploy`), `Docs/`, `.github/workflows`, `model_store`, `Scripts/` present;
+  marker scan over entry names showed **zero** `venv|__pycache__|node_modules|.git|
+  sqlite|shard_cache|node_state|build/|dist` hits. Test zip removed after verification.
+- Portability contract confirmed: the zip copies cleanly to another PC / folder; the
+  recipient unzips and runs `Scripts/bootstrap.ps1` (recreates all four `.venv` via
+  `uv sync` and `Client/node_modules` via `npm ci`). Agreed with the earlier session-4
+  decision that the repo contains no absolute paths (`rg E:\DAIN` clean) so the folder
+  is relocatable.
