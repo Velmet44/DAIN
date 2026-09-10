@@ -39,7 +39,9 @@ def main() -> None:
     port = _find_open_port(settings.host, settings.port)
     if port != settings.port:
         print(f"[DAIN] Port {settings.port} busy — using {port}")
-    uvicorn.run(create_app(settings), host=settings.host, port=port)
+    uvicorn.run(
+        create_app(settings, settings_path=str(path)), host=settings.host, port=port
+    )
 
 
 if __name__ == "__main__":

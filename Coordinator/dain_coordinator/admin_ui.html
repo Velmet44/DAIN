@@ -64,6 +64,11 @@
   ul { margin: 0; padding-left: 18px; }
   .pl { font-size: 12px; padding: 6px 14px; border-bottom: 1px solid #21262d; }
   .pl .t { color: #9198a1; }
+  .keys { padding: 10px 14px; }
+  .krow { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+  .krow label { width: 130px; }
+  .krow input { flex: 1; width: auto; }
+  .kactions { margin-top: 10px; display: flex; gap: 10px; align-items: center; }
   @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
 </style>
 </head>
@@ -88,6 +93,30 @@
         <tbody id="nodes"></tbody>
       </table>
       <div id="detail" class="detail-row" hidden></div>
+    </div>
+    <div class="card" id="keysCard" hidden>
+      <h2>Keys &amp; tokens</h2>
+      <div class="keys">
+        <div class="krow">
+          <label>Join token</label>
+          <input id="kJoin" type="text" spellcheck="false" autocomplete="off">
+          <button class="krst" data-k="join_token">Reset</button>
+        </div>
+        <div class="krow">
+          <label>Client API key</label>
+          <input id="kApi" type="text" spellcheck="false" autocomplete="off">
+          <button class="krst" data-k="api_key">Reset</button>
+        </div>
+        <div class="krow">
+          <label>Admin API key</label>
+          <input id="kAdmin" type="text" spellcheck="false" autocomplete="off">
+          <button class="krst" data-k="admin_api_key">Reset</button>
+        </div>
+        <div class="kactions">
+          <button id="applyKeys">Apply changes</button>
+          <span id="keysNote" class="tag"></span>
+        </div>
+      </div>
     </div>
     <div class="card">
       <h2>Placements</h2>
@@ -122,10 +151,11 @@ $("adminKey").value = keys.admin;
 $("apiKey").value = keys.api;
 let selectedNode = null;
 
-async function api(url, keyName) {
+async function api(url, keyName, opts = {}) {
   const key = keys[keyName];
-  const headers = key ? { ["X-" + (keyName === "admin" ? "Admin" : "API") + "-Key"]: key } : {};
-  const res = await fetch(url, { headers });
+  const headers = { ["X-" + (keyName === "admin" ? "Admin" : "API") + "-Key"]: key };
+  if (opts.body) headers["Content-Type"] = "application/json";
+  const res = await fetch(url, Object.assign({ headers, method: opts.method || "GET" }, opts.body ? { body: JSON.stringify(opts.body) } : {}));
   if (res.status === 401) throw new Error("401: bad " + keyName + " key");
   if (!res.ok) throw new Error(url + " -> " + res.status);
   return res.json();
@@ -222,6 +252,57 @@ function fail(e) {
   clearTimeout(failTimer); failTimer = setTimeout(() => $("status").textContent = "", 4000);
 }
 
+let okTimer = 0;
+function ok(msg) {
+  $("status").className = "ok";
+  $("status").textContent = msg;
+  clearTimeout(okTimer); okTimer = setTimeout(() => $("status").textContent = "", 4000);
+}
+
+// -- keys & tokens ---------------------------------------------------------
+const KEY_FIELDS = { join_token: "kJoin", api_key: "kApi", admin_api_key: "kAdmin" };
+let keyState = null;
+
+function paintKeys(state) {
+  keyState = state;
+  Object.entries(KEY_FIELDS).forEach(([f, id]) => { $(id).value = state[f]; });
+  const notes = [];
+  notes.push(state.writable ? "persisted to config.json" : "in-memory only (no config file)");
+  const over = Object.keys(state.env_overrides || {});
+  if (over.length) notes.push("env still wins at restart for: " + over.join(", "));
+  $("keysNote").textContent = notes.join(" · ");
+  $("keysCard").hidden = false;
+}
+
+async function loadKeys() {
+  if (!keys.admin) { $("keysCard").hidden = true; return; }
+  try { paintKeys(await api("/admin/settings/keys", "admin")); }
+  catch (e) {
+    if (String(e.message || e).startsWith("404")) { $("keysCard").hidden = true; return; }
+    throw e;
+  }
+}
+
+document.querySelectorAll(".krst").forEach(b => b.onclick = () => {
+  if (!keyState) return;
+  $(KEY_FIELDS[b.dataset.k]).value = keyState.defaults[b.dataset.k];
+});
+
+$("applyKeys").onclick = async () => {
+  if (!keyState) return;
+  const prev = keyState;
+  try {
+    const res = await api("/admin/settings/keys", "admin", {
+      method: "PUT",
+      body: { join_token: $("kJoin").value, api_key: $("kApi").value, admin_api_key: $("kAdmin").value },
+    });
+    paintKeys(res);
+    if (res.api_key !== prev.api_key) { keys.api = res.api_key; $("apiKey").value = res.api_key; }
+    if (res.admin_api_key !== prev.admin_api_key) { keys.admin = res.admin_api_key; $("adminKey").value = res.admin_api_key; }
+    ok("keys applied");
+  } catch (e) { fail(e); }
+};
+
 async function refresh() {
   $("status").textContent = "loading…";
   try {
@@ -244,10 +325,11 @@ async function refresh() {
     });
     $("status").className = "ok";
     $("status").textContent = new Date().toLocaleTimeString();
+    if (keys.admin) await loadKeys();
   } catch (e) { fail(e); }
 }
 
-$("adminKey").addEventListener("input", e => { keys.admin = e.target.value; });
+$("adminKey").addEventListener("input", e => { keys.admin = e.target.value; if (e.target.value) loadKeys().catch(fail); });
 $("apiKey").addEventListener("input", e => { keys.api = e.target.value; });
 $("refresh").onclick = refresh;
 setInterval(() => { if ($("auto").checked) refresh(); }, 5000);

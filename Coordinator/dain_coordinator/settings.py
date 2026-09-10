@@ -17,7 +17,9 @@ from pathlib import Path
 from dain_common.accounting import CreditWeights
 from dain_common.config import ScoringConfig
 
-DEFAULT_JOIN_TOKEN = "dain-dev-join-token"
+DEFAULT_JOIN_TOKEN = "Jj3L7ewD"
+DEFAULT_API_KEY = "DzOjEXqs"
+DEFAULT_ADMIN_API_KEY = "2UPZQJln"
 
 # Every settings field → the env var that can override it.  Values follow the
 # dataclass field names so config.json keys stay obvious ("heartbeat_interval_s").
@@ -67,14 +69,14 @@ DEFAULT_CONFIG: dict[str, object] = {
     "heartbeat_interval_s": 5.0,
     "offline_after_missed": 3,
     "monitor_tick_s": 0.5,
-    "join_token": "dain-dev-join-token",
+    "join_token": DEFAULT_JOIN_TOKEN,
     "min_score": 0.05,
     "uptime_alpha": 0.1,
     "overload_util_pct": 97.0,
     "overload_strikes_to_degrade": 3,
     "temp_degrade_c": 90.0,
     "log_json": False,
-    "api_key": "dain-dev-key",
+    "api_key": DEFAULT_API_KEY,
     "model_store_dir": "model_store",
     "job_timeout_s": 120.0,
     "queue_limit": 16,
@@ -92,7 +94,7 @@ DEFAULT_CONFIG: dict[str, object] = {
     "min_nodes": 1,
     "cors_origins": "*",
     "rate_limit_per_min": 60,
-    "admin_api_key": "dain-dev-admin-key",
+    "admin_api_key": DEFAULT_ADMIN_API_KEY,
     "discovery_enabled": True,
     "discovery_port": 8456,
 }
@@ -121,7 +123,7 @@ class CoordinatorSettings:
     temp_degrade_c: float = 90.0
     log_json: bool = False
     # S4: client API + model store
-    api_key: str = "dain-dev-key"
+    api_key: str = DEFAULT_API_KEY
     model_store_dir: str = "model_store"
     job_timeout_s: float = 120.0
     queue_limit: int = 16
@@ -149,7 +151,7 @@ class CoordinatorSettings:
     # optional per-IP/per-key rate limit for the public completion API (0 off).
     cors_origins: tuple[str, ...] = ("*",)
     rate_limit_per_min: int = 60
-    admin_api_key: str = "dain-dev-admin-key"
+    admin_api_key: str = DEFAULT_ADMIN_API_KEY
     # S10: LAN coordinator discovery — UDP responder nodes probe at startup so
     # they never need a hand-typed coord_url. Disable for public/WAN deploys.
     discovery_enabled: bool = True
@@ -176,7 +178,7 @@ class CoordinatorSettings:
             overload_util_pct=float(env.get("DAIN_OVERLOAD_UTIL_PCT", "97")),
             overload_strikes_to_degrade=int(env.get("DAIN_OVERLOAD_STRIKES", "3")),
             temp_degrade_c=float(env.get("DAIN_TEMP_DEGRADE_C", "90")),
-            api_key=env.get("DAIN_API_KEY", "dain-dev-key"),
+            api_key=env.get("DAIN_API_KEY", DEFAULT_API_KEY),
             model_store_dir=env.get("DAIN_MODEL_STORE_DIR", "model_store"),
             job_timeout_s=float(env.get("DAIN_JOB_TIMEOUT_S", "120")),
             queue_limit=int(env.get("DAIN_QUEUE_LIMIT", "16")),
@@ -196,7 +198,7 @@ class CoordinatorSettings:
                 o.strip() for o in env.get("DAIN_CORS_ORIGINS", "*").split(",") if o.strip()
             ),
             rate_limit_per_min=int(env.get("DAIN_RATE_LIMIT_PER_MIN", "60")),
-            admin_api_key=env.get("DAIN_ADMIN_API_KEY", "dain-dev-admin-key"),
+            admin_api_key=env.get("DAIN_ADMIN_API_KEY", DEFAULT_ADMIN_API_KEY),
             discovery_enabled=env.get("DAIN_DISCOVERY_ENABLED", "true").lower()
             in ("1", "true", "yes"),
             discovery_port=int(env.get("DAIN_DISCOVERY_PORT", "8456")),
@@ -239,7 +241,7 @@ class CoordinatorSettings:
             overload_strikes_to_degrade=int(data.get("overload_strikes_to_degrade", 3)),
             temp_degrade_c=float(data.get("temp_degrade_c", 90.0)),
             log_json=_truthy(data.get("log_json", False)),
-            api_key=str(data.get("api_key", "dain-dev-key")),
+            api_key=str(data.get("api_key", DEFAULT_API_KEY)),
             model_store_dir=_path(data.get("model_store_dir"), str(base_dir / "model_store")),
             job_timeout_s=float(data.get("job_timeout_s", 120.0)),
             queue_limit=int(data.get("queue_limit", 16)),
@@ -257,7 +259,7 @@ class CoordinatorSettings:
             min_nodes=int(data.get("min_nodes", 1)),
             cors_origins=_cors(data.get("cors_origins", "*")),
             rate_limit_per_min=int(data.get("rate_limit_per_min", 60)),
-            admin_api_key=str(data.get("admin_api_key", "dain-dev-admin-key")),
+            admin_api_key=str(data.get("admin_api_key", DEFAULT_ADMIN_API_KEY)),
             discovery_enabled=_truthy(data.get("discovery_enabled", True)),
             discovery_port=int(data.get("discovery_port", 8456)),
         )

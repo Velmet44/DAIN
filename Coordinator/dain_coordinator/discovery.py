@@ -41,6 +41,11 @@ class DiscoveryResponder:
         self._sock = sock
         log.info("discovery_listening port=%d ws_port=%d", self._port, self._ws_port)
 
+    def set_join_token(self, join_token: str) -> None:
+        """Rotate the admission token the responder authenticates probes with."""
+        self._join_token = join_token
+        log.info("discovery_join_token_rotated")
+
     def close(self) -> None:
         if self._sock is not None:
             self._sock.close()

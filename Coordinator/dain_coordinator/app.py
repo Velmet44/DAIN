@@ -67,7 +67,9 @@ async def _watchdog_loop(faults, settings: CoordinatorSettings) -> None:
             log.exception("watchdog_tick_failed")
 
 
-def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
+def create_app(
+    settings: CoordinatorSettings | None = None, settings_path: str | None = None
+) -> FastAPI:
     settings = settings or CoordinatorSettings.from_env()
     configure_logging(json_mode=settings.log_json)
 
@@ -143,6 +145,7 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
             )
         else:
             discovery = None
+        app.state.discovery = discovery
         discovery_task: asyncio.Task[None] | None = None
         if discovery is not None:
             try:
@@ -172,6 +175,8 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
 
     app = FastAPI(title="DAIN Coordinator", version="0.1.0", lifespan=lifespan)
     app.state.settings = settings
+    app.state.settings_path = settings_path
+    app.state.discovery = None
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,

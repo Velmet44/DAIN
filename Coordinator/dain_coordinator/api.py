@@ -17,6 +17,7 @@ import os
 import pathlib
 import secrets
 import time
+from dataclasses import replace as dataclass_replace
 from typing import Literal
 
 from dain_common.schemas import (
@@ -46,9 +47,16 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from dain_coordinator.config import persist_config
 from dain_coordinator.jobs import ActivationRelay, JobTracker
 from dain_coordinator.nodes import MessageOutcome, NodeService
 from dain_coordinator.partition import event_view, plan_placement
+from dain_coordinator.settings import (
+    COORDINATOR_ENV,
+    DEFAULT_ADMIN_API_KEY,
+    DEFAULT_API_KEY,
+    DEFAULT_JOIN_TOKEN,
+)
 from dain_coordinator.store import NodeRow
 
 log = logging.getLogger("dain.coordinator.api")
@@ -276,6 +284,106 @@ def node_detail(node_id: str, request: Request) -> NodeDetail:
     ]
     connected = request.app.state.connections.is_connected(row.node_id)
     return NodeDetail(**_view(row, connected=connected).model_dump(), history=history)
+
+
+# -- admin settings: keys & tokens --------------------------------------------------
+
+KEY_FIELDS = ("join_token", "api_key", "admin_api_key")
+
+
+class KeyState(BaseModel):
+    join_token: str
+    api_key: str
+    admin_api_key: str
+    defaults: dict[str, str]
+    env_overrides: dict[str, str]
+    writable: bool
+
+
+class KeysUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    join_token: str | None = Field(default=None, min_length=8, max_length=512)
+    api_key: str | None = Field(default=None, min_length=8, max_length=512)
+    admin_api_key: str | None = Field(default=None, min_length=8, max_length=512)
+    reset_join_token: bool = False
+    reset_api_key: bool = False
+    reset_admin_api_key: bool = False
+
+
+def _key_defaults() -> dict[str, str]:
+    return {
+        "join_token": DEFAULT_JOIN_TOKEN,
+        "api_key": DEFAULT_API_KEY,
+        "admin_api_key": DEFAULT_ADMIN_API_KEY,
+    }
+
+
+def _key_state(request: Request) -> KeyState:
+    settings = request.app.state.settings
+    writable = bool(getattr(request.app.state, "settings_path", None))
+    env_overrides = {
+        field: os.environ[env_var]
+        for field, env_var in COORDINATOR_ENV.items()
+        if field in KEY_FIELDS and env_var in os.environ
+    }
+    return KeyState(
+        join_token=settings.join_token,
+        api_key=settings.api_key,
+        admin_api_key=settings.admin_api_key,
+        defaults=_key_defaults(),
+        env_overrides=env_overrides,
+        writable=writable,
+    )
+
+
+@admin_router.get("/settings/keys", response_model=KeyState)
+def get_keys(request: Request) -> KeyState:
+    return _key_state(request)
+
+
+@admin_router.put("/settings/keys", response_model=KeyState)
+def update_keys(payload: KeysUpdate, request: Request) -> KeyState:
+    """Rotate any of the three admission keys at runtime.
+
+    A provided field sets a new value; the matching ``reset_*`` flag restores
+    the shipped default.  Changes apply immediately (existing node sessions
+    keep their per-node tokens) and are persisted to the coordinator's
+    ``config.json`` when one is loaded (env-var-provided keys still win at the
+    next restart, flagged in the response).
+    """
+    settings = request.app.state.settings
+    updates: dict[str, str] = {}
+    for field in KEY_FIELDS:
+        if getattr(payload, f"reset_{field}"):
+            updates[field] = _key_defaults()[field]
+        else:
+            value = getattr(payload, field)
+            if value is not None and value != getattr(settings, field):
+                updates[field] = value
+    if not updates:
+        return _key_state(request)
+
+    new_settings = dataclass_replace(settings, **updates)
+    request.app.state.settings = new_settings
+    request.app.state.service.settings = new_settings
+    discovery = getattr(request.app.state, "discovery", None)
+    if discovery is not None and "join_token" in updates:
+        discovery.set_join_token(updates["join_token"])
+
+    persisted = False
+    path = getattr(request.app.state, "settings_path", None)
+    if path:
+        try:
+            baseline = {field: getattr(settings, field) for field in KEY_FIELDS}
+            persist_config(pathlib.Path(path), updates, baseline=baseline)
+            persisted = True
+        except OSError as exc:
+            log.warning("keys_persist_failed path=%s error=%s", path, exc)
+
+    for field in updates:
+        log.info("admin_key_updated field=%s persisted=%s", field, persisted)
+    return _key_state(request)
 
 
 # -- client API (S4): SSE streaming completions ----------------------------------

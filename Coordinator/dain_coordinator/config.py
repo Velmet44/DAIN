@@ -59,6 +59,26 @@ def write_default_config(path: Path) -> None:
         fh.write("\n")
 
 
+def persist_config(path: Path, updates: dict, baseline: dict | None = None) -> dict:
+    """Merge *updates* into *path* and write it back atomically.
+
+    Missing or unparseable files start from *baseline* (or the default config);
+    an existing file is merged first so untouched fields keep their values.
+    Returns the merged dict that was written.
+    """
+    data = (baseline or DEFAULT_CONFIG).copy()
+    data.update(load_config(path))
+    data.update(updates)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    tmp.replace(path)
+    log.info("config_persisted path=%s keys=%s", path, ",".join(sorted(updates)))
+    return data
+
+
 def resolve_settings(
     base_dir: Path | None = None,
 ) -> tuple[CoordinatorSettings, Path, bool]:
