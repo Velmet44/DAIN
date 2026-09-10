@@ -575,3 +575,15 @@ cascade-failed.
   any CI node run).
 
 **Gates:** ruff clean + node tests (17) green.
+
+**Verification (same run):** live 2-node run on the same PC confirmed healthy — distinct
+`node-1`/`node-2` identities register and stay connected (no `connection_replaced` /
+`heartbeat_seq_gap`), a 16-layer job fans out 4 shards / 2 stages / 2 nodes, both nodes
+return `busy→online`, and ledger credits are recorded per stage. Stage assignment
+rotated between jobs (job1 stage0=node-1, job2 stage0=node-2), i.e. placement balances.
+- Note: node `generation_done tokens` (sampled bytes) can exceed coordinator
+  `token_final tokens` (emitted UTF-8 chars) because `ByteStreamer` skips continuation
+  bytes (multi-byte chars stream as one frame per decoded char). Cosmetic counter
+  difference, not a data-loss bug.
+- A stale `node-DESKTOP-2RFHTDL-5235` (pre-fix shared-identity era) is age-out cleanup
+  at startup; coordinator marks it offline and it no longer re-registers.
