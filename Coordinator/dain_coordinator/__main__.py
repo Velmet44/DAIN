@@ -1,11 +1,17 @@
-"""Entry point: ``python -m dain_coordinator`` starts the coordinator API."""
+"""Entry point: ``python -m dain_coordinator`` starts the coordinator API.
 
+Settings come from ``Coordinator/config.json`` (a full default is written on
+first run) with environment variables winning per-field; see
+``dain_coordinator.config.resolve_settings``.
+"""
+
+import logging
 import socket
 
 import uvicorn
 
 from dain_coordinator.app import create_app
-from dain_coordinator.settings import CoordinatorSettings
+from dain_coordinator.config import resolve_settings
 
 
 def _find_open_port(host: str, preferred: int) -> int:
@@ -21,7 +27,15 @@ def _find_open_port(host: str, preferred: int) -> int:
 
 
 def main() -> None:
-    settings = CoordinatorSettings.from_env()
+    settings, path, created = resolve_settings()
+    log = logging.getLogger("dain.coordinator")
+    log.info(
+        "coordinator_start host=%s port=%d config=%s config_created=%s",
+        settings.host,
+        settings.port,
+        path,
+        created,
+    )
     port = _find_open_port(settings.host, settings.port)
     if port != settings.port:
         print(f"[DAIN] Port {settings.port} busy — using {port}")
