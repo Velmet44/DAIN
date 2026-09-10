@@ -825,3 +825,32 @@ the admin page could see nodes but not manage the cluster's own credentials.
 - **Gates:** Coordinator **70 passed** (61 + 9 new key tests covering rotate API/admin/
   join-token, short-key 422, unknown-key 422, reset, restart persistence, in-memory-only,
   no-op unchanged, first-edit bootstrap), ruff clean. Node/Common untouched.
+
+### 2026-09-10 — admin page upgrade: node/job/model/log controls (session 12, commit 0785808)
+
+**Goal:** the admin page is now a control surface, not just a read-only dashboard. New
+Coordinator endpoints (all under `/admin`, admin-key gated) + UI:
+
+- **Nodes:** `POST /admin/nodes/{id}/offline` (evict — transitions to offline, fails the
+  node's active jobs), `POST /admin/nodes/{id}/online` (recover). 409 on illegal transitions.
+  Detail panel now has **Recover (ONLINE)** / **Evict (OFFLINE)** buttons.
+- **Jobs:** `GET /admin/jobs` (recent + active, newest first), `POST /admin/jobs/{id}/cancel`
+  (releases the stage nodes + fails the job). New Jobs card lists them with a **Cancel**
+  button on active ones. (Ordinary jobs *can* be cancelled; jobs in-progress on one
+  coordinator can't be resumed on another.)
+- **Models:** `GET /admin/models` (with on-disk sizes), `POST /admin/models/{id}/delete`
+  (path-traversal-safe: safe-char check + `resolve()` containment + rmtree), `POST
+  /admin/models/rescan` (recompute placements immediately via the existing
+  `recompute_pool`). Models card shows size + **Delete** (confirm); a **Rescan placements**
+  action the user asked for.
+- **Logs:** new in-process ring (`dain_coordinator.logs.RingLogHandler`, 2000 lines) attached
+  to the root logger at app build; `GET /admin/logs?lines=N` tails it. Log viewer card with
+  line-count + auto-refresh.
+- **Ledger:** **Export JSON** / **Export CSV** buttons hit the existing authenticated
+  `/ledger/export`.
+- Fixed pre-existing CSS bug: NodeState/JobState are lowercase StrEnum values, but the pill
+  classes in `admin_ui.html` were `st-ONLINE`-style => states never actually showing colors.
+  Pill classes now `st-online`/`st-busy`/`st-degraded`/`st-offline`.
+- **Gates:** Coordinator **79 passed** (70 + 9 new: evict/recover lifecycle, 409s, unknown
+  node 409, model list size/delete/rescan, path-traversal, jobs list/cancel/409s/404, logs
+  tail), ruff clean. Node/Common untouched.
