@@ -13,7 +13,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_JOIN_TOKEN = "dain-dev-join-token"
+DEFAULT_JOIN_TOKEN = "Jj3L7ewD"
 
 
 @dataclass(frozen=True)

@@ -59,7 +59,7 @@ function Exec-Component {
         }
         "client" {
             if (-not $env:VITE_API_URL) { $env:VITE_API_URL = "http://localhost:8000" }
-            if (-not $env:VITE_API_KEY) { $env:VITE_API_KEY = "dain-dev-key" }
+            if (-not $env:VITE_API_KEY) { $env:VITE_API_KEY = "DzOjEXqs" }
             Write-Host "=== DAIN Web Client ===" -ForegroundColor Magenta
             Push-Location (Join-Path $script:Root "Client")
             try {
@@ -98,14 +98,14 @@ foreach ($tool in @("uv", "node")) {
 }
 
 # Optional keys (Enter = defaults)
-$adminKey = Read-Host "  Admin API key     [dain-dev-admin-key]"
-if (-not $adminKey) { $adminKey = "dain-dev-admin-key" }
+$adminKey = Read-Host "  Admin API key     [2UPZQJln]"
+if (-not $adminKey) { $adminKey = "2UPZQJln" }
 
-$clientKey = Read-Host "  Client API key    [dain-dev-key]"
-if (-not $clientKey) { $clientKey = "dain-dev-key" }
+$clientKey = Read-Host "  Client API key    [DzOjEXqs]"
+if (-not $clientKey) { $clientKey = "DzOjEXqs" }
 
-$joinToken = Read-Host "  Join token        [dain-dev-join-token]"
-if (-not $joinToken) { $joinToken = "dain-dev-join-token" }
+$joinToken = Read-Host "  Join token        [Jj3L7ewD]"
+if (-not $joinToken) { $joinToken = "Jj3L7ewD" }
 
 $numNodes = Read-Host "  Number of nodes   [1]"
 if (-not $numNodes) { $numNodes = 1 }

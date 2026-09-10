@@ -26,7 +26,7 @@ log = logging.getLogger("dain.node.config")
 # first run, and only then connects.  Set it explicitly for WAN/remote use.
 DEFAULT_CONFIG: dict = {
     "coord_url": "",
-    "join_token": "dain-dev-join-token",
+    "join_token": "Jj3L7ewD",
     "node_id": "",
     "heartbeat_s": 5,
     "model": "",

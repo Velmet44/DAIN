@@ -20,7 +20,7 @@ def test_round_trip_default_config() -> None:
     settings = CoordinatorSettings.from_config(DEFAULT_CONFIG, Path("."))
     assert settings.host == "0.0.0.0"
     assert settings.port == 8000
-    assert settings.join_token == "dain-dev-join-token"
+    assert settings.join_token == "Jj3L7ewD"
     assert settings.discovery_enabled is True
     assert settings.discovery_port == 8456
     assert settings.cors_origins == ("*",)

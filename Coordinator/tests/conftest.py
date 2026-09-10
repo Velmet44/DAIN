@@ -16,7 +16,11 @@ from fastapi.testclient import TestClient
 from dain_coordinator.app import create_app
 from dain_coordinator.settings import CoordinatorSettings
 
-# Known test-only admin key used by all Coordinator unit tests.
+# Known test-only keys used across the Coordinator unit tests.  They are
+# explicit fixtures (never the shipped defaults), so changing the defaults
+# can never silently break the suite.
+JOIN_TOKEN = "dain-dev-join-token"
+API_KEY = "dain-dev-key"
 ADMIN_KEY = "dain-dev-admin-key"
 ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
 
@@ -60,6 +64,8 @@ def make_settings(tmp_path, **overrides: Any) -> CoordinatorSettings:
         offline_after_missed=3,
         monitor_tick_s=0.05,
         admin_api_key=ADMIN_KEY,
+        join_token=JOIN_TOKEN,
+        api_key=API_KEY,
         **overrides,
     )
 
