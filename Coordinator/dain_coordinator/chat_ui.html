@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAIN Chat</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; font: 14px/1.45 ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+    background: #0d1117; color: #e6edf3;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 12px; align-items: center; padding: 12px 16px;
+    border-bottom: 1px solid #21262d; background: #161b22; position: sticky; top: 0; z-index: 5;
+  }
+  header h1 { font-size: 15px; margin: 0 12px 0 0; white-space: nowrap; }
+  label { display: flex; align-items: center; gap: 6px; color: #9198a1; font-size: 12px; white-space: nowrap; }
+  input, select {
+    background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3;
+    padding: 4px 8px; font-family: ui-monospace, Consolas, monospace; font-size: 12px;
+  }
+  input:focus, select:focus { outline: 1px solid #2f81f7; }
+  select { width: 200px; }
+  button {
+    background: #21262d; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px;
+    padding: 5px 12px; cursor: pointer; font-size: 12px;
+  }
+  button:hover { background: #30363d; }
+  button:disabled { opacity: .5; cursor: default; }
+  #status { margin-left: auto; font-size: 12px; color: #9198a1; white-space: nowrap; }
+  .err { color: #f85149; }
+  .ok  { color: #3fb950; }
+  main { max-width: 860px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; height: calc(100vh - 130px); }
+  #log {
+    flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 12px;
+    padding: 8px 4px 16px; scroll-behavior: smooth;
+  }
+  .msg { max-width: 78%; padding: 10px 14px; border-radius: 10px; white-space: pre-wrap; overflow-wrap: break-word; }
+  .msg.user { align-self: flex-end; background: #1f6feb26; border: 1px solid #1f6feb55; }
+  .msg.bot  { align-self: flex-start; background: #161b22; border: 1px solid #21262d; }
+  .msg.err  { align-self: flex-start; background: #f8514922; border: 1px solid #f8514955; color: #ffa198; }
+  .msg .who { display: block; font-size: 11px; color: #9198a1; margin-bottom: 4px; text-transform: uppercase; letter-spacing: .04em; }
+  .msg.user .who { color: #58a6ff; }
+  .cursor { display: inline-block; width: 8px; height: 1.1em; vertical-align: text-bottom; background: #58a6ff; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .controls {
+    display: flex; gap: 8px; align-items: flex-end; padding-top: 10px;
+    border-top: 1px solid #21262d;
+  }
+  #prompt { flex: 1; resize: none; min-height: 46px; max-height: 200px; font: 14px/1.4 inherit; padding: 8px 10px; }
+  #statusHint { color: #9198a1; font-size: 12px; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>DAIN Chat</h1>
+  <label>API key <input id="apiKey" type="password" placeholder="X-API-Key"></label>
+  <label>Model <select id="model"></select></label>
+  <label>Temp <input id="temp" type="number" min="0" max="2" step="0.1" value="0.7" style="width:56px"></label>
+  <label>Max tokens <input id="maxTokens" type="number" min="1" max="512" step="1" value="256" style="width:64px"></label>
+  <span id="status" class="ok">ready</span>
+</header>
+
+<main>
+  <div id="log"></div>
+  <div id="statusHint">Enter to send · Shift+Enter for a newline</div>
+  <div class="controls">
+    <textarea id="prompt" placeholder="Ask the network…"></textarea>
+    <button id="send">Send</button>
+  </div>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const keys = {
+  get api(){ return localStorage.getItem("dain_msg_api") || ""; },
+  set api(v){ localStorage.setItem("dain_msg_api", v); },
+};
+$("apiKey").value = keys.api;
+
+const esc = t => String(t ?? "").replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c]));
+const log = el => { $("log").appendChild(el); $("log").scrollTop = $("log").scrollHeight; return el; };
+const bubble = (cls, who, html) => {
+  const d = document.createElement("div");
+  d.className = "msg " + cls;
+  d.innerHTML = `<span class="who">${esc(who)}</span>`;
+  const body = document.createElement("div");
+  body.className = "body";
+  body.innerHTML = html || "";
+  d.appendChild(body);
+  return d;
+};
+let busy = false;
+
+function status(msg, cls) {
+  const el = $("status");
+  el.className = cls || "";
+  el.textContent = msg;
+}
+
+$("apiKey").addEventListener("input", e => { keys.api = e.target.value; });
+
+async function apiJson(url, headers = {}) {
+  const key = keys.api;
+  if (key) headers["X-API-Key"] = key;
+  const res = await fetch(url, { headers });
+  if (res.status === 401) throw new Error("401: bad API key");
+  if (!res.ok) throw new Error(url + " -> " + res.status);
+  return res.json();
+}
+
+async function loadModels() {
+  try {
+    const data = await apiJson("/v1/models");
+    const sel = $("model");
+    const models = data.models || [];
+    sel.innerHTML = models.map(m =>
+      `<option value="${esc(m.model_id)}">${esc(m.model_id)} · ${esc(m.name)}</option>`).join("")
+      || `<option value="">no models in store</option>`;
+    if (models.length) { sel.value = localStorage.getItem("dain_msg_model") || models[0].model_id; }
+  } catch (e) { status(e.message, "err"); }
+}
+
+async function send() {
+  const promptEl = $("prompt");
+  const text = promptEl.value.trim();
+  if (!text || busy) return;
+  const model = $("model").value;
+  if (!model) { status("no model selected", "err"); return; }
+  localStorage.setItem("dain_msg_model", model);
+
+  busy = true;
+  promptEl.disabled = $("send").disabled = true;
+  promptEl.value = "";
+  log(bubble("user", "you", esc(text)));
+  const bot = bubble("bot", model, "");
+  const body = bot.querySelector(".body");
+  log(bot);
+  let full = "";
+
+  const payload = {
+    model_id: model,
+    prompt: text,
+    max_tokens: Math.max(1, Math.min(512, parseInt($("maxTokens").value, 10) || 256)),
+    temperature: Math.max(0, Math.min(2, parseFloat($("temp").value) || 0.7)),
+    stream: true,
+  };
+
+  try {
+    const headers = { "Content-Type": "application/json" };
+    const key = keys.api;
+    if (key) headers["X-API-Key"] = key;
+    const res = await fetch("/v1/completions", { method: "POST", headers, body: JSON.stringify(payload) });
+    if (!res.ok) {
+      let detail = "HTTP " + res.status;
+      try { detail = (await res.json()).detail || detail; } catch (_) { /* non-json */ }
+      if (res.status === 401) detail = "401: bad API key";
+      throw new Error(detail);
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    status("generating…", "ok");
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) >= 0) {
+        const event = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of event.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (data === "[DONE]") continue;
+          const frame = JSON.parse(data);
+          if (frame.type === "token") {
+            full += frame.token;
+            body.innerHTML = esc(full).replace(/\n/g, "<br>") + '<span class="cursor"></span>';
+            $("log").scrollTop = $("log").scrollHeight;
+          } else if (frame.type === "final") {
+            body.innerHTML = esc(full).replace(/\n/g, "<br>");
+          } else if (frame.type === "error") {
+            throw new Error(frame.detail || "job error");
+          } else if (frame.status === "dispatched") {
+            status("job " + frame.job_id + " dispatched…", "ok");
+          }
+        }
+      }
+    }
+    status("done · " + full.length + " chars", "ok");
+  } catch (e) {
+    body.innerHTML = "";
+    bot.className = "msg err";
+    bot.querySelector(".who").textContent = "error";
+    bot.querySelector(".body").textContent = String(e.message || e);
+    status("failed", "err");
+  } finally {
+    busy = false;
+    promptEl.disabled = $("send").disabled = false;
+    promptEl.focus();
+  }
+}
+
+$("send").onclick = send;
+$("prompt").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+loadModels();
+</script>
+</body>
+</html>

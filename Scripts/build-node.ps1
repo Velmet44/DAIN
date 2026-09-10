@@ -56,8 +56,10 @@ if (Test-Path -LiteralPath $oldExe) {
 }
 
 # ── 5. Write default config.json ─────────────────────────────────────────
+# coord_url empty = auto-discover the coordinator on the LAN (first run probes
+# a UDP broadcast; the node fills in ws://<coordinator-ip>:<port> itself).
 $configObj = [ordered]@{
-    coord_url    = "ws://localhost:8000"
+    coord_url    = ""
     join_token   = "dain-dev-join-token"
     node_id      = ""
     heartbeat_s  = 5
@@ -90,5 +92,7 @@ Write-Host ""
 Write-Host "  Built DainNode v$version" -ForegroundColor Green
 Write-Host "  Zip: $zipPath ($sizeMB MB)"
 Write-Host ""
-Write-Host "  Users: extract the zip, edit config.json, run DainNode.exe"
+Write-Host "  Users: extract the zip and run DainNode.exe"
+Write-Host "         it auto-discovers the coordinator on the LAN (join_token must match);"
+Write-Host "         edit config.json only for remote/WAN use."
 Write-Host ""

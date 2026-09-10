@@ -23,6 +23,7 @@ from dain_coordinator.api import (
     v1_router,
 )
 from dain_coordinator.connections import NodeConnections
+from dain_coordinator.discovery import DiscoveryResponder
 from dain_coordinator.faults import FaultManager
 from dain_coordinator.jobs import ActivationRelay, JobTracker
 from dain_coordinator.ledger import Ledger
@@ -36,6 +37,7 @@ from dain_coordinator.store import SQLiteRegistry
 log = logging.getLogger("dain.coordinator.app")
 
 _UI_HTML: str | None = None
+_CHAT_UI_HTML: str | None = None
 
 
 def _admin_ui() -> str:
@@ -44,6 +46,14 @@ def _admin_ui() -> str:
     if _UI_HTML is None:
         _UI_HTML = pathlib.Path(__file__).with_name("admin_ui.html").read_text(encoding="utf-8")
     return _UI_HTML
+
+
+def _chat_ui() -> str:
+    """The self-contained chat page (no build step), read once at import."""
+    global _CHAT_UI_HTML
+    if _CHAT_UI_HTML is None:
+        _CHAT_UI_HTML = pathlib.Path(__file__).with_name("chat_ui.html").read_text(encoding="utf-8")
+    return _CHAT_UI_HTML
 
 
 async def _watchdog_loop(faults, settings: CoordinatorSettings) -> None:
@@ -126,13 +136,38 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
         monitor = HeartbeatMonitor(service, settings)
         task = asyncio.create_task(monitor.run(), name="heartbeat-monitor")
         watchdog = asyncio.create_task(_watchdog_loop(faults, settings), name="stage-watchdog")
+        discovery: DiscoveryResponder | None
+        if settings.discovery_enabled:
+            discovery = DiscoveryResponder(
+                settings.discovery_port, settings.join_token, settings.port
+            )
+        else:
+            discovery = None
+        discovery_task: asyncio.Task[None] | None = None
+        if discovery is not None:
+            try:
+                discovery.start()
+            except OSError:
+                log.warning(
+                    "discovery_disabled bind_failed port=%d", settings.discovery_port
+                )
+                discovery = None
+        if discovery is not None:
+            discovery_task = asyncio.create_task(discovery.run(), name="lan-discovery")
         yield
         task.cancel()
         watchdog.cancel()
+        if discovery_task is not None:
+            discovery_task.cancel()
+        if discovery is not None:
+            discovery.close()
         with contextlib.suppress(asyncio.CancelledError):
             await task
         with contextlib.suppress(asyncio.CancelledError):
             await watchdog
+        if discovery_task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await discovery_task
         registry.close()
 
     app = FastAPI(title="DAIN Coordinator", version="0.1.0", lifespan=lifespan)
@@ -160,5 +195,11 @@ def create_app(settings: CoordinatorSettings | None = None) -> FastAPI:
     def admin_ui() -> HTMLResponse:
         """Served shell only — every data call the page makes is authed separately."""
         return HTMLResponse(_admin_ui())
+
+    @app.get("/msg", include_in_schema=False)
+    @app.get("/msg/", include_in_schema=False)
+    def chat_ui() -> HTMLResponse:
+        """Self-contained chat interface at /msg (no build step, no static hosting)."""
+        return HTMLResponse(_chat_ui())
 
     return app

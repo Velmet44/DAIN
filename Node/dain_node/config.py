@@ -14,14 +14,18 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import sys
 from pathlib import Path
 
 log = logging.getLogger("dain.node.config")
 
 # Default config written into the distribution folder by build-node.ps1.
+# coord_url is empty meaning "auto-discover the coordinator on this LAN"; the
+# node probes a UDP broadcast, fills in ws://<coordinator-ip>:<port> itself on
+# first run, and only then connects.  Set it explicitly for WAN/remote use.
 DEFAULT_CONFIG: dict = {
-    "coord_url": "ws://localhost:8000",
+    "coord_url": "",
     "join_token": "dain-dev-join-token",
     "node_id": "",
     "heartbeat_s": 5,
@@ -65,6 +69,16 @@ def load_config(config_path: Path) -> dict:
     except (json.JSONDecodeError, OSError) as exc:
         log.warning("config_load_failed path=%s error=%s — using defaults", config_path, exc)
         return {}
+
+
+def write_config(config_path: Path, data: dict) -> None:
+    """Atomically persist *data* (tmp + replace) so a crash never truncates it."""
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f"{config_path}.tmp-{secrets.token_hex(4)}"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2)
+        fh.write("\n")
+    os.replace(tmp, config_path)
 
 
 class ConfigWatcher:

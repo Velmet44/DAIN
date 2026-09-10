@@ -61,6 +61,10 @@ class CoordinatorSettings:
     cors_origins: tuple[str, ...] = ("*",)
     rate_limit_per_min: int = 60
     admin_api_key: str = "dain-dev-admin-key"
+    # S10: LAN coordinator discovery — UDP responder nodes probe at startup so
+    # they never need a hand-typed coord_url. Disable for public/WAN deploys.
+    discovery_enabled: bool = True
+    discovery_port: int = 8456
 
     @property
     def offline_timeout_s(self) -> float:
@@ -98,5 +102,8 @@ class CoordinatorSettings:
             ),
             rate_limit_per_min=int(env.get("DAIN_RATE_LIMIT_PER_MIN", "60")),
             admin_api_key=env.get("DAIN_ADMIN_API_KEY", "dain-dev-admin-key"),
+            discovery_enabled=env.get("DAIN_DISCOVERY_ENABLED", "true").lower()
+            in ("1", "true", "yes"),
+            discovery_port=int(env.get("DAIN_DISCOVERY_PORT", "8456")),
             log_json=env.get("DAIN_LOG_JSON", "").lower() in ("1", "true", "yes"),
         )

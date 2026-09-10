@@ -74,7 +74,7 @@ class NodeSettings:
             return str(p if p.is_absolute() else base_dir / p)
 
         return cls(
-            coord_url=config.get("coord_url", "ws://localhost:8000"),
+            coord_url=config.get("coord_url") or "ws://localhost:8000",
             join_token=config.get("join_token", DEFAULT_JOIN_TOKEN),
             node_id=config.get("node_id") or None,
             heartbeat_interval_s=float(config.get("heartbeat_s", 5.0)),

@@ -13,10 +13,11 @@ from pathlib import Path
 from dain_common.logging_setup import configure_logging
 
 from dain_node.agent import run_agent
-from dain_node.config import ConfigWatcher, find_base_dir, load_config
+from dain_node.config import ConfigWatcher, find_base_dir, load_config, write_config
+from dain_node.discovery import discover_coordinator
 from dain_node.jobs import JobHandler
 from dain_node.llm import ModelStoreClient
-from dain_node.settings import NodeSettings
+from dain_node.settings import DEFAULT_JOIN_TOKEN, NodeSettings
 
 
 def _build_settings(config: dict, base_dir: Path) -> NodeSettings:
@@ -26,10 +27,44 @@ def _build_settings(config: dict, base_dir: Path) -> NodeSettings:
     return NodeSettings.from_env()
 
 
+def _auto_discover(config: dict, config_path: Path) -> dict:
+    """Fill an empty ``coord_url`` in config.json via LAN discovery.
+
+    Only runs in standalone mode (config.json present) without an explicit
+    ``coord_url``.  When a coordinator answers, the discovered URL is written
+    into config.json atomically so later starts skip the probe entirely and
+    the user can see exactly what the node connected to.
+    """
+    url = str(config.get("coord_url") or "").strip()
+    if url:
+        return config
+    token = str(config.get("join_token") or DEFAULT_JOIN_TOKEN)
+    log = logging.getLogger("dain.node")
+    log.info("coord_url_empty — probing the LAN for a coordinator...")
+    found: str | None = None
+    try:
+        found = asyncio.run(discover_coordinator(token))
+    except Exception:
+        log.exception("coordinator_discovery_error")
+    if not found:
+        log.warning(
+            "coordinator_discovery_failed — set coord_url in %s to the "
+            "coordinator's address",
+            config_path,
+        )
+        return config
+    config["coord_url"] = found
+    write_config(config_path, config)
+    log.info("coord_url_discovered_url=%s — saved to %s", found, config_path)
+    return config
+
+
 def main() -> int:
     base_dir = find_base_dir()
     config_path = base_dir / "config.json"
     config = load_config(config_path)
+    if config:
+        config = _auto_discover(config, config_path)
     watcher = ConfigWatcher(config_path)
 
     # ── restart loop ──────────────────────────────────────────────────────
