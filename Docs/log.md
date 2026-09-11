@@ -1217,7 +1217,7 @@ Common: pytest OK, ruff clean. Coordinator: pytest OK, ruff clean.
 Node: pytest OK, ruff clean. Sim: pytest OK (incl. 4-agent pipeline parity +
 2-agent HF e2e), ruff clean. Client `npm run build` OK (tsc + vite).
 
-## 2026-09-11 - S21: Model export pipeline (INT4/TorchAO) (commit pending)
+## 2026-09-11 - S21: Model export pipeline (INT4/TorchAO) (commit 15b9c5c)
 
 Goal (see `Docs/plan-model-export-pipeline.md`): let users turn local HuggingFace
 Llama checkpoints into TorchAO INT4 DAIN shards that the scheduler will only
