@@ -65,6 +65,10 @@ COORDINATOR_ENV: dict[str, str] = {
     "node_project_dir": "DAIN_NODE_PROJECT_DIR",
     "job_history_max": "DAIN_JOB_HISTORY_MAX",
     "job_ttl_s": "DAIN_JOB_TTL_S",
+    "export_work_dir": "DAIN_EXPORT_WORK_DIR",
+    "export_roots": "DAIN_EXPORT_ROOTS",
+    "max_export_size_gb": "DAIN_MAX_EXPORT_SIZE_GB",
+    "export_timeout_s": "DAIN_EXPORT_TIMEOUT_S",
 }
 
 # Default config.json written next to the coordinator on first run.  Key names
@@ -107,6 +111,10 @@ DEFAULT_CONFIG: dict[str, object] = {
     "node_project_dir": "",
     "job_history_max": 4096,
     "job_ttl_s": 3600.0,
+    "export_work_dir": "export_work",
+    "export_roots": [],
+    "max_export_size_gb": 100.0,
+    "export_timeout_s": 3600.0,
 }
 
 
@@ -205,6 +213,12 @@ class CoordinatorSettings:
     # (`uv run --project <dir> python -m dain_node.import_gguf`). Empty = the
     # sibling `Node/` directory next to the coordinator.
     node_project_dir: str = ""
+    # Model export (session N): staging dir, approved source directories, limits.
+    # source_dir in the export API must resolve under one of the export_roots.
+    export_work_dir: str = "export_work"
+    export_roots: tuple[str, ...] = ()
+    max_export_size_gb: float = 100.0
+    export_timeout_s: float = 3600.0
     # Completed-job retention: terminal jobs are evicted once the history grows
     # past `job_history_max` (oldest first) or a job has been terminal for
     # longer than `job_ttl_s` — the tracker must not grow forever on long runs.
@@ -260,6 +274,12 @@ class CoordinatorSettings:
             job_history_max=int(env.get("DAIN_JOB_HISTORY_MAX", "4096")),
             job_ttl_s=float(env.get("DAIN_JOB_TTL_S", "3600")),
             log_json=env.get("DAIN_LOG_JSON", "").lower() in ("1", "true", "yes"),
+            export_work_dir=env.get("DAIN_EXPORT_WORK_DIR", "export_work"),
+            export_roots=tuple(
+                r.strip() for r in env.get("DAIN_EXPORT_ROOTS", "").split(";") if r.strip()
+            ),
+            max_export_size_gb=float(env.get("DAIN_MAX_EXPORT_SIZE_GB", "100")),
+            export_timeout_s=float(env.get("DAIN_EXPORT_TIMEOUT_S", "3600")),
         )
 
     @classmethod
@@ -322,4 +342,12 @@ class CoordinatorSettings:
             node_project_dir=str(data.get("node_project_dir", "") or ""),
             job_history_max=int(data.get("job_history_max", 4096)),
             job_ttl_s=float(data.get("job_ttl_s", 3600.0)),
+            export_work_dir=_path(data.get("export_work_dir"), str(base_dir / "export_work")),
+            export_roots=tuple(
+                str(r).strip()
+                for r in (data.get("export_roots") or [])
+                if str(r).strip()
+            ),
+            max_export_size_gb=float(data.get("max_export_size_gb", 100.0)),
+            export_timeout_s=float(data.get("export_timeout_s", 3600.0)),
         )

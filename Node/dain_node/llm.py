@@ -45,6 +45,71 @@ _CHUNKS_DIR = ".chunks"
 _PEER_CACHE_TTL = 5.0
 _RANGE_RETRIES = 3
 
+#: Shard file extensions by ShardRef.format (plan §2.1). Quantized shards are
+#: `torch_pt` because TorchAO's AffineQuantizedTensor packing metadata only
+#: survives torch.save/torch.load; fp16/fp32 shards stay safetensors.
+_SHARD_EXTS = {
+    None: ".safetensors",
+    "safetensors": ".safetensors",
+    "torch_pt": ".pt",
+}
+
+_ACTIVATION_DTYPES_LABEL = {
+    "fp32": torch.float32,
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+}
+
+
+def _activation_dtype(label: str) -> torch.dtype:
+    return _ACTIVATION_DTYPES_LABEL.get(label, torch.float32)
+
+
+# -- inference backend abstraction (S22) --------------------------------------
+
+
+class InferenceBackend:
+    """How a node materializes and runs one model family.
+
+    The exporter is the compiler; the backend is the runtime. `is_quantized`
+    tells the stage builder that weight parameters must be *assigned* (the
+    packed AffineQuantizedTensor) instead of fp16/fp32-copied.
+    """
+
+    name: str = "fp16"
+    is_quantized: bool = False
+
+    def deserialize_shard(self, path: str) -> dict[str, torch.Tensor]:
+        raise NotImplementedError
+
+
+class TorchFp16Backend(InferenceBackend):
+    name = "torch_fp16"
+    is_quantized = False
+
+    def deserialize_shard(self, path: str) -> dict[str, torch.Tensor]:
+        return load_file(path)
+
+
+class TorchAOInt4Backend(InferenceBackend):
+    name = "torchao_int4"
+    is_quantized = True
+
+    def deserialize_shard(self, path: str) -> dict[str, torch.Tensor]:
+        # weights_only=False: the pickle materializes AffineQuantizedTensor
+        # subclasses that carry the INT4 packing metadata (plan §2.1).
+        return torch.load(path, weights_only=False)
+
+
+def select_backend(manifest: ModelManifest) -> InferenceBackend:
+    """Choose the execution backend for a manifest (exported vs legacy)."""
+    quant = getattr(manifest, "quantization", None)
+    if manifest.format == "torch_pt" or (
+        quant is not None and getattr(quant, "is_quantized", False)
+    ):
+        return TorchAOInt4Backend()
+    return TorchFp16Backend()
+
 
 class RangeIgnoredError(RuntimeError):
     """Raised when a source returns HTTP 200 to a Range request (body not byte-aligned)."""
@@ -224,12 +289,13 @@ class ModelStoreClient:
             if not os.path.isdir(model_dir):
                 continue
             for fname in sorted(os.listdir(model_dir)):
-                if not fname.endswith(".safetensors"):
+                ext = next((e for e in (".safetensors", ".pt") if fname.endswith(e)), None)
+                if ext is None:
                     continue
                 shard_path = os.path.join(model_dir, fname)
                 if not os.path.isfile(shard_path):
                     continue
-                shard_id = fname[: -len(".safetensors")]
+                shard_id = fname[: -len(ext)]
                 if not is_safe_model_id(shard_id):
                     continue
                 content_hash = self._verifiable_hash(shard_path, hashes)
@@ -241,6 +307,7 @@ class ModelStoreClient:
                         shard_id=shard_id,
                         content_hash=content_hash,
                         size_bytes=os.path.getsize(shard_path),
+                        format="torch_pt" if ext == ".pt" else None,
                     )
                 )
         return tuple(refs)
@@ -323,7 +390,13 @@ class ModelStoreClient:
 
     # -- shard download -----------------------------------------------------------
 
-    async def ensure_shard(self, model_id: str, shard_id: str, content_hash: str) -> str:
+    async def ensure_shard(
+        self,
+        model_id: str,
+        shard_id: str,
+        content_hash: str,
+        format: str | None = None,
+    ) -> str:
         """Download + verify one shard; returns the cached file path.
 
         Faster than it used to be, three ways:
@@ -331,9 +404,12 @@ class ModelStoreClient:
           (+ the coordinator as last resort);
         - a partly missing file resumes (per-range) instead of restarting;
         - the connection is reused across shards via one shared httpx client.
+        Quantized shards (``format="torch_pt"``) land as ``.pt`` files; legacy
+        shards as ``.safetensors`` — the extension is part of the address.
         """
         model_cache = os.path.join(self.cache_dir, model_id)
-        path = os.path.join(model_cache, f"{shard_id}.safetensors")
+        ext = _SHARD_EXTS.get(format, ".safetensors")
+        path = os.path.join(model_cache, f"{shard_id}{ext}")
         if os.path.exists(path):
             if await self._verify(path, content_hash):
                 log.info("shard_hit model=%s shard=%s path=%s", model_id, shard_id, path)
@@ -721,6 +797,7 @@ class StageModel:
         *,
         device: str = "cpu",
         tokenizer_path: str | None = None,
+        backend: InferenceBackend | None = None,
     ) -> None:
         if not 0 <= layer_start <= layer_end < manifest.layers:
             raise ValueError(f"invalid layer range [{layer_start}, {layer_end}]")
@@ -741,10 +818,16 @@ class StageModel:
         )
         self.cfg = cfg
         self.device = device
-        dtype_label = manifest.dtype or "fp32"
-        dtype = torch.float16 if dtype_label == "fp16" else torch.float32
+        self.backend = backend or select_backend(manifest)
+        quant = getattr(manifest, "quantization", None)
+        dtype_label = (
+            quant.activation_dtype
+            if self.backend.is_quantized and quant is not None
+            else (manifest.dtype or "fp32")
+        )
+        dtype = _activation_dtype(dtype_label)
         self.dtype = dtype
-        self.dtype_label = "fp16" if dtype is torch.float16 else "fp32"
+        self.dtype_label = dtype_label
 
         self.layers: list[LlamaDecoderLayer] = []
         for global_idx in range(layer_start, layer_end + 1):
@@ -752,12 +835,26 @@ class StageModel:
             local_idx = global_idx - layer_start
             layer.self_attn.layer_idx = local_idx
             prefix = f"model.layers.{global_idx}."
-            for name, param in layer.named_parameters():
-                key = prefix + name
-                if key not in state:
-                    raise KeyError(f"shard missing weight {key}")
-                with torch.no_grad():
-                    param.copy_(state[key].to(dtype))
+            with torch.no_grad():
+                if self.backend.is_quantized:
+                    # Quantized projections arrive as AffineQuantizedTensor
+                    # parameters: assign them in place (copy_ cannot handle the
+                    # packed subclass). Norm weights stay fp16/bf16 and copy.
+                    subset = {
+                        name: state[prefix + name]
+                        for name, _param in layer.named_parameters()
+                        if prefix + name in state
+                    }
+                    missing = [n for n, _ in layer.named_parameters() if prefix + n not in state]
+                    if missing:
+                        raise KeyError(f"shard missing weights {missing!r}")
+                    layer.load_state_dict(subset, strict=False, assign=True)
+                else:
+                    for name, param in layer.named_parameters():
+                        key = prefix + name
+                        if key not in state:
+                            raise KeyError(f"shard missing weight {key}")
+                        param.copy_(state[key].to(dtype))
             layer.eval()
             self.layers.append(layer)
         self.rotary = LlamaRotaryEmbedding(config=cfg, device=device)
@@ -767,7 +864,12 @@ class StageModel:
                 device=device, dtype=dtype
             )
             with torch.no_grad():
-                self.embed.weight.copy_(state["model.embed_tokens.weight"].to(dtype))
+                if self.backend.is_quantized:
+                    self.embed.weight = torch.nn.Parameter(
+                        state["model.embed_tokens.weight"].to(device), requires_grad=False
+                    )
+                else:
+                    self.embed.weight.copy_(state["model.embed_tokens.weight"].to(dtype))
         self.norm = None
         self.lm_head = None
         if self.last:
@@ -778,8 +880,16 @@ class StageModel:
                 device=device, dtype=dtype
             )
             with torch.no_grad():
-                self.norm.weight.copy_(state["model.norm.weight"].to(dtype))
-                self.lm_head.weight.copy_(state["lm_head.weight"].to(dtype))
+                if self.backend.is_quantized:
+                    self.norm.weight = torch.nn.Parameter(
+                        state["model.norm.weight"].to(device), requires_grad=False
+                    )
+                    self.lm_head.weight = torch.nn.Parameter(
+                        state["lm_head.weight"].to(device), requires_grad=False
+                    )
+                else:
+                    self.norm.weight.copy_(state["model.norm.weight"].to(dtype))
+                    self.lm_head.weight.copy_(state["lm_head.weight"].to(dtype))
         self.cache: DynamicCache | None = None
         if tokenizer_path is not None:
             self.tokenizer = HFTokenizer(tokenizer_path)
@@ -871,43 +981,45 @@ async def fetch_stage(
     layer_end: int,
 ) -> tuple[StageModel, dict[str, str]]:
     """Download the shards covering [layer_start, layer_end] and build the stage."""
-    needed: list[tuple[str, str]] = []
+    backend = select_backend(manifest)
+    needed: list[tuple[str, str, str | None]] = []
     for shard in manifest.shards:
         if shard.layer_start is None or shard.layer_end is None:
             continue
         if shard.layer_start <= layer_end and shard.layer_end >= layer_start:
-            needed.append((shard.shard_id, shard.content_hash))
+            needed.append((shard.shard_id, shard.content_hash, shard.format))
     log.info(
-        "fetch_stage model=%s layers=[%d,%d] needed_shards=%s",
+        "fetch_stage model=%s layers=[%d,%d] backend=%s needed_shards=%s",
         manifest.model_id,
         layer_start,
         layer_end,
-        ",".join(shard_id for shard_id, _ in needed),
+        backend.name,
+        ",".join(shard_id for shard_id, _, _ in needed),
     )
     if _sequential_shards() and len(needed) > 1:
         # Constrained links (a laptop hotspot): concurrent full-shard download
         # streams contend and trip read timeouts. Fetch one at a time instead.
         log.info("fetch_stage sequential model=%s shards=%d", manifest.model_id, len(needed))
         paths = []
-        for shard_id, content_hash in needed:
-            paths.append(await store.ensure_shard(manifest.model_id, shard_id, content_hash))
+        for shard_id, content_hash, fmt in needed:
+            paths.append(await store.ensure_shard(manifest.model_id, shard_id, content_hash, fmt))
     else:
         # Parallel downloads: each stage pulls several ~0.5–1 GB shards over LAN,
         # so serializing them would lock the stage behind ~N× the link time.
         paths = (
             await asyncio.gather(
                 *(
-                    store.ensure_shard(manifest.model_id, shard_id, content_hash)
-                    for shard_id, content_hash in needed
+                    store.ensure_shard(manifest.model_id, shard_id, content_hash, fmt)
+                    for shard_id, content_hash, fmt in needed
                 )
             )
             if needed
             else []
         )
-    shard_paths = dict(zip((shard_id for shard_id, _ in needed), paths, strict=True))
+    shard_paths = dict(zip((shard_id for shard_id, _, _ in needed), paths, strict=True))
     state: dict[str, torch.Tensor] = {}
     for path in paths:
-        state.update(load_file(path))
+        state.update(backend.deserialize_shard(path))
     tokenizer_path: str | None = None
     if manifest.tokenizer_file is not None and manifest.tokenizer_hash is not None:
         tokenizer_path = await store.ensure_tokenizer(
@@ -915,7 +1027,13 @@ async def fetch_stage(
         )
     loop = asyncio.get_running_loop()
     build = functools.partial(
-        StageModel, manifest, layer_start, layer_end, state, tokenizer_path=tokenizer_path
+        StageModel,
+        manifest,
+        layer_start,
+        layer_end,
+        state,
+        tokenizer_path=tokenizer_path,
+        backend=backend,
     )
     stage = await loop.run_in_executor(None, build)
     return stage, shard_paths

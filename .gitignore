@@ -22,6 +22,8 @@ shard_cache*/
 *.sqlite
 # Auto-generated on first `python -m dain_coordinator`; machine-specific.
 Coordinator/config.json
+# Model-export staging output (DAIN_EXPORT_WORK_DIR).
+export_work/
 
 # Binaries
 Deploy/caddy.exe

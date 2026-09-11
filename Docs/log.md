@@ -1216,3 +1216,67 @@ Common ruff clean; **Coordinator 104 passed** (9 new), **Node 53 passed**
 Common: pytest OK, ruff clean. Coordinator: pytest OK, ruff clean.
 Node: pytest OK, ruff clean. Sim: pytest OK (incl. 4-agent pipeline parity +
 2-agent HF e2e), ruff clean. Client `npm run build` OK (tsc + vite).
+
+## 2026-09-11 - S21: Model export pipeline (INT4/TorchAO) (commit pending)
+
+Goal (see `Docs/plan-model-export-pipeline.md`): let users turn local HuggingFace
+Llama checkpoints into TorchAO INT4 DAIN shards that the scheduler will only
+place on nodes whose software supports that packing layout. Legacy fp16/fp32
+paths are untouched; the Coordinator never imports torch/torchao (control plane
+shells out via `uv run --project Node python -m dain_node.model_export`).
+
+- Common `schemas.py`: `QuantizationSpec` (backend/scheme/bits/group_size/
+  packing_layout); `SoftwareInfo` gains `supported_packing_layouts` +
+  `supported_activation_dtypes`; `ModelManifest` gains `format`, `quantization`,
+  `base_model_id`, `legal_basis`, `adapter_id`, `artifact_version`,
+  `source_config_hash`; `ShardRef.format` normalized via `SHARD_FORMATS`.
+- Node exporter (`dain_node/model_export.py`, new): `validate_source` /
+  `detect_model` (config.json + safetensors), Llama adapter, config-hash
+  guard, `_check_tokenizer_vocab` (raises if tokenizer vocab exceeds model
+  vocab_size - silent embed index-out-of-range otherwise), `export_shards`
+  (quantizes the 7 per-layer Linears to `Int4WeightOnly` AQT, int4_cpu layout;
+  skips in_features not divisible by group_size), weights+tokenizer copied,
+  `manifest.json` written into the store model dir, `.model-exports.json`
+  marker, JSON progress lines for the coordinator subprocess runner, CLI with
+  `--dry-run`/`--force`/`--json-progress`. Skipped-safe dims run in torch 2.14
+  CPU (torchao 0.10, non-Triton backend). Full-smoke R1-R5 passes on a tiny
+  8-layer Llama (56 AQTs, forward finite, argmax in vocab).
+- Node runtime backend abstraction (`llm.py`): `InferenceBackend` /
+  `TorchFp16Backend` (safetensors) / `TorchAOInt4Backend` (`.pt` via
+  `torch.load(weights_only=False)`; AQT packing metadata survives only
+  safetensors-free `.pt`, so quantized shards are `ShardRef.format="torch_pt"`).
+  `StageModel` assigns AQT params (`load_state_dict(assign=True)`) - never
+  `.copy_()`/`.to()` on `AffineQuantizedTensor`; embed/norm/lm_head built from
+  `torch.nn.Parameter`. bf16 activation dtype supported. `peer_server`
+  serves `.pt` fallback after `.safetensors`; `jobs.py` `_ACTIVATION_DTYPES`
+  includes bf16.
+- Node capabilities (`capabilities.py`): `_software_info()` probes torch /
+  torchao, reports backends=('fp16','fp32','torchao'), layouts (`int4_cpu`
+  always; `tensor_core_tiled` on CUDA sm80+), quantization ('int4_weight_only'),
+  activation dtypes; `TUPLE_FP` constant; settings gains `export_work_dir`.
+- Coordinator settings: `export_work_dir`, `export_roots` (tuple,
+  `DAIN_EXPORT_ROOTS` semicolon-separated), `max_export_size_gb`,
+  `export_timeout_s`. API (`api.py`): `POST /admin/models/export` (subprocess,
+  single active job, 409 when busy, `recompute_pool("model_export")` on
+  success), `POST /admin/models/export/validate` (light local check - cannot
+  import dain_node across venvs), `GET /admin/models/export/roots` /
+  `/admin/models/export/exports`; `/v1/models` now returns `format`,
+  `architecture`, `quantization`. Partition (`partition.py`): `_is_backend_feasible`
+  filters placement - INT4 models only go to nodes advertising torchao +
+  the manifest's `packing_layout`; legacy models place anywhere.
+- Web UI (`admin_ui.html`): Model Export card (source dir + Detect, model id,
+  quant/group/activation/shard options, approved-roots readout, running state,
+  exported-model list); model list shows `INT4·<layout>` tag.
+- `Scripts/export-model.ps1` mirrors `import-gguf.ps1` (uv subprocess wrapper).
+  `.gitignore` covers `export_work/`.
+- Pins: torchao `>=0.10,<0.11` in `Node/pyproject.toml` (uv.lock resynced).
+  Decisions: packing data needs `.pt`, so output shards are torch-format;
+  export validation is deliberately light (coarse checks only) - the HF vocab
+  guard lives in the Node exporter where the tokenizer is actually loaded;
+  no cancel endpoint yet (single in-flight export, Logs page shows progress).
+
+#### Gates
+Common: pytest OK, ruff clean. Coordinator: pytest OK (128 - incl
+test_admin_model_export.py 7 + backend-aware scheduler tests 4), ruff clean.
+Node: pytest OK (74 - incl test_model_export.py 12 + test_quantized_stage.py 6
++ test_capabilities.py 4), ruff clean. Sim: unchanged this session.

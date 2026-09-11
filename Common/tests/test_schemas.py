@@ -20,7 +20,9 @@ from dain_common import (
     ModelManifest,
     NetInfo,
     NodeState,
+    QuantizationSpec,
     Register,
+    ShardRef,
     StageAssignment,
     TaskOutcome,
     parse_payload,
@@ -303,3 +305,102 @@ def test_metrics_report_accepts_ram_free_gb() -> None:
 def test_metrics_report_rejects_negative_ram() -> None:
     with pytest.raises(ValidationError):
         MetricsReport(ram_free_gb=-1.0)
+
+
+# -- export pipeline: quantization metadata (session N) ----------------------
+
+
+def test_quantization_spec_defaults_to_unquantized() -> None:
+    q = QuantizationSpec()
+    assert q.backend == "none"
+    assert q.scheme == "none"
+    assert q.bits == 32
+    assert q.is_quantized is False
+
+
+def test_quantization_spec_int4() -> None:
+    q = QuantizationSpec(
+        backend="torchao",
+        scheme="int4_weight_only",
+        bits=4,
+        group_size=128,
+        activation_dtype="bf16",
+        coverage="all_linear",
+    )
+    assert q.is_quantized is True
+    assert q.activation_dtype == "bf16"
+
+
+def test_quantization_spec_rejects_bad_bits() -> None:
+    with pytest.raises(ValidationError):
+        QuantizationSpec(bits=3, group_size=128)
+
+
+# -- legacy manifest backward compatibility (session N) ----------------------
+
+
+def test_legacy_manifest_parses_without_export_fields() -> None:
+    m = model_manifest()
+    assert m.format is None
+    assert m.quantization is None
+    assert m.architecture is None
+    assert m.artifact_version == 1
+
+
+def test_quantized_manifest_round_trip() -> None:
+    q = QuantizationSpec(
+        backend="torchao",
+        scheme="int4_weight_only",
+        bits=4,
+        group_size=128,
+        activation_dtype="bf16",
+        coverage="all_linear",
+    )
+    m = model_manifest(
+        format="torch_pt",
+        quantization=q,
+        base_model_id="unsloth/llama-3.2-3b",
+        architecture="llama",
+        adapter_id="llama",
+        artifact_version=1,
+        dtype="bf16",
+    )
+    dumped = m.model_dump()
+    restored = ModelManifest.model_validate(dumped)
+    assert restored.quantization is not None
+    assert restored.quantization.is_quantized is True
+    assert restored.format == "torch_pt"
+    assert restored.architecture == "llama"
+
+
+def test_manifest_rejects_quantization_without_format() -> None:
+    q = QuantizationSpec(backend="torchao", scheme="int4_weight_only", bits=4)
+    with pytest.raises(ValidationError, match="explicit shard format"):
+        model_manifest(quantization=q)
+
+
+def test_manifest_rejects_invalid_format() -> None:
+    with pytest.raises(ValidationError):
+        model_manifest(format="gguf")
+
+
+# -- capability manifest software report (session N) -------------------------
+
+
+def test_software_info_reports_backends() -> None:
+    sw = {
+        "torch_version": "2.5.1",
+        "supported_backends": ("torchao",),
+        "supported_quantization": ("int4_weight_only",),
+        "supported_activation_dtypes": ("fp16", "bf16"),
+        "supported_adapters": ("llama",),
+        "torchao_version": "0.7",
+    }
+    m = manifest(software=sw)
+    assert m.software.supported_backends == ("torchao",)
+    assert "bf16" in m.software.supported_activation_dtypes
+
+
+def test_shard_ref_format_defaults_to_safetensors() -> None:
+    r = ShardRef(model_id="m", shard_id="s0", content_hash="a" * 16, size_bytes=1)
+    assert r.format is None or r.format == "safetensors"

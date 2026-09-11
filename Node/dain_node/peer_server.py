@@ -1,16 +1,16 @@
-"""Node-side shard server for peer-to-peer distribution.
+﻿"""Node-side shard server for peer-to-peer distribution.
 
 Every node that has shards cached can serve them to sibling nodes over the LAN
 with byte-range (`Range`) support, so a downloading node can:
 - resume an interrupted transfer mid-file (Phase 1 reliability), and
 - pull different byte ranges of one shard from several peers in parallel
-  (multi-source, effectively the LAN bandwidth × peers rather than one stream).
+  (multi-source, effectively the LAN bandwidth ├ù peers rather than one stream).
 
 Security model: the coordinator is the source of truth for *who* is allowed to
 join and for *which* shards each node holds. Peer requests are authenticated
 with the cluster's shared `join_token` (every node already holds it in its own
 config, so it is the natural LAN trust boundary). The server only serves shard
-files already verified into `cache_dir` — path traversal is blocked by the same
+files already verified into `cache_dir` ΓÇö path traversal is blocked by the same
 safe-component rule the rest of the system uses.
 
 Implementation: a tight asyncio HTTP/1.1 server (GET/HEAD only). It runs inside
@@ -45,7 +45,7 @@ def resolve_lan_ip(coord_host: str | None = None) -> str:
     """The LAN-facing IP this node should advertise as a peer.
 
     Opens a UDP socket toward the coordinator's host (no packets are sent) and
-    reads back the local interface the kernel would use — the address a sibling
+    reads back the local interface the kernel would use ΓÇö the address a sibling
     on the same network can actually reach. Falls back to the primary hostname
     resolution when the coordinator host has no route (e.g. tests).
     """
@@ -99,7 +99,7 @@ class PeerShardServer:
         self._server: asyncio.AbstractServer | None = None
 
     async def start(self) -> PeerShardServer:
-        """Bind the socket (port 0 → OS-assigned) and start accepting."""
+        """Bind the socket (port 0 ΓåÆ OS-assigned) and start accepting."""
         self._server = await asyncio.start_server(
             self._client, self._bind_host, self.port, limit=_HEADER_MAX
         )
@@ -132,7 +132,7 @@ class PeerShardServer:
             await asyncio.wait_for(self._serve(reader, writer), timeout=30.0)
         except (TimeoutError, ConnectionError, OSError):
             pass
-        except Exception:  # noqa: BLE001 — a broken client must not kill the server
+        except Exception:  # noqa: BLE001 ΓÇö a broken client must not kill the server
             log.exception("peer_request_failed")
         finally:
             with contextlib.suppress(Exception):
@@ -180,6 +180,9 @@ class PeerShardServer:
             return
 
         path = os.path.join(self.cache_dir, model_id, f"{shard_id}.safetensors")
+        if not os.path.isfile(path):
+            # Quantized shards ship as .pt files (TorchAO tensor subclasses).
+            path = os.path.join(self.cache_dir, model_id, f"{shard_id}.pt")
         if not os.path.isfile(path):
             log.info("peer_miss model=%s shard=%s", model_id, shard_id)
             await self._respond(writer, b"404 Not Found", "text/plain", b"")

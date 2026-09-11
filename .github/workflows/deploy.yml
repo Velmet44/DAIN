@@ -25,14 +25,14 @@ jobs:
         working-directory: Client
     env:
       # Baked into the static bundle so the site opens pre-configured.
-      # Set these in repo Settings → Secrets and variables → Actions → Variables
-      # (or in a fork's secrets) before going live:
+      # REQUIRED before this workflow will deploy (see the guard step below).
       #   vars.DAIN_API_URL   — public coordinator origin, must be https:// for Pages
       #   secrets.DAIN_API_KEY — DAIN_API_KEY the coordinator runs with
       #                         (remember: a static site exposes it; prototype posture)
+      # Optional:
       #   vars.DAIN_MODEL_ID  — model id served by the coordinator store
-      VITE_API_URL: ${{ vars.DAIN_API_URL || 'http://127.0.0.1:8000' }}
-      VITE_API_KEY: ${{ secrets.DAIN_API_KEY || '' }}
+      VITE_API_URL: ${{ vars.DAIN_API_URL }}
+      VITE_API_KEY: ${{ secrets.DAIN_API_KEY }}
       VITE_MODEL_ID: ${{ vars.DAIN_MODEL_ID || 'dain-tiny-16L' }}
       VITE_DEFAULT_MAX_TOKENS: ${{ vars.DAIN_DEFAULT_MAX_TOKENS || '64' }}
     steps:
@@ -42,6 +42,20 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: Client/package-lock.json
+      - name: Guard missing deployment variables
+        # Fail before the build instead of baking a localhost URL + empty key
+        # into the Pages bundle (Client/src/api.ts would silently fall back to
+        # http://127.0.0.1:8000). Secrets are referenced via the `if` expression
+        # only, never interpolated into a shell line.
+        if: ${{ ! vars.DAIN_API_URL || ! secrets.DAIN_API_KEY }}
+        run: |
+          echo "::error::DAIN_API_URL and DAIN_API_KEY must be configured before deploying to GitHub Pages."
+          echo "  Settings -> Secrets and variables -> Actions -> Variables:"
+          echo "    DAIN_API_URL  public coordinator origin, e.g. https://coord.example.com (must be https://)"
+          echo "    DAIN_MODEL_ID (optional) model id the coordinator store serves"
+          echo "  Settings -> Secrets and variables -> Actions -> Secrets:"
+          echo "    DAIN_API_KEY  the DAIN_API_KEY the coordinator is running with"
+          exit 1
       - run: npm ci
       - run: npm run build
       - uses: actions/configure-pages@v5

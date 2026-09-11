@@ -56,6 +56,15 @@ Open **http://localhost:5173/DAIN/** — type a message in the Chat tab.
 coordinator URL in the Chat tab to connect (default `http://127.0.0.1:8000`; with no
 public coordinator, point it at a reachable home/VPS coordinator).
 
+The `deploy` workflow bakes the coordinator origin into the bundle and **fails
+the build** when it isn't configured — it never deploys a site pointing at
+`127.0.0.1`. Before delivery, set (repo Settings → Secrets and variables → Actions):
+
+- **Variable `DAIN_API_URL`** — public coordinator origin, must be `https://` for Pages;
+- **Secret `DAIN_API_KEY`** — the `DAIN_API_KEY` that coordinator runs with
+  (a static site exposes it; prototype posture);
+- optionally **`DAIN_MODEL_ID`** (default `dain-tiny-16L`) and **`DAIN_DEFAULT_MAX_TOKENS`**.
+
 Or for a one-command cluster (no browser, chat REPL):
 
 ```bash
@@ -78,6 +87,25 @@ converter is available from the coordinator's admin page (**Models → GGUF file
 which shells out to the Node converter without pulling torch into the
 coordinator. Note that DAIN executes fp16/fp32, not GGUF quants: a Q4 7B
 (~4 GB) becomes ~14 GB of fp16 shards.
+
+### Exporting INT4 models (TorchAO)
+
+Point DAIN at a **local HuggingFace Llama checkpoint** to export TorchAO INT4 shards.
+Quantized shards are `.pt` files with an `int4_cpu` packing layout; the scheduler
+only places them on nodes whose software advertises torchao + that layout, so a
+node without torchao never reaches a packed model's shards:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Scripts\export-model.ps1 `
+  -SourceDir C:\models\Llama-3.1-8B -ModelId llama-3.1-8b-int4
+```
+
+Pass `-ActivationDtype bf16`, `-GroupSize`, `-LayersPerShard` to customize
+(`-DryRun` validates without writing). The same exporter is available from the
+admin page (**Model Export** card) — `source_dir` must resolve under an
+approved `export_roots` (or `DAIN_EXPORT_ROOTS`, semicolon-separated). The
+exporter writes `manifest.json` + `tokenizer.json` into the store model dir and
+runs as a subprocess so the coordinator never imports torch/torchao.
 
 ## Repository layout
 

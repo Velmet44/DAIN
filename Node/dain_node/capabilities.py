@@ -9,13 +9,23 @@ unverified, spec §7/§11) until the S10 benchmark work replaces them.
 from __future__ import annotations
 
 import logging
+import sys
 
 import psutil
-from dain_common.schemas import CapabilityManifest, CPUInfo, GPUInfo, NetInfo
+from dain_common.schemas import (
+    CapabilityManifest,
+    CPUInfo,
+    GPUInfo,
+    NetInfo,
+    SoftwareInfo,
+)
 
 from dain_node.settings import NodeSettings
 
 log = logging.getLogger("dain.node.capabilities")
+
+#: Binary execution backends that every torch-capable node can run.
+TUPLE_FP = ("fp16", "fp32")
 
 # Rough fp16 tensor-throughput classes by GPU name fragment. Claims only —
 # the S10 pilot measures the real numbers.
@@ -35,6 +45,79 @@ _TFLOPS_TABLE: list[tuple[str, float]] = [
 ]
 
 
+def _software_info() -> SoftwareInfo:
+    """Detect torch/torchao versions and packing-layout execution capability.
+
+    On nodes that *cannot* import torchao, the software report simply lists no
+    quantization backends — the scheduler routes quantized shards away from them.
+    All detection is try/except: failure to import never crashes the probe.
+    """
+    torch_version: str | None = None
+    torchao_version: str | None = None
+    packing_layouts: tuple[str, ...] = ()
+    quant_schemes: tuple[str, ...] = ()
+    adapters: tuple[str, ...] = ()
+    activation_dtypes: tuple[str, ...] = ("fp16",)
+
+    # torch presence
+    try:
+        import torch
+
+        torch_version = torch.__version__
+        activation_dtypes = ("fp16", "bf16")
+    except ImportError:
+        return SoftwareInfo(
+            os_name=sys.platform,
+            supported_activation_dtypes=("fp16",),
+        )
+
+    # torchao presence + layout detection
+    try:
+        import torchao
+
+        torchao_version = getattr(torchao, "__version__", "unknown")
+        quant_schemes = ("int4_weight_only",)
+        adapters = ("llama",)
+
+        # CPU INT4 layout — always available when torchao can be imported.
+        try:
+            from torchao.dtypes import Int4CPULayout  # noqa: F401
+
+            packing_layouts = (*packing_layouts, "int4_cpu")
+        except ImportError:
+            pass
+
+        # Tensor-Core Tiled layout — needs CUDA + tinygemm (sm80+).
+        try:
+            from torchao.dtypes import TensorCoreTiledLayout  # noqa: F401
+
+            if torch.cuda.is_available():
+                cap = torch.cuda.get_device_capability(0)
+                if cap >= (8, 0):
+                    packing_layouts = (*packing_layouts, "tensor_core_tiled")
+        except ImportError:
+            pass
+
+        log.info(
+            "torchao_detected version=%s layouts=%s",
+            torchao_version,
+            ",".join(packing_layouts) or "none",
+        )
+    except ImportError:
+        pass
+
+    return SoftwareInfo(
+        os_name=sys.platform,
+        torch_version=torch_version,
+        torchao_version=torchao_version,
+        supported_backends=TUPLE_FP + ("torchao",) if torchao_version else TUPLE_FP,
+        supported_quantization=quant_schemes,
+        supported_activation_dtypes=activation_dtypes,
+        supported_adapters=adapters,
+        supported_packing_layouts=packing_layouts,
+    )
+
+
 def _gpu_info() -> GPUInfo | None:
     try:
         import torch  # optional dependency — CPU-only nodes have no torch/CUDA
@@ -51,7 +134,10 @@ def _gpu_info() -> GPUInfo | None:
         if fragment in lowered:
             tflops = value
             break
-    log.info("gpu_detected name=%s vram=%.1fGB claimed_tflops=%.1f", name, total_b / 1e9, tflops)
+    log.info(
+        "gpu_detected name=%s vram=%.1fGB claimed_tflops=%.1f",
+        name, total_b / 1e9, tflops,
+    )
     return GPUInfo(
         name=name,
         count=torch.cuda.device_count(),
@@ -72,11 +158,13 @@ def probe(settings: NodeSettings) -> CapabilityManifest:
             ram_free_gb=virtual.available / 1e9,
         ),
         net=NetInfo(bw_mbps=settings.net_bw_mbps, lat_ms_p95=settings.net_lat_ms_p95),
+        software=_software_info(),
     )
     log.info(
-        "capabilities_probed gpu=%s cores=%d ram=%.1fGB",
+        "capabilities_probed gpu=%s cores=%d ram=%.1fGB layouts=%s",
         manifest.gpu.name if manifest.gpu else "none",
         manifest.cpu.cores,
         manifest.cpu.ram_total_gb,
+        ",".join(manifest.software.supported_packing_layouts) or "none",
     )
     return manifest

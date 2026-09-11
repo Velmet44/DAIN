@@ -21,6 +21,27 @@ from dain_coordinator.store import NodeRow
 log = logging.getLogger("dain.coordinator.partition")
 
 
+def _is_backend_feasible(manifest: ModelManifest, row: NodeRow) -> bool:
+    """Check whether *row* can host a stage for *manifest*.
+
+    Legacy fp16/fp32 models run anywhere.  INT4-quantized models require the
+    node to support the torchao backend, the matching quantization scheme, and
+    — critically — the packing layout the model was exported for.
+    """
+    quant = getattr(manifest, "quantization", None)
+    if quant is None or getattr(quant, "backend", "none") == "none":
+        return True  # unquantized model — any torch node works
+    sw = row.manifest.software
+    if "torchao" not in sw.supported_backends:
+        return False
+    if quant.scheme not in sw.supported_quantization:
+        return False
+    layout = getattr(quant, "packing_layout", None)
+    if layout and layout not in sw.supported_packing_layouts:
+        return False
+    return True
+
+
 def throughput_proxy(row: NodeRow) -> float:
     if row.manifest.gpu is not None:
         return max(row.manifest.gpu.tflops_claimed, 0.001)
@@ -166,7 +187,10 @@ def plan_placement(
         return None
     model_gb = sum(s.size_bytes for s in manifest.shards) / 1e9
 
-    feasible = [n for n in nodes if n.state == NodeState.ONLINE]
+    feasible = [
+        n for n in nodes
+        if n.state == NodeState.ONLINE and _is_backend_feasible(manifest, n)
+    ]
     # Spec §12: ranked = sort_by_score_desc(feasible); deterministic tie-breaks.
     ranked = sorted(
         feasible,

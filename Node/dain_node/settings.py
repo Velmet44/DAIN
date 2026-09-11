@@ -39,6 +39,9 @@ class NodeSettings:
     reconnect_min_s: float = 0.5
     reconnect_max_s: float = 8.0
     log_json: bool = False
+    # Staging dir for model exports (plan §3). Used only by the exporter
+    # subprocess, not the agent runtime; must stay under the node's writable area.
+    export_work_dir: str = "export_work"
 
     @property
     def http_base_url(self) -> str:
@@ -66,6 +69,7 @@ class NodeSettings:
             net_bw_mbps=float(env.get("DAIN_NET_BW_MBPS", "100")),
             net_lat_ms_p95=float(env.get("DAIN_NET_LAT_MS", "50")),
             log_json=env.get("DAIN_LOG_JSON", "").lower() in ("1", "true", "yes"),
+            export_work_dir=env.get("DAIN_EXPORT_WORK_DIR", "export_work"),
         )
 
     @classmethod
@@ -99,4 +103,5 @@ class NodeSettings:
             reconnect_min_s=float(config.get("reconnect_min_s", 0.5)),
             reconnect_max_s=float(config.get("reconnect_max_s", 8.0)),
             log_json=bool(config.get("log_json", False)),
+            export_work_dir=config.get("export_work_dir") or "export_work",
         )

@@ -14,6 +14,12 @@ dependencies = [
     "transformers==4.46.3",
     "safetensors>=0.4",
     "gguf>=0.6",
+    # TorchAO INT4 quantization (export pipeline, S22). Pinned to 0.10.x:
+    # 0.10 supports Int4CPULayout (CPU dev/testing) and TensorCoreTiledLayout
+    # (GPU inference). torchao >=0.18 v2 requires the mslk kernel shim for CPU
+    # quantization, which is not yet widely available; re-evaluate when mslk
+    # ships broadly or GPU-only export is acceptable for dev tests.
+    "torchao>=0.10,<0.11",
 ]
 
 [tool.uv.sources]

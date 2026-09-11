@@ -11,7 +11,9 @@ from dain_common.schemas import (
     ModelManifest,
     NetInfo,
     NodeState,
+    QuantizationSpec,
     ShardRef,
+    SoftwareInfo,
 )
 
 from dain_coordinator.partition import plan_placement
@@ -169,3 +171,81 @@ def test_small_model_spreads_with_fine_target() -> None:
     plan = plan_placement(small, pool, layers_per_node_target=1, max_k=16)
     assert plan is not None and len(plan.stages) == 3
     assert all(s.layer_end - s.layer_start + 1 == 1 for s in plan.stages)
+
+
+# -- backend-aware placement (session N) --------------------------------------
+
+QUANT_MANIFEST = MANIFEST.model_copy(update={
+    "format": "torch_pt",
+    "quantization": QuantizationSpec(
+        backend="torchao",
+        scheme="int4_weight_only",
+        bits=4,
+        group_size=128,
+        packing_layout="int4_cpu",
+    ),
+})
+
+
+def _quant_node(
+    node_id: str,
+    *,
+    score: float = 0.5,
+    backends: tuple[str, ...] = ("fp16", "fp32", "torchao"),
+    quant: tuple[str, ...] = ("int4_weight_only",),
+    layouts: tuple[str, ...] = ("int4_cpu",),
+) -> NodeRow:
+    sw = SoftwareInfo(
+        supported_backends=backends,
+        supported_quantization=quant,
+        supported_packing_layouts=layouts,
+        supported_activation_dtypes=("fp16", "bf16"),
+    )
+    return NodeRow(
+        node_id=node_id,
+        node_token="tok",
+        agent_version="0.1.0",
+        state=NodeState.ONLINE,
+        manifest=CapabilityManifest(
+            gpu=GPUInfo(
+                name="RTX-test", vram_total_gb=12.0,
+                vram_free_gb=11.0, tflops_claimed=50.0,
+            ),
+            cpu=CPUInfo(cores=8, ram_total_gb=32.0, ram_free_gb=16.0),
+            net=NetInfo(bw_mbps=300.0, lat_ms_p95=25.0),
+            software=sw,
+        ),
+        metrics=None,
+        score=score,
+        score_components={},
+        overload_strikes=0,
+        uptime_ratio=1.0,
+        failure_rate=0.0,
+        last_seq=None,
+        last_heartbeat=None,
+        registered_at=0.0,
+    )
+
+
+def test_quantized_model_rejects_no_torchao_nodes() -> None:
+    pool = [_quant_node(f"n{i:02d}", backends=("fp16", "fp32")) for i in range(6)]
+    plan = plan_placement(QUANT_MANIFEST, pool, layers_per_node_target=4, max_k=4)
+    assert plan is None
+
+
+def test_quantized_model_rejects_wrong_layout() -> None:
+    pool = [_quant_node(f"n{i:02d}", layouts=("tensor_core_tiled",)) for i in range(6)]
+    plan = plan_placement(QUANT_MANIFEST, pool, layers_per_node_target=4, max_k=4)
+    assert plan is None
+
+
+def test_quantized_model_selects_capable_nodes() -> None:
+    capable = [_quant_node(f"cap{i}", score=0.8 - i * 0.01) for i in range(6)]
+    plan = plan_placement(QUANT_MANIFEST, capable, layers_per_node_target=4, max_k=4)
+    assert plan is not None and len(plan.stages) == 4
+
+
+def test_legacy_model_still_places_on_any_node() -> None:
+    pool = [node(f"n{i:02d}", score=0.5 - i * 0.01) for i in range(6)]
+    plan = plan_placement(MANIFEST, pool, layers_per_node_target=4, max_k=4)
+    assert plan is not None and len(plan.stages) == 4

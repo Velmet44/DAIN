@@ -855,6 +855,227 @@ async def _subprocess_import(argv: list[str]) -> int:
     return await proc.wait()
 
 
+# -- admin: model export (session N) ---------------------------------------------------------------
+
+
+class ExportModelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_dir: str
+    model_id: str
+    quantization: Literal["int4"] = "int4"
+    group_size: int = Field(default=128, ge=1)
+    activation_dtype: Literal["fp16", "bf16"] = "fp16"
+    layers_per_shard: int = Field(default=4, ge=1, le=64)
+    force: bool = False
+    trust_remote_code: bool = False
+
+
+class ExportJobStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    state: Literal["queued", "running", "completed", "failed"]
+    source_dir: str
+    model_id: str
+    started_at: float | None = None
+    completed_at: float | None = None
+    progress: float | None = None
+    output_model_id: str | None = None
+    error: str | None = None
+    logs: list[str] = []
+
+
+def _export_marker(store: pathlib.Path) -> dict[str, dict]:
+    """The exporter's .model-exports.json marker (model_id -> metadata), if present."""
+    try:
+        with open(store / ".model-exports.json", encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _validate_export_source(source_dir: str, export_roots: tuple[str, ...]) -> pathlib.Path:
+    """Resolve and path-check source_dir against approved export_roots."""
+    src = pathlib.Path(source_dir).resolve()
+    if not export_roots:
+        raise HTTPException(
+            status_code=400, detail="no export_roots configured; set DAIN_EXPORT_ROOTS"
+        )
+    allowed = False
+    for root in export_roots:
+        try:
+            src.relative_to(pathlib.Path(root).resolve())
+            allowed = True
+            break
+        except ValueError:
+            continue
+    if not allowed:
+        raise HTTPException(
+            status_code=403,
+            detail=f"source_dir {src} is not under any configured export_root",
+        )
+    return src
+
+
+def _active_export(request: Request) -> dict | None:
+    return getattr(request.app.state, "model_export", None)
+
+
+@admin_router.get("/models/export/roots")
+def admin_export_roots(request: Request) -> dict:
+    settings = request.app.state.settings
+    roots = []
+    for r in settings.export_roots:
+        p = pathlib.Path(r)
+        roots.append({
+            "path": str(p),
+            "exists": p.is_dir(),
+        })
+    return {"roots": roots, "busy": _active_export(request) is not None}
+
+
+@admin_router.post("/models/export/validate")
+def admin_export_validate(payload: ExportModelRequest, request: Request) -> dict:
+    settings = request.app.state.settings
+    src = _validate_export_source(payload.source_dir, settings.export_roots)
+    info: dict = {"source_dir": str(src), "model_id": payload.model_id}
+    if not src.is_dir():
+        info["valid"] = False
+        info["error"] = f"source directory {src} not found"
+        return info
+    config_file = src / "config.json"
+    weights = sorted(src.glob("*.safetensors")) or sorted(src.glob("*.bin"))
+    if not config_file.is_file() or not weights:
+        info["valid"] = False
+        info["error"] = "missing config.json and/or model weights"
+        return info
+    info.update({
+        "valid": True,
+        "weight_count": len(weights),
+        "size_bytes": sum(p.stat().st_size for p in weights),
+        "has_fast_tokenizer": (src / "tokenizer.json").is_file(),
+    })
+    return info
+
+
+@admin_router.get("/models/export/exports")
+def admin_model_exports(request: Request) -> dict:
+    settings = request.app.state.settings
+    store = pathlib.Path(settings.model_store_dir)
+    marker = _export_marker(store)
+    active = _active_export(request)
+    files: list[dict] = []
+    for model_dir in sorted(store.iterdir()) if store.is_dir() else []:
+        if not model_dir.is_dir():
+            continue
+        manifest_path = model_dir / "manifest.json"
+        if not manifest_path.is_file():
+            continue
+        meta = marker.get(model_dir.name)
+        files.append({
+            "model_id": model_dir.name,
+            "has_manifest": True,
+            "exported": bool(meta),
+            "active": active is not None and active.get("model_id") == model_dir.name,
+        })
+    return {
+        "exports": files,
+        "busy": active is not None,
+        "error": getattr(request.app.state, "model_export_error", None),
+        "node_project": (
+            str(_resolve_node_project(settings))
+            if _resolve_node_project(settings) else None
+        ),
+    }
+
+
+@admin_router.post("/models/export")
+async def admin_export_model(payload: ExportModelRequest, request: Request) -> dict:
+    """Export a local HF model to DAIN INT4 shards via the Node exporter.
+
+    Runs `uv run --project <Node> python -m dain_node.model_export` as a
+    subprocess.  Only one export runs at a time.
+    """
+    settings = request.app.state.settings
+    if _active_export(request) is not None:
+        raise HTTPException(status_code=409, detail="a model export is already running")
+    src = _validate_export_source(payload.source_dir, settings.export_roots)
+    if not src.is_dir():
+        raise HTTPException(status_code=404, detail=f"source directory {src} not found")
+    node_dir = _resolve_node_project(settings)
+    if node_dir is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Node project not found (set node_project_dir / DAIN_NODE_PROJECT_DIR)",
+        )
+    uv_bin = shutil.which("uv")
+    if uv_bin is None:
+        raise HTTPException(status_code=503, detail="uv not found on PATH")
+
+    argv = [
+        uv_bin, "run", "--project", str(node_dir),
+        "python", "-m", "dain_node.model_export",
+        "--source-dir", str(src),
+        "--model-id", payload.model_id,
+        "--output-store", str(pathlib.Path(settings.model_store_dir)),
+        "--quantization", payload.quantization,
+        "--group-size", str(payload.group_size),
+        "--activation-dtype", payload.activation_dtype,
+        "--layers-per-shard", str(payload.layers_per_shard),
+        "--json-progress",
+    ]
+    if payload.force:
+        argv.append("--force")
+    if payload.trust_remote_code:
+        argv.append("--trust-remote-code")
+
+    request.app.state.model_export = {
+        "model_id": payload.model_id,
+        "started_at": time.time(),
+    }
+    request.app.state.model_export_error = None
+    asyncio.create_task(_run_model_export(request.app, argv))
+    log.info(
+        "admin_export_start model_id=%s source=%s node_project=%s",
+        payload.model_id, str(src), node_dir,
+    )
+    return {"ok": True, "started": payload.model_id, "node_project": str(node_dir)}
+
+
+async def _run_model_export(app, argv: list[str]) -> None:
+    try:
+        runner = getattr(app.state, "model_export_runner", None)
+        rc = await runner(argv) if runner is not None else _subprocess_export(argv)
+        if rc == 0:
+            app.state.model_export_error = None
+            app.state.recompute_pool("model_export")
+            log.info("model_export_done rc=0")
+        else:
+            app.state.model_export_error = f"exporter exited with code {rc} (see logs)"
+            log.error("model_export_failed rc=%d", rc)
+    except Exception as exc:  # noqa: BLE001 — background task must never crash the loop
+        app.state.model_export_error = str(exc)
+        log.exception("model_export_error")
+    finally:
+        app.state.model_export = None
+
+
+async def _subprocess_export(argv: list[str]) -> int:
+    env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
+    proc = await asyncio.create_subprocess_exec(
+        *argv,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=env,
+    )
+    assert proc.stdout is not None
+    async for raw in proc.stdout:
+        log.info("model_export %s", raw.decode("utf-8", "replace").rstrip())
+    return await proc.wait()
+
+
 # -- client API (S4): SSE streaming completions ----------------------------------
 
 
@@ -875,7 +1096,19 @@ def list_models(request: Request) -> dict:
     models = shard_store_list(settings.model_store_dir)
     return {
         "models": [
-            {"model_id": m.model_id, "name": m.name, "layers": m.layers, "hidden": m.hidden}
+            {
+                "model_id": m.model_id,
+                "name": m.name,
+                "layers": m.layers,
+                "hidden": m.hidden,
+                "format": getattr(m, "format", None),
+                "architecture": getattr(m, "architecture", None),
+                "quantization": {
+                    "backend": m.quantization.backend,
+                    "bits": m.quantization.bits,
+                    "packing_layout": getattr(m.quantization, "packing_layout", None),
+                } if getattr(m, "quantization", None) and m.quantization.is_quantized else None,
+            }
             for m in models
         ]
     }

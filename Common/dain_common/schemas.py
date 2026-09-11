@@ -114,6 +114,17 @@ class SoftwareInfo(_Model):
     agent_version: str = "0.1.0"
     torch_version: str | None = None
     os_name: str | None = None
+    # Export/quantization capability report (added with the export pipeline).
+    # A node that does not list a backend here cannot host stages for models
+    # that require it; the scheduler filters on these fields (§7, session N).
+    supported_backends: tuple[str, ...] = ()
+    supported_quantization: tuple[str, ...] = ()
+    supported_activation_dtypes: tuple[str, ...] = ("fp16",)
+    supported_adapters: tuple[str, ...] = ()
+    torchao_version: str | None = None
+    # Packing layouts the node's torchao installation can execute
+    # ("tensor_core_tiled" needs CUDA+tinygemm; "int4_cpu" runs on CPU).
+    supported_packing_layouts: tuple[str, ...] = ()
 
 
 class PowerInfo(_Model):
@@ -135,6 +146,47 @@ class CapabilityManifest(_Model):
 # Shards (spec §8, §11)
 # ---------------------------------------------------------------------------
 
+#: Serialized weight tensor container. `safetensors` keeps fp16/fp32 shards
+#: (legacy, byte-portable); `torch_pt` carries TorchAO tensor subclasses whose
+#: packing metadata only `torch.load` reproduces (quantized shards).
+SHARD_FORMATS = ("safetensors", "torch_pt")
+
+
+class QuantizationSpec(_Model):
+    """Describes how a model's weights were quantized at export time.
+
+    Quantization happens once in the exporter; node start-up never quantizes.
+    `backend="none"`/`scheme="none"` describe un-quantized (legacy) models.
+    """
+
+    backend: str = "none"
+    scheme: str = "none"
+    bits: int = Field(default=32, ge=2, le=32)
+    group_size: int = Field(default=128, ge=1)
+    activation_dtype: Literal["fp16", "bf16", "fp32"] = "fp16"
+    # Packing/serialization format version of the exporter that produced it.
+    packing_version: str = "1"
+    # Library versions at export time; informational, never enforced.
+    quantizer_version: str = ""
+    # Which layers were quantized: "all_linear" | "selected" | "none".
+    coverage: str = "none"
+    # TorchAO tensor-subclass layout the weights were packed with. "auto"
+    # (default) lets the exporter pick: TensorCoreTiledLayout on CUDA, else
+    # Int4CPULayout. The scheduler must only place a model on nodes whose
+    # SoftwareInfo lists the recorded layout.
+    packing_layout: str = "auto"
+
+    @field_validator("bits")
+    @classmethod
+    def _bits_power_of_two(cls, value: int) -> int:
+        if value not in {2, 4, 8, 16, 32}:
+            raise ValueError("bits must be 2, 4, 8, 16, or 32")
+        return value
+
+    @property
+    def is_quantized(self) -> bool:
+        return self.backend != "none" and self.scheme != "none"
+
 
 class ShardRef(_Model):
     model_id: str = Field(min_length=1)
@@ -143,6 +195,10 @@ class ShardRef(_Model):
     layer_start: int | None = Field(default=None, ge=0)
     layer_end: int | None = Field(default=None, ge=0, description="Inclusive upper bound")
     size_bytes: int = Field(ge=0)
+    # None = "safetensors" (backward compatible). Quantized shards are
+    # `torch_pt` because TorchAO's AffineQuantizedTensor packing metadata only
+    # survives `torch.save`/`torch.load` (plan §2.1).
+    format: str | None = Field(default=None, pattern="^(safetensors|torch_pt)$")
 
     @model_validator(mode="after")
     def _layers_ordered(self) -> ShardRef:
@@ -186,11 +242,25 @@ class ModelManifest(_Model):
     tokenizer_file: str | None = Field(default=None, min_length=1)
     tokenizer_hash: str | None = Field(default=None, min_length=8)
     shards: tuple[ShardRef, ...] = ()
+    # New in the export pipeline. All optional so legacy fp16/fp32 manifests
+    # (produced before the exporter existed) parse unchanged:
+    #   format=None            -> legacy safetensors fp16/fp32
+    #   quantization=None      -> un-quantized
+    format: str | None = Field(default=None, pattern="^(safetensors|torch_pt)$")
+    quantization: QuantizationSpec | None = None
+    base_model_id: str | None = Field(default=None, min_length=1)
+    architecture: str | None = Field(default=None, min_length=1)
+    adapter_id: str | None = Field(default=None, min_length=1)
+    # Monotonic artifact-format version; bump when shard layout changes shape.
+    artifact_version: int = Field(default=1, ge=1)
+    source_config_hash: str | None = Field(default=None, min_length=8)
 
     @model_validator(mode="after")
     def _tokenizer_consistent(self) -> ModelManifest:
         if (self.tokenizer_file is None) != (self.tokenizer_hash is None):
             raise ValueError("tokenizer_file and tokenizer_hash must be set together")
+        if self.format is None and self.quantization is not None:
+            raise ValueError("quantization requires an explicit shard format")
         return self
 
 

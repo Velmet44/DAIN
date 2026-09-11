@@ -39,10 +39,12 @@ log = logging.getLogger("dain.node.jobs")
 _INT64 = struct.Struct("<q")
 
 # Hidden activations are relayed in the model's dtype (fp32 dev model, fp16 for
-# fp16 shards); `sampled_token` returns are always int64.
+# fp16 shards, bf16/int4-exported models relay in their activation dtype);
+# `sampled_token` returns are always int64.
 _ACTIVATION_DTYPES: dict[str, torch.dtype] = {
     "fp32": torch.float32,
     "fp16": torch.float16,
+    "bf16": torch.bfloat16,
 }
 
 

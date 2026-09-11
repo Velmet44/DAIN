@@ -174,6 +174,36 @@
       </div>
     </div>
     <div class="card">
+      <h2>Model Export <span class="tag" id="exportBusyTag"></span></h2>
+      <div id="exportCard" style="padding: 8px 14px; font-size: 12px;">
+        <div class="krow">
+          <label>Source dir</label>
+          <input id="expSource" type="text" placeholder="C:\models\Llama-3.1-8B">
+          <button id="expValidate">Detect</button>
+        </div>
+        <div id="expDetected" style="color:#7d8590;min-height:16px;"></div>
+        <div class="krow">
+          <label>Model ID</label>
+          <input id="expModelId" type="text" placeholder="llama-3.1-8b-int4">
+        </div>
+        <div class="krow">
+          <label>Quant</label>
+          <select id="expQuant"><option>int4</option></select>
+          <label>Group</label>
+          <select id="expGroup"><option>128</option><option>64</option><option>256</option></select>
+          <label>Activation</label>
+          <select id="expActDtype"><option>fp16</option><option>bf16</option></select>
+          <label>Shard layers</label>
+          <input id="expLayers" type="number" value="4" min="1" max="64" style="width:56px">
+        </div>
+        <div class="kactions" style="padding:4px 0;">
+          <button id="expStart">Export</button>
+          <span class="tag">Approved roots: <span id="expRoots"></span></span>
+        </div>
+        <pre id="expLog" class="mono" style="max-height:160px; overflow:auto; font-size:11px; margin:6px 0 0 0; display:none;"></pre>
+      </div>
+    </div>
+    <div class="card">
       <h2>Jobs <span class="tag" id="jobsCount"></span></h2>
       <div id="jobs" style="padding: 8px 14px; font-size: 12px;"></div>
     </div>
@@ -323,13 +353,17 @@ function renderPlacements(pl) {
 
 function renderModels(models) {
   if (!models.length) { $("models").innerHTML = '<span class="tag">model store empty — export a model first</span>'; return; }
-  $("models").innerHTML = models.map(m => `
+  $("models").innerHTML = models.map(m => {
+    const q = m.quantization && m.quantization.backend ? ` · <span class="tag">INT${m.quantization.bits || 4}·${esc(m.quantization.packing_layout || m.quantization.backend)}</span>` : "";
+    return `
     <div class="pl" style="display:flex;align-items:center;gap:8px;">
       <span class="mono">${esc(m.model_id)}</span>
       <span class="tag">${esc(m.name || "")} · ${m.layers}L · h${m.hidden}</span>
+      ${q}
       <span style="margin-left:auto" class="tag">${m.size_bytes != null ? fmtBytes(m.size_bytes) : ""}</span>
       ${m.can_delete ? '<button class="mdel" data-m="' + esc(m.model_id) + '">Delete</button>' : ""}
-    </div>`).join("");
+    </div>`;
+  }).join("");
   document.querySelectorAll(".mdel").forEach(b => b.onclick = async () => {
     if (!confirm("Delete model " + b.dataset.m + " from the coordinator store?")) return;
     try {
@@ -558,6 +592,86 @@ async function importGguf(filename) {
 
 $("importGgufs").onclick = () => importGguf(null);
 
+// -- Model export ------------------------------------------------------------
+let exportPollTimer = null;
+
+async function renderExportCard() {
+  let busy = false, roots = [], error = null, exports = [];
+  try {
+    const rootsR = await api("/admin/models/export/roots", "admin");
+    roots = rootsR.roots || [];
+    busy = !!rootsR.busy;
+  } catch (e) { /* unauthorized */ }
+  try {
+    const exR = await api("/admin/models/export/exports", "admin");
+    exports = exR.exports || [];
+    busy = busy || !!exR.busy;
+    error = exR.error || null;
+  } catch (e) { /* unauthorized */ }
+  $("expRoots").textContent = roots.length
+    ? roots.map(r => r.path).join("; ")
+    : "(none configured — set export_roots / DAIN_EXPORT_ROOTS)";
+  $("expBusyTag").textContent = busy ? "running" : "";
+  $("expStart").disabled = busy;
+  const rows = exports.filter(e => e.exported).map(e =>
+    `<div class="pl" style="display:flex;align-items:center;gap:8px;padding:2px 0;border-bottom:none;">
+       <span class="mono">${esc(e.model_id)}</span>
+       <span class="pill st-online" style="margin-left:auto">${e.active ? "exporting…" : "exported"}</span>
+     </div>`).join("");
+  $("expLog").style.display = rows || error || busy ? "" : "none";
+  $("expLog").textContent = (rows ? "" : exports.length ? exports.map(e => e.model_id).join("\n") + "\n" : "")
+    + (busy ? "export running — follow progress in Logs\n" : "")
+    + (error ? "last result: " + error + "\n" : "");
+}
+
+function pollExportBusy() {
+  clearTimeout(exportPollTimer);
+  exportPollTimer = setTimeout(async () => {
+    try {
+      const r = await api("/admin/models/export/exports", "admin");
+      if (r.busy) return pollExportBusy();
+      if (r.error) { fail(new Error("export failed: " + r.error)); }
+      else if (r.exports.length) { ok("export completed"); }
+      renderExportCard();
+    } catch (e) { renderExportCard(); }
+  }, 2500);
+}
+
+$("expValidate").onclick = async () => {
+  const src = $("expSource").value.trim();
+  if (!src) return fail(new Error("source dir required"));
+  $("expDetected").textContent = "checking…";
+  try {
+    const r = await api("/admin/models/export/validate", "admin", { method: "POST", body: { source_dir: src } });
+    $("expDetected").textContent = r.error
+      ? "✗ " + r.error
+      : (r.valid
+        ? `✓ HF model dir · ${r.weight_count} weight file(s) · ${fmtBytes(r.size_bytes)} · fast tokenizer ${r.has_fast_tokenizer ? "yes" : "no"}`
+        : "✗ invalid model directory");
+  } catch (e) {
+    $("expDetected").textContent = "✗ " + (e.message || e);
+  }
+};
+
+$("expStart").onclick = async () => {
+  const body = {
+    source_dir: $("expSource").value.trim(),
+    model_id: $("expModelId").value.trim(),
+    quantization: $("expQuant").value,
+    group_size: parseInt($("expGroup").value, 10),
+    activation_dtype: $("expActDtype").value,
+    layers_per_shard: parseInt($("expLayers").value, 10) || 4,
+  };
+  if (!body.source_dir) return fail(new Error("source dir required"));
+  if (!body.model_id) return fail(new Error("model id required"));
+  try {
+    await api("/admin/models/export", "admin", { method: "POST", body });
+    ok("export started — follow progress in Logs");
+    renderExportCard();
+    pollExportBusy();
+  } catch (e) { fail(e); }
+};
+
 async function refresh() {
   $("status").textContent = "loading…";
   try {
@@ -591,6 +705,7 @@ async function refresh() {
     await loadKeys();
     await loadSettings();
     await loadGgufs();
+    await renderExportCard();
   } catch (e) { fail(e); }
 }
 
