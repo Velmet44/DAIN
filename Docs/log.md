@@ -1123,3 +1123,52 @@ Sim unit tests (**8 passed**) clean; Sim integration tests have pre-existing
   compatible) so the hard-feasibility gate is as live as the score. Regression
   test `test_feasibility_prefers_live_metrics` covers live-wins, boundary, and
   fallback. Common 57, Coordinator 94, Node 36 — green; ruff clean.
+
+---
+
+### 2026-09-11 - P2P peer shard distribution (session 19, commit c2ced0b)
+
+Nodes now share cached shards directly over the LAN instead of every node
+re-pulling each shard from the coordinator's model store: a sibling can
+resume a mid-file transfer and fetch different byte ranges of one shard from
+several peers in parallel.
+
+#### Coordinator (shard inventory + route)
+- **`schemas.py`**: `Register.cached_shards` + `peer_url`, and `Heartbeat`
+  gains optional `cached_shards` (`None` = "unchanged", an empty tuple revokes).
+- **`nodes.py`**: uses peer shard inventory for live placement scoring; wraps
+  neighbor fetch for sibling availability.
+- **`store.py`**: normalizes advertised shard sets from register/heartbeat and
+  stores them alongside node rows instead of ignoring them.
+- **`api.py`**: nodes feed exposes `cached_shards`/`peer_url`.
+
+#### Node (peer shard server + peer-aware downloads)
+- **`peer_server.py`** (new): asyncio HTTP/1.1 GET/HEAD shard server, one process
+  inside the agent loop (no extra dep). Advertises `peer_url` to the coordinator
+  via the join token (the LAN trust boundary). Path traversal is blocked by the
+  safe-component rule shared with the rest of the system. Requests are capped
+  and idle sockets reaped so a misbehaving LAN client cannot pin the node open.
+- **`_parse_range`**: RFC 7233 suffix ranges too (`bytes=-N` = last N bytes), so
+  the peer endpoint is a spec-correct range server, not just open-ended `N-`.
+- **`llm.py`**: shard downloads prefer `peer_url` when the sibling has the shard,
+  stream high-throughput chunks, verify sidecar hashes on resume. A partial
+  failure mid-stream resumes inside one run (open-ended `bytes=start-`).
+- **`agent.py` / `jobs.py`**: `on_inventory_change` hook refreshes the advertised
+  shard inventory after new shards land; `JobHandler.shutdown()` now awaits
+  `store.close()` so the peer server tears down cleanly.
+- **`settings.py`**: `DAIN_PEER_ENABLED`/`DAIN_PEER_HOST`/`DAIN_PEER_PORT`.
+
+#### Tests (new coverage)
+- **`test_peer_server.py`** (new): range parsing incl. suffix, auth, path
+  traversal, content bytes, 404s.
+- **`test_download.py`** (new): parallel chunk download + `bytes=start-` resume
+  inside a single run.
+- **`test_peers.py`** (Coordinator, new): shard inventory via register/heartbeat,
+  revocation, and live placement.
+- **`test_jobs.py`**: retry re-emits buffered activation + `FakeStore.close`.
+- Shameless correctness pass: ruff findings in the authored test files
+  (B023 lambda loop capture, F841, E501, I001) fixed.
+
+#### Gates
+Common ruff clean; **Coordinator 104 passed** (9 new), **Node 53 passed**
+(36 new), ruff **All checks passed** on every package. Sim untouched.
