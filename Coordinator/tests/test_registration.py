@@ -165,7 +165,12 @@ def test_degraded_on_thermal_then_recovered(client: TestClient) -> None:
     )
     assert client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["state"] == "degraded"
     history = client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["history"]
-    assert any(h["to_state"] == "degraded" and h["reason"] == "thermal" for h in history)
+    assert any(
+        h["to_state"] == "degraded"
+        and h["from_state"] == "online"
+        and h["reason"] == "thermal"
+        for h in history
+    )
 
     send_heartbeat(
         client,

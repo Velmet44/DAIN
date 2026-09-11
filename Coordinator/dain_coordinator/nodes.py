@@ -239,10 +239,11 @@ class NodeService:
             return
 
         if degraded and row.state in (NodeState.ONLINE, NodeState.BUSY):
+            previous_state = row.state
             row.state = NodeState.DEGRADED
             self.registry.save_node(row)
             self.registry.append_history(
-                StateChange(row.node_id, row.state, NodeState.DEGRADED, reason, time.time())
+                StateChange(row.node_id, previous_state, NodeState.DEGRADED, reason, time.time())
             )
             log.warning("degraded node=%s reason=%s", row.node_id, reason)
             self._notify_pool_change(row.node_id, NodeState.DEGRADED)

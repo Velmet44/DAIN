@@ -1106,3 +1106,15 @@ Common **56 passed**, Coordinator **94 passed**, Node **36 passed** (7 new),
 Client **build clean** (tsc+vite), ruff **clean** across all Python packages.
 Sim unit tests (**8 passed**) clean; Sim integration tests have pre-existing
 `invalid_join_token` failures unrelated to this session's changes.
+
+### 2026-09-11 — review fixes: degraded history + live-VRAM scoring (session 18b)
+- **`nodes.py`**: degraded path captured `previous_state` before mutating
+  `row.state`, so the history entry records `ONLINE → DEGRADED` / `BUSY → DEGRADED`
+  instead of `DEGRADED → DEGRADED` (recovery path already correct).
+- **`Common/dain_common/scoring.py`**: `score_node` now prefers
+  `metrics.vram_free_gb` when present, falling back to the manifest GPU value —
+  mirrors the existing `metrics.net_bw_mbps` preference; removes the implicit
+  "caller must refresh manifest first" contract.
+- **`tests/test_registration.py`**: strengthened degraded test to assert the
+  history `from_state` is `online` (regression guard for the bug).
+- **Gates:** Common 56, Coordinator 94, Node 36 — all green; ruff clean.

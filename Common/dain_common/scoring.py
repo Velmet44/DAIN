@@ -109,7 +109,11 @@ def score_node(
     w, refs = config.weights, config.refs
     gpu = manifest.gpu
     tflops = gpu.tflops_claimed if gpu is not None else 0.0
-    vram_free = gpu.vram_free_gb if gpu is not None else 0.0
+    vram_free = (
+        metrics.vram_free_gb
+        if metrics.vram_free_gb is not None
+        else (gpu.vram_free_gb if gpu is not None else 0.0)
+    )
     mem_bw = gpu.mem_bw_gbs if gpu is not None else None
     net_bw = metrics.net_bw_mbps if metrics.net_bw_mbps is not None else manifest.net.bw_mbps
     gpu_util = metrics.gpu_util_pct if gpu is not None else None
