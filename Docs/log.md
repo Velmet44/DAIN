@@ -1173,7 +1173,7 @@ several peers in parallel.
 Common ruff clean; **Coordinator 104 passed** (9 new), **Node 53 passed**
 (36 new), ruff **All checks passed** on every package. Sim untouched.
 
-## 2026-09-11 - S20: Auth & security hardening, ledger credit fix, minor sweep - "(to be committed)"
+## 2026-09-11 - S20: Auth & security hardening, ledger credit fix, minor sweep (commit ad480de)
 
 - Coordinator settings.py/config.py: production secret hardening -
   non-loopback host with a default/empty join token, API key, or admin key is
@@ -1213,6 +1213,6 @@ Common ruff clean; **Coordinator 104 passed** (9 new), **Node 53 passed**
   cleanly on tick/unmount).
 
 #### Gates
-Common: pytest OK, ruff clean. Coordinator: **113 passed**, ruff clean.
+Common: pytest OK, ruff clean. Coordinator: pytest OK, ruff clean.
 Node: pytest OK, ruff clean. Sim: pytest OK (incl. 4-agent pipeline parity +
 2-agent HF e2e), ruff clean. Client `npm run build` OK (tsc + vite).
