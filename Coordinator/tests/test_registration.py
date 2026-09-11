@@ -68,6 +68,35 @@ def test_register_issues_persistent_token(client: TestClient) -> None:
     assert bad["accepted"] is False
 
 
+def test_register_join_token_re_admits_existing_node(client: TestClient) -> None:
+    """Self-heal: a node that lost its node_token re-registers with the join
+    token (agent clears its token on 'invalid node token' and retries with the
+    join token); it must be re-admitted with a freshly rotated node_token."""
+    ack = client.post("/node/register", json=register_payload("node-a", auth_token=JOIN)).json()
+    assert ack["accepted"] is True
+    old_token = ack["node_token"]
+
+    # Simulate a node that lost its DB row / token: presents only the join token.
+    healed = client.post(
+        "/node/register", json=register_payload("node-a", auth_token=JOIN)
+    ).json()
+    assert healed["accepted"] is True
+    assert healed["node_token"] != old_token
+    assert len(healed["node_token"]) >= 16
+
+    # The old token must no longer authenticate (rotation is enforced).
+    stale = client.post(
+        "/node/register", json=register_payload("node-a", auth_token=old_token)
+    ).json()
+    assert stale["accepted"] is False
+
+    # The rotated token admits the node as before.
+    again = client.post(
+        "/node/register", json=register_payload("node-a", auth_token=healed["node_token"])
+    ).json()
+    assert again["accepted"] is True
+
+
 def test_register_low_score_rejected(client: TestClient, tmp_path) -> None:
     settings = make_settings(tmp_path, min_score=0.5)
     with make_client(settings) as tight:

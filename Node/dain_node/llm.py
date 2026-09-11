@@ -49,8 +49,8 @@ class ModelStoreClient:
     def set_auth(self, node_id: str, node_token: str) -> None:
         self.auth = {"X-Node-Id": node_id, "X-Node-Token": node_token}
 
-    async def fetch_manifest(self, model_id: str) -> ModelManifest:
-        if model_id in self._manifests:
+    async def fetch_manifest(self, model_id: str, *, refresh: bool = False) -> ModelManifest:
+        if not refresh and model_id in self._manifests:
             return self._manifests[model_id]
         if self.base_url is None:
             raise RuntimeError("model store base URL not set yet")
@@ -59,6 +59,13 @@ class ModelStoreClient:
             response.raise_for_status()
             manifest = ModelManifest.model_validate(response.json())
         self._manifests[model_id] = manifest
+        log.info(
+            "manifest_refreshed model=%s layers=%d shards=%d refresh=%s",
+            model_id,
+            manifest.layers,
+            len(manifest.shards),
+            refresh,
+        )
         return manifest
 
     async def ensure_shard(self, model_id: str, shard_id: str, content_hash: str) -> str:
@@ -72,6 +79,7 @@ class ModelStoreClient:
         model_cache = os.path.join(self.cache_dir, model_id)
         path = os.path.join(model_cache, f"{shard_id}.safetensors")
         if os.path.exists(path) and self._hash_file(path) == content_hash:
+            log.info("shard_hit model=%s shard=%s path=%s", model_id, shard_id, path)
             return path
         if self.base_url is None:
             raise RuntimeError("model store base URL not set yet")
@@ -87,10 +95,33 @@ class ModelStoreClient:
                     "GET", f"{self.base_url}/shard/{model_id}/{shard_id}", headers=self.auth
                 ) as response:
                     response.raise_for_status()
+                    expected = int(response.headers.get("content-length", "0") or 0)
+                    received = 0
+                    last_pct = -1
                     with open(tmp, "wb") as fh:
                         async for chunk in response.aiter_bytes():
                             fh.write(chunk)
                             hasher.update(chunk)
+                            received += len(chunk)
+                            if expected > 0:
+                                pct = int(100 * received / expected)
+                                if pct // 5 != last_pct // 5 or pct == 100:
+                                    log.info(
+                                        "shard_download model=%s shard=%s progress=%d%% bytes=%d/%d",
+                                        model_id,
+                                        shard_id,
+                                        pct,
+                                        received,
+                                        expected,
+                                    )
+                                    last_pct = pct
+                            else:
+                                log.info(
+                                    "shard_download model=%s shard=%s bytes=%d",
+                                    model_id,
+                                    shard_id,
+                                    received,
+                                )
             if hasher.hexdigest() != content_hash:
                 raise RuntimeError(f"shard {shard_id} failed hash verification")
             os.replace(tmp, path)
@@ -118,6 +149,7 @@ class ModelStoreClient:
         file_name = os.path.basename(tokenizer_file)
         path = os.path.join(model_cache, file_name)
         if os.path.exists(path) and self._hash_file(path) == tokenizer_hash:
+            log.info("tokenizer_hit model=%s file=%s path=%s", model_id, file_name, path)
             return path
         if self.base_url is None:
             raise RuntimeError("model store base URL not set yet")
@@ -328,6 +360,13 @@ async def fetch_stage(
             continue
         if shard.layer_start <= layer_end and shard.layer_end >= layer_start:
             needed.append((shard.shard_id, shard.content_hash))
+    log.info(
+        "fetch_stage model=%s layers=[%d,%d] needed_shards=%s",
+        manifest.model_id,
+        layer_start,
+        layer_end,
+        ",".join(shard_id for shard_id, _ in needed),
+    )
     state: dict[str, torch.Tensor] = {}
     shard_paths: dict[str, str] = {}
     for shard_id, content_hash in needed:

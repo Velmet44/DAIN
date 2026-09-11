@@ -51,7 +51,7 @@ class FakeStore:
         self.manifest = manifest
         self.base = None
 
-    async def fetch_manifest(self, model_id: str) -> object:
+    async def fetch_manifest(self, model_id: str, *, refresh: bool = False) -> object:
         assert model_id == self.manifest.model_id
         return self.manifest
 
@@ -60,7 +60,7 @@ class FakeStore:
 
 
 class BoomStore(FakeStore):
-    async def fetch_manifest(self, model_id: str) -> object:
+    async def fetch_manifest(self, model_id: str, *, refresh: bool = False) -> object:
         raise RuntimeError("boom")
 
 

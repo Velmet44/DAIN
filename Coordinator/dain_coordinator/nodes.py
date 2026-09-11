@@ -91,12 +91,16 @@ class NodeService:
     def register(self, payload: Register, *, model_store_url: str | None = None) -> RegisterAck:
         now = time.time()
         existing = self.registry.get_node(payload.node_id)
-        if existing is not None and payload.auth_token != existing.node_token:
-            log.warning("register_rejected node=%s reason=invalid_node_token", payload.node_id)
-            return self._ack(False, reason="invalid node token")
-        if existing is None and payload.auth_token != self.settings.join_token:
-            log.warning("register_rejected node=%s reason=invalid_join_token", payload.node_id)
-            return self._ack(False, reason="invalid join token")
+        # A node identifies with EITHER its stored per-node token (normal) or the
+        # cluster join token (self-heal: the node dropped its node_token and the
+        # agent retries with the join token — admit it and rotate a fresh one so
+        # it can authenticate heartbeats again).
+        node_token_ok = existing is not None and payload.auth_token == existing.node_token
+        join_token_ok = payload.auth_token == self.settings.join_token
+        if not (node_token_ok or join_token_ok):
+            reason = "invalid node token" if existing is not None else "invalid join token"
+            log.warning("register_rejected node=%s reason=%s", payload.node_id, reason)
+            return self._ack(False, reason=reason)
 
         reputation = (
             NodeReputation(uptime_ratio=existing.uptime_ratio, failure_rate=existing.failure_rate)
@@ -131,7 +135,8 @@ class NodeService:
             )
             return self._ack(False, reason="score below minimum")
 
-        node_token = existing.node_token if existing is not None else secrets.token_hex(16)
+        rotated = join_token_ok and existing is not None
+        node_token = existing.node_token if node_token_ok else secrets.token_hex(16)
         row = self._new_row(
             payload, node_token=node_token, state=NodeState.ONLINE, score=score, now=now
         )
@@ -142,6 +147,12 @@ class NodeService:
         if prev != NodeState.ONLINE:
             self.registry.append_history(
                 StateChange(payload.node_id, prev, NodeState.ONLINE, "registered", now)
+            )
+        if rotated:
+            log.info(
+                "node_token_rotated node=%s agent=%s (re-admitted via join token)",
+                payload.node_id,
+                payload.agent_version,
             )
         log.info(
             "registered node=%s state=%s score=%.3f agent=%s",

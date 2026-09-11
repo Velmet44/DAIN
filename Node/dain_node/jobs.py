@@ -231,7 +231,10 @@ class JobHandler:
 
     async def on_job_assign(self, job: JobAssign) -> None:
         try:
-            manifest = await self.store.fetch_manifest(job.model_id)
+            # Always refresh the manifest: the coordinator plans stages against
+            # its current store (a node's forever-cached manifest can lag a
+            # re-exported model and route the wrong shards). Cheap (~2 KB).
+            manifest = await self.store.fetch_manifest(job.model_id, refresh=True)
         except Exception as exc:  # noqa: BLE001 — report setup failures to the client
             log.error("job_setup_failed job=%s err=%s", job.job_id, exc)
             await self._emit(
@@ -249,6 +252,15 @@ class JobHandler:
             )
             return
         mine = job.stages[job.my_stage_idx]
+        log.info(
+            "job_assigned job=%s model=%s stage=%d layers=[%d,%d] of %d",
+            job.job_id,
+            job.model_id,
+            job.my_stage_idx,
+            mine.layer_start,
+            mine.layer_end,
+            manifest.layers,
+        )
         previous = self.jobs.get(job.job_id)
         attempt = previous.attempt + 1 if previous is not None else 0
         if previous is not None and previous.task is not None:
