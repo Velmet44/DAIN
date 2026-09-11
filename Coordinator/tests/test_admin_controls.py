@@ -111,7 +111,41 @@ def test_model_path_traversal_rejected(tmp_path) -> None:
     with TestClient(create_app(_settings(tmp_path))) as client:
         _admin(client)
         assert client.post("/admin/models/..%2Fsecret/delete").status_code in (400, 404)
-        assert client.post("/admin/models/evil..name/delete").status_code == 400
+        # Dotted ids (huggingface-style e.g. "llama-3.2-1b-instruct") are legal;
+        # a traversal attempting to escape the store is not.
+        assert client.post("/admin/models/evil..name/delete").status_code == 404
+
+
+def test_shard_serve_dotted_model_id(tmp_path) -> None:
+    """Dots in a model id must not be rejected by the shard/tokenizer guards
+    (hf-style ids like `llama-3.2-1b-instruct`; regression for the 400 on fetch)."""
+    model_id = "llama-3.2-1b-instruct"
+    store = tmp_path / "store" / model_id
+    store.mkdir(parents=True)
+    (store / "manifest.json").write_text(
+        json.dumps(manifest_model_dict(model_id)), encoding="utf-8"
+    )
+    (store / "layers_00_03.safetensors").write_bytes(b"\x00" * 128)
+
+    with TestClient(create_app(_settings(tmp_path))) as client:
+        client.headers.update({"X-API-Key": API})
+        reg = client.post(
+            "/node/register",
+            json=register_payload("node-dots", auth_token=JOIN, manifest_model=manifest()),
+        )
+        token = reg.json()["node_token"]
+
+        head = {"X-Node-Id": "node-dots", "X-Node-Token": token}
+        manifest_resp = client.get(f"/model/manifest/{model_id}", headers=head)
+        assert manifest_resp.status_code == 200
+        assert manifest_resp.json()["model_id"] == model_id
+
+        shard = client.get(f"/model/shard/{model_id}/layers_00_03", headers=head)
+        assert shard.status_code == 200
+        assert shard.content == b"\x00" * 128
+
+        # Traversal-style ids are still rejected.
+        assert client.get("/model/shard/../secret/x", headers=head).status_code in (400, 404)
 
 
 def test_jobs_list_and_cancel(tmp_path) -> None:

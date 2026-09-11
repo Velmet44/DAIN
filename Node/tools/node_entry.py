@@ -1,8 +1,9 @@
 """PyInstaller entry point for the node agent executable.
 
 Runs the same code as ``python -m dain_node`` but as a standalone .exe so node
-PCs need no Python/uv/git installed. The agent is long-lived (heartbeat loop),
-so the bundle keeps its startup cost low; prefer the default onedir build.
+PCs need no Python/uv/git installed. The default onefile build extracts to
+%TEMP% at launch (safe on OneDrive/network folders, at the cost of a slower
+startup with torch/transformers); use -Mode onedir when startup latency matters.
 
 usage (set env, then the exe):
     $env:DAIN_COORD_URL="wss://<host>"

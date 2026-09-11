@@ -5,12 +5,14 @@
 # Produces a self-contained folder and zip that users can extract and run:
 #
 #   Builds/DainNode-v0.1.0/
-#     DainNode.exe
-#     _internal/
-#     config.json        (default settings — user edits this)
-#     shard_cache/       (empty, created by the node on first job)
+#     DainNode.exe          (single-file PyInstaller onefile build)
+#     config.json           (default settings — user edits this)
+#     shard_cache/          (empty, created by the node on first job)
 #
 #   Builds/DainNode-v0.1.0.zip
+#
+# The onefile exe extracts to %TEMP% at launch, so it is safe in OneDrive or
+# network folders (no directory tree to dehydrate).
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot   # repo root
@@ -34,7 +36,8 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ── 3. Assemble distribution folder ──────────────────────────────────────
-$distSrc  = Join-Path $root "Node\dist\dain-node"
+# onefile build → a single exe in dist/ (no folder, no _internal tree).
+$distSrc  = Join-Path $root "Node\dist\dain-node.exe"
 $buildsDir = Join-Path $root "Builds"
 if (-not (Test-Path -LiteralPath $buildsDir)) {
     New-Item -ItemType Directory -Path $buildsDir -Force | Out-Null
@@ -45,15 +48,9 @@ $distDir  = Join-Path $buildsDir $distName
 if (Test-Path -LiteralPath $distDir) {
     Remove-Item -LiteralPath $distDir -Recurse -Force
 }
+New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 Write-Host "  Assembling $distDir ..."
-Copy-Item -LiteralPath $distSrc -Destination $distDir -Recurse
-
-# ── 4. Rename exe ────────────────────────────────────────────────────────
-$oldExe = Join-Path $distDir "dain-node.exe"
-$newExe = Join-Path $distDir "DainNode.exe"
-if (Test-Path -LiteralPath $oldExe) {
-    Rename-Item -LiteralPath $oldExe -NewName "DainNode.exe"
-}
+Copy-Item -LiteralPath $distSrc -Destination (Join-Path $distDir "DainNode.exe")
 
 # ── 5. Write default config.json ─────────────────────────────────────────
 # coord_url empty = auto-discover the coordinator on the LAN (first run probes
@@ -71,7 +68,10 @@ $configObj = [ordered]@{
     log_json     = $false
 }
 $configPath = Join-Path $distDir "config.json"
-$configObj | ConvertTo-Json -Depth 4 | Set-Content -Path $configPath -Encoding UTF8
+# BOM-free UTF-8 (PS 5.1 -Encoding UTF8 would write a BOM, which breaks every
+# json loader in the app — config.py reads with utf-8-sig, but stay clean anyway).
+$json = $configObj | ConvertTo-Json -Depth 4
+[System.IO.File]::WriteAllText($configPath, $json, (New-Object System.Text.UTF8Encoding($false)))
 Write-Host "  Created config.json"
 
 # ── 6. Create empty shard_cache ──────────────────────────────────────────
@@ -92,7 +92,7 @@ Write-Host ""
 Write-Host "  Built DainNode v$version" -ForegroundColor Green
 Write-Host "  Zip: $zipPath ($sizeMB MB)"
 Write-Host ""
-Write-Host "  Users: extract the zip and run DainNode.exe"
+Write-Host "  Users: extract the zip and run DainNode.exe (single file + config.json)"
 Write-Host "         it auto-discovers the coordinator on the LAN (join_token must match);"
 Write-Host "         edit config.json only for remote/WAN use."
 Write-Host ""

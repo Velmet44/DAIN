@@ -38,7 +38,7 @@ def config_path(base_dir: Path | None = None) -> Path:
 def load_config(path: Path) -> dict:
     """Read *path*; missing or unparseable files yield an empty dict."""
     try:
-        with open(path, encoding="utf-8") as fh:
+        with open(path, encoding="utf-8-sig") as fh:
             data = json.load(fh)
         if not isinstance(data, dict):
             log.warning("config_not_dict path=%s — ignoring", path)

@@ -30,7 +30,7 @@ def load_manifest(store_dir: str, model_id: str) -> ModelManifest | None:
     path = os.path.join(store_dir, model_id, "manifest.json")
     if not os.path.exists(path):
         return None
-    with open(path, encoding="utf-8") as fh:
+    with open(path, encoding="utf-8-sig") as fh:
         return ModelManifest.model_validate(json.load(fh))
 
 

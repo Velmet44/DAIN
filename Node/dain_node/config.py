@@ -59,7 +59,7 @@ def load_config(config_path: Path) -> dict:
     if not config_path.is_file():
         return {}
     try:
-        text = config_path.read_text(encoding="utf-8")
+        text = config_path.read_text(encoding="utf-8-sig")
         data = json.loads(text)
         if not isinstance(data, dict):
             log.warning("config_not_dict path=%s — ignoring", config_path)

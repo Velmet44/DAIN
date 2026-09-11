@@ -1,18 +1,21 @@
 # Builds the node agent into a standalone Windows bundle with PyInstaller.
 #
 #   powershell -ExecutionPolicy Bypass -File Node\tools\build_exe.ps1
-#   # optional: -Mode onefile  (single .exe, but slow to start with torch)
+#   # optional: -Mode onedir  (folder of exe + libs, faster startup)
 #
-# Output: Node\dist\dain-node\dain-node.exe   (onedir: folder of exe + libs)
-#         Node\dist\dain-node.exe             (onefile: single .exe)
+# Output: Node\dist\dain-node.exe             (onefile: single .exe)
+#         Node\dist\dain-node\dain-node.exe   (onedir: folder of exe + libs)
 #
-# The bundle is fully self-contained (torch, transformers, node agent, shared
-# dain_common package); the target PC needs nothing but the folder itself. No
-# absolute paths are embedded, so the result is copyable anywhere.
+# The onefile bundle is fully self-contained (torch, transformers, node agent,
+# shared dain_common package); the target PC needs nothing but the .exe. It is
+# safe to copy into OneDrive-synced or network folders — content is extracted
+# to %TEMP% at launch, so no directory tree gets dehydrated. The single .exe is
+# slower to start than onedir (extracts torch + transformers each launch). No
+# absolute paths are embedded, so the result runs from any location.
 
 param(
     [ValidateSet("onedir", "onefile")]
-    [string]$Mode = "onedir"
+    [string]$Mode = "onefile"
 )
 
 $ErrorActionPreference = "Stop"

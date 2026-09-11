@@ -31,7 +31,7 @@ class IdentityState:
     def load(cls, path: str) -> IdentityState | None:
         """Load persisted identity; missing or corrupt files yield None (fresh join)."""
         try:
-            with open(path, encoding="utf-8") as fh:
+            with open(path, encoding="utf-8-sig") as fh:
                 data = json.load(fh)
             node_id, token = data["node_id"], data.get("node_token")
             if not isinstance(node_id, str) or not node_id:

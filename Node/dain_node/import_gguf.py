@@ -99,7 +99,7 @@ def _marker_path(store: Path) -> Path:
 
 def load_marker(store: str | Path) -> dict[str, dict]:
     try:
-        with open(_marker_path(Path(store)), encoding="utf-8") as fh:
+        with open(_marker_path(Path(store)), encoding="utf-8-sig") as fh:
             data = json.load(fh)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):

@@ -668,8 +668,7 @@ def rescan_models(request: Request) -> dict:
 def delete_model(model_id: str, request: Request) -> dict:
     """Delete a model from the coordinator's store and recompute placements."""
     settings = request.app.state.settings
-    safe = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
-    if not set(model_id) <= safe:
+    if not shard_store_safe(model_id):
         raise HTTPException(status_code=400, detail="invalid model id")
     root = pathlib.Path(settings.model_store_dir).resolve()
     target = (root / model_id).resolve()
@@ -715,7 +714,7 @@ def _resolve_node_project(settings) -> pathlib.Path | None:
 def _gguf_marker(store: pathlib.Path) -> dict[str, dict]:
     """The converter's .gguf-imports.json (file -> sha256/model_id), if present."""
     try:
-        with open(store / ".gguf-imports.json", encoding="utf-8") as fh:
+        with open(store / ".gguf-imports.json", encoding="utf-8-sig") as fh:
             data = json.load(fh)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
@@ -1163,16 +1162,15 @@ def ledger_export(payload: ExportRequest, request: Request) -> Response:
 
 
 def _shard_path(settings, model_id: str, shard_id: str) -> str:
-    # Path-traversal guard: ids are restricted to safe characters.
-    safe = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
-    if not set(model_id) <= safe or not set(shard_id) <= safe:
+    # Path-traversal guard: mirror the store's own safe-component rule so ids
+    # that pass manifest loading (dots, dashes, …) can never escape the store.
+    if not shard_store_safe(model_id) or not shard_store_safe(shard_id):
         raise HTTPException(status_code=400, detail="invalid model or shard id")
     return os.path.join(settings.model_store_dir, model_id, f"{shard_id}.safetensors")
 
 
 def _model_dir(settings, model_id: str) -> str:
-    safe = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-")
-    if not set(model_id) <= safe:
+    if not shard_store_safe(model_id):
         raise HTTPException(status_code=400, detail="invalid model id")
     return os.path.join(settings.model_store_dir, model_id)
 
@@ -1214,5 +1212,6 @@ def get_tokenizer(model_id: str, request: Request) -> Response:
 
 # -- shard store helpers -----------------------------------------------------------
 
+from dain_common.model_store import is_safe_model_id as shard_store_safe  # noqa: E402
 from dain_common.model_store import list_models as shard_store_list  # noqa: E402
 from dain_common.model_store import load_manifest as shard_store_load  # noqa: E402
