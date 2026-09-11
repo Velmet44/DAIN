@@ -1030,3 +1030,79 @@ first GGUF import surfaced (and fixed) a converter bug.
 - **Gates:** Common 56, Coordinator 79, Node 29 — all green; ruff clean. Also synced
   `Sim/uv.lock` to the Node pyproject (picks up version 1.0.1 + `gguf` so the Sim
   lockfile stops drifting).
+
+### 2026-09-11 — bug-fix sweep across all packages (session 18)
+
+Coordinated session addressing every open bug across Common, Coordinator, Node,
+Client, and Sim. All Python packages ruff-clean; Client tsc+vite build passes.
+
+#### Common (3 fixes)
+- **`__init__.py`**: `TokenBatch` exported; duplicate `Envelope` removed from
+  `__all__`.
+- **`model_store.py`**: `is_safe_model_id()` now rejects ids containing `/`, `\`,
+  `..`, or null bytes (`^[A-Za-z0-9_.-]+$` only). `load_manifest` returns
+  `None` on unsafe id; `list_models` skips them silently.
+- **`node_discovery.py`**: `DiscoverRequest.parse` and `HelloReply.parse` both
+  reject version mismatches against `DISCOVERY_VERSION`.
+
+#### Coordinator (6 fixes)
+- **`settings.py`**: `job_history_max=4096`, `job_ttl_s=3600.0` on dataclass with
+  env/config support.
+- **`jobs.py`**: `JobTracker(max_jobs, job_ttl_s)` — `_evict()` drops terminal
+  jobs past TTL, trims oldest terminal when dict exceeds `_max_jobs`, preserves
+  live SSE queues.
+- **`app.py`**: `JobTracker` wired with `max_jobs`/`job_ttl_s` from settings.
+- **`api.py`**: `/shard` and tokenizer endpoints use `FileResponse` (streamed);
+  all `get_event_loop()` replaced with `get_running_loop()`.
+- **`connections.py`**: `unregister()` pops per-node lock from `self._locks`.
+- **`ratelimit.py`**: `max_keys=10_000`; `_prune()` deletes idle keys older than
+  4 windows when dict exceeds max.
+
+#### Node (3 fixes + test coverage)
+- **`llm.py`**: `ensure_shard`/`ensure_tokenizer` stream to a temp file with
+  incremental sha256; `os.replace` is atomic; `_hash_file` reads in 1 MiB chunks.
+- **`agent.py`**: `self._background_tasks` set tracks fire-and-forget tasks;
+  `_spawn()` helper + `_on_task_done()` logs unhandled exceptions; dispatch uses
+  `isinstance` checks + `self._spawn()` instead of `assert isinstance` + bare
+  `create_task`.
+- **`jobs.py`**: `self._background` set + `_spawn_step()` + `_on_task_done()`
+  tracks step tasks; `shutdown()` cancels and awaits all `rt.task` + `_background`
+  tasks before clearing state; duplicate stale `shutdown()` override removed.
+- **`tests/test_jobs.py`** (new): 7 tests covering single-stage streaming,
+  distributed-entry sampled-token loop, last-stage ack+decode, early-activation
+  buffering+replay, stage-retry replay, setup-failure error final, shutdown
+  cancellation. All 7 pass.
+
+#### Client (5 fixes)
+- **`api.ts`**: `fetchWithTimeout()` helper (15s default); `listModels`/`clusterStatus`
+  accept optional `AbortSignal`; `streamCompletion` has internal AbortController +
+  idle-timeout watchdog (30s no-data abort) + external signal wiring.
+- **`components.tsx`**: `MessageBubble` wrapped in `React.memo`; markdown HTML
+  computed via `useMemo` keyed on `message.content`.
+- **`chat.tsx`**: `useEffect` replaces `useMemo` for `listModels` fetch (with
+  cleanup abort); `controllerRef` (ref, not state) tracks in-flight AbortController;
+  stream updates throttled via `setInterval(STREAM_FLUSH_MS=60)`; unmount cleanup
+  aborts in-flight; `logInfo` shows only metadata, full prompt goes to `logDebug`.
+- **`dashboard.tsx`**: poll fetch wired with AbortController, abort on unmount.
+- **`main.tsx`**: class `ErrorBoundary` component added, wraps `<App/>` inside
+  `<React.StrictMode>`.
+
+#### Sim (constants dedup + chaos kill-at wiring)
+- **`dev.py`** (new): single source of truth for `JOIN_TOKEN`, `API_KEY`,
+  `ADMIN_KEY`, `ADMIN_HEADERS`.
+- **`__init__.py`**: re-exports constants from `dev.py`.
+- **`cluster.py`**, **`chaos.py`**, **`tests/helpers.py`** + 6 test files: all
+  import constants from `dain_sim.dev` instead of redeclaring.
+- **`chaos.py`**: `_parse_kill_at()` parses TIME with suffixes (ms/s/m/sec) +
+  target node id or `"sampling"`; wired through `run_chaos(kill_at_s, kill_target)`
+  to `_scenario_complete`. Default `"1s:sampling"`. `main()` parses `--kill-at`
+  and passes through.
+- **`tests/test_cluster_unit.py`** (new): 4 parametrized `_parse_kill_at` time
+  grammar cases + bad-time rejection + tests for `_spawn_flags`, `_node_env`,
+  `_graceful_stop`. All 8 pass.
+
+#### Gates
+Common **56 passed**, Coordinator **94 passed**, Node **36 passed** (7 new),
+Client **build clean** (tsc+vite), ruff **clean** across all Python packages.
+Sim unit tests (**8 passed**) clean; Sim integration tests have pre-existing
+`invalid_join_token` failures unrelated to this session's changes.

@@ -59,7 +59,8 @@ class DiscoverRequest:
 
     @classmethod
     def parse(cls, data: bytes) -> DiscoverRequest | None:
-        """Reject malformed/oversized datagrams and unknown ops (silent)."""
+        """Reject malformed/oversized datagrams, unknown ops, and wrong protocol
+        versions (silent)."""
         if not data or len(data) > MAX_DATAGRAM_BYTES:
             return None
         try:
@@ -69,7 +70,9 @@ class DiscoverRequest:
             token = obj.get("k")
             if not isinstance(token, str) or not token:
                 return None
-            return cls(version=int(obj.get("v", 0)), join_token=token)
+            if int(obj.get("v", 0)) != DISCOVERY_VERSION:
+                return None
+            return cls(version=DISCOVERY_VERSION, join_token=token)
         except (TypeError, ValueError):
             return None
 
@@ -90,7 +93,9 @@ class HelloReply:
             port = int(obj.get("port", 0))
             if not (1 <= port <= 65535):
                 return None
-            return cls(version=int(obj.get("v", 0)), port=port)
+            if int(obj.get("v", 0)) != DISCOVERY_VERSION:
+                return None
+            return cls(version=DISCOVERY_VERSION, port=port)
         except (TypeError, ValueError):
             return None
 

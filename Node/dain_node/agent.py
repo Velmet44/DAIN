@@ -83,8 +83,26 @@ class NodeAgent:
         self._seq = 0
         self._ws = None
         self._ws_lock = asyncio.Lock()
+        self._background_tasks: set[asyncio.Task] = set()
         self._bind_transport()
         psutil.cpu_percent(interval=None)  # prime the non-blocking sampler
+
+    def _spawn(self, coro, *, name: str) -> asyncio.Task:
+        """Track a fire-and-forget task so its exceptions are observed instead
+        of silently swallowed by the event loop's "Task exception was never
+        retrieved" black hole."""
+        task = asyncio.create_task(coro, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_task_done)
+        return task
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("background_task_failed name=%s err=%r", task.get_name(), exc)
 
     def _bind_transport(self) -> None:
         async def send_envelope(envelope: Envelope) -> None:
@@ -264,17 +282,23 @@ class NodeAgent:
             log.warning("malformed_server_message node=%s", self.identity.node_id)
             return
         if envelope.type == MessageType.JOB_ASSIGN:
-            assert isinstance(payload, JobAssign)
-            log.info("job_assign node=%s job=%s", self.identity.node_id, payload.job_id)
-            asyncio.create_task(
-                self.handler.on_job_assign(payload), name=f"assign-{payload.job_id}"
-            )
+            if isinstance(payload, JobAssign):
+                log.info("job_assign node=%s job=%s", self.identity.node_id, payload.job_id)
+                self._spawn(
+                    self.handler.on_job_assign(payload), name=f"assign-{payload.job_id}"
+                )
+            else:
+                log.warning("unexpected_job_assign_payload type=%s", type(payload).__name__)
         elif envelope.type == MessageType.ACTIVATION_RELAY:
-            assert isinstance(payload, ActivationRelayHeader)
-            await self.handler.on_activation_header(payload)
+            if isinstance(payload, ActivationRelayHeader):
+                await self.handler.on_activation_header(payload)
+            else:
+                log.warning("unexpected_activation_payload type=%s", type(payload).__name__)
         elif envelope.type == MessageType.STAGE_RETRY:
-            assert isinstance(payload, StageRetry)
-            await self.handler.on_stage_retry(payload)
+            if isinstance(payload, StageRetry):
+                await self.handler.on_stage_retry(payload)
+            else:
+                log.warning("unexpected_stage_retry_payload type=%s", type(payload).__name__)
         else:
             log.info("server_message node=%s type=%s", self.identity.node_id, envelope.type.value)
 

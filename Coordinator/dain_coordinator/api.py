@@ -50,7 +50,7 @@ from fastapi import (
     WebSocket,
     WebSocketDisconnect,
 )
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from dain_coordinator.config import find_base_dir, persist_config
@@ -1004,11 +1004,11 @@ async def completions(payload: CompletionRequest, request: Request):
     async def event_stream():
         try:
             yield _sse({"job_id": record.job_id, "status": "dispatched"})
-            deadline = asyncio.get_event_loop().time() + settings.job_timeout_s
+            deadline = asyncio.get_running_loop().time() + settings.job_timeout_s
             while True:
                 try:
                     frame = await asyncio.wait_for(
-                        queue.get(), timeout=max(0.1, deadline - asyncio.get_event_loop().time())
+                        queue.get(), timeout=max(0.1, deadline - asyncio.get_running_loop().time())
                     )
                 except TimeoutError:
                     jobs.fail_job(record.job_id, "job timeout")
@@ -1035,12 +1035,12 @@ async def completions(payload: CompletionRequest, request: Request):
     # Non-streaming: drain to the final frame.
     text_parts: list[str] = []
     final: dict = {}
-    deadline = asyncio.get_event_loop().time() + settings.job_timeout_s
+    deadline = asyncio.get_running_loop().time() + settings.job_timeout_s
     try:
         while True:
             try:
                 frame = await asyncio.wait_for(
-                    queue.get(), timeout=max(0.1, deadline - asyncio.get_event_loop().time())
+                    queue.get(), timeout=max(0.1, deadline - asyncio.get_running_loop().time())
                 )
             except TimeoutError:
                 jobs.fail_job(record.job_id, "job timeout")
@@ -1187,15 +1187,14 @@ def get_manifest(model_id: str, request: Request) -> ModelManifest:
 
 
 @model_router.get("/shard/{model_id}/{shard_id}")
-def get_shard(model_id: str, shard_id: str, request: Request) -> Response:
+def get_shard(model_id: str, shard_id: str, request: Request) -> FileResponse:
     settings = request.app.state.settings
     path = pathlib.Path(_shard_path(settings, model_id, shard_id))
     if not path.exists():
         raise HTTPException(status_code=404, detail="unknown shard")
-    return Response(
-        content=path.read_bytes(),
-        media_type="application/octet-stream",
-    )
+    # Stream the file in chunks: multi-GB shards must not buffer in RAM
+    # (path.read_bytes() would balloon coordinator memory per download).
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
 
 
 @model_router.get("/tokenizer/{model_id}")
@@ -1210,10 +1209,7 @@ def get_tokenizer(model_id: str, request: Request) -> Response:
     path = pathlib.Path(os.path.join(_model_dir(settings, model_id), file_name))
     if not path.exists():
         raise HTTPException(status_code=404, detail="tokenizer file missing")
-    return Response(
-        content=path.read_bytes(),
-        media_type="application/json",
-    )
+    return FileResponse(path, media_type="application/json", filename=file_name)
 
 
 # -- shard store helpers -----------------------------------------------------------

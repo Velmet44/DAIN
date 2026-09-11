@@ -59,6 +59,8 @@ COORDINATOR_ENV: dict[str, str] = {
     "discovery_enabled": "DAIN_DISCOVERY_ENABLED",
     "discovery_port": "DAIN_DISCOVERY_PORT",
     "node_project_dir": "DAIN_NODE_PROJECT_DIR",
+    "job_history_max": "DAIN_JOB_HISTORY_MAX",
+    "job_ttl_s": "DAIN_JOB_TTL_S",
 }
 
 # Default config.json written next to the coordinator on first run.  Key names
@@ -99,6 +101,8 @@ DEFAULT_CONFIG: dict[str, object] = {
     "discovery_enabled": True,
     "discovery_port": 8456,
     "node_project_dir": "",
+    "job_history_max": 4096,
+    "job_ttl_s": 3600.0,
 }
 
 
@@ -162,6 +166,11 @@ class CoordinatorSettings:
     # (`uv run --project <dir> python -m dain_node.import_gguf`). Empty = the
     # sibling `Node/` directory next to the coordinator.
     node_project_dir: str = ""
+    # Completed-job retention: terminal jobs are evicted once the history grows
+    # past `job_history_max` (oldest first) or a job has been terminal for
+    # longer than `job_ttl_s` — the tracker must not grow forever on long runs.
+    job_history_max: int = 4096
+    job_ttl_s: float = 3600.0
 
     @property
     def offline_timeout_s(self) -> float:
@@ -209,6 +218,8 @@ class CoordinatorSettings:
             in ("1", "true", "yes"),
             discovery_port=int(env.get("DAIN_DISCOVERY_PORT", "8456")),
             node_project_dir=env.get("DAIN_NODE_PROJECT_DIR", ""),
+            job_history_max=int(env.get("DAIN_JOB_HISTORY_MAX", "4096")),
+            job_ttl_s=float(env.get("DAIN_JOB_TTL_S", "3600")),
             log_json=env.get("DAIN_LOG_JSON", "").lower() in ("1", "true", "yes"),
         )
 
@@ -270,4 +281,6 @@ class CoordinatorSettings:
             discovery_enabled=_truthy(data.get("discovery_enabled", True)),
             discovery_port=int(data.get("discovery_port", 8456)),
             node_project_dir=str(data.get("node_project_dir", "") or ""),
+            job_history_max=int(data.get("job_history_max", 4096)),
+            job_ttl_s=float(data.get("job_ttl_s", 3600.0)),
         )

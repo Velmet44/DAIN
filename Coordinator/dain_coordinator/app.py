@@ -81,7 +81,7 @@ def create_app(
         registry.open()
         service = NodeService(registry, settings)
         connections = NodeConnections()
-        jobs = JobTracker()
+        jobs = JobTracker(max_jobs=settings.job_history_max, job_ttl_s=settings.job_ttl_s)
         relay = ActivationRelay(connections)
         placements = PlacementRecorder()
         faults = FaultManager(settings, jobs, connections, registry, service)

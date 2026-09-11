@@ -56,6 +56,7 @@ from dain_common.schemas import (
     SoftwareInfo,
     StageAssignment,
     TaskOutcome,
+    TokenBatch,
     parse_payload,
 )
 from dain_common.scoring import (
@@ -112,7 +113,6 @@ __all__ = [
     "StageAssignment",
     "TaskOutcome",
     "TokenBatch",
-    "Envelope",
     "credit",
     "estimate_prompt_tokens",
     "ewma",

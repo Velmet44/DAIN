@@ -33,6 +33,11 @@ class NodeConnections:
     def unregister(self, node_id: str, websocket: WebSocket) -> None:
         if self._conns.get(node_id) is websocket:
             del self._conns[node_id]
+            # Drop the per-connection lock too: a stale asyncio.Lock per
+            # disconnected node would otherwise orphan unboundedly across churn.
+            # Any in-flight send still holds its own reference, and a fresh
+            # connection creates a fresh lock.
+            self._locks.pop(node_id, None)
             log.info("connection_gone node=%s", node_id)
             if self.on_disconnect is not None:
                 self.on_disconnect(node_id)

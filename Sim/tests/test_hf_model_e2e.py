@@ -21,12 +21,8 @@ from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 from transformers import PreTrainedTokenizerFast
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
+from dain_sim.dev import ADMIN_HEADERS, ADMIN_KEY, API_KEY, JOIN_TOKEN
 from dain_sim.server import start_server, stop_server
-
-JOIN_TOKEN = "dain-dev-join-token"
-API_KEY = "dain-dev-key"
-ADMIN_KEY = "dain-dev-admin-key"
-ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
 MODEL_ID = "hf-e2e-llama"
 PROMPT = "hello world"
 MAX_TOKENS = 12

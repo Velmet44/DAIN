@@ -14,9 +14,8 @@ import httpx
 from dain_coordinator.settings import CoordinatorSettings
 from helpers import ADMIN_HEADERS, ADMIN_KEY
 
+from dain_sim.dev import JOIN_TOKEN
 from dain_sim.server import start_server, stop_server
-
-JOIN_TOKEN = "dain-dev-join-token"
 
 
 def test_reconnect_cycle(tmp_path) -> None:

@@ -92,9 +92,11 @@ class StageLatencyStats:
 
 
 class JobTracker:
-    def __init__(self) -> None:
+    def __init__(self, max_jobs: int = 4096, job_ttl_s: float = 3600.0) -> None:
         self.jobs: dict[str, JobRecord] = {}
         self._order: list[str] = []
+        self._max_jobs = max(1, max_jobs)
+        self._job_ttl_s = max(0.0, job_ttl_s)
         self.stage_stats = StageLatencyStats()
         # Set by the app: called once when a job reaches a terminal state, so
         # the S8 ledger can be emitted exactly once (S7 established the job
@@ -123,7 +125,52 @@ class JobTracker:
         )
         self.jobs[job_id] = record
         self._order.append(job_id)
+        self._evict()
         return record
+
+    def _evict(self) -> None:
+        """Bound memory on long runs: drop terminal jobs that sat past their TTL
+        and trim the newest-first history to `_max_jobs` when it exceeds it.
+
+        Active jobs are never evicted; the ledger already ran once for terminal
+        jobs (S8) so dropping the record only affects introspection. Jobs still
+        being drained by a live SSE generator (a non-null attached queue) are
+        kept until the client actually goes away.
+        """
+        now = time.time()
+        if self._job_ttl_s:
+            retired = 0
+            for job_id in list(self.jobs):
+                job = self.jobs[job_id]
+                if job.state not in (JobState.COMPLETED, JobState.FAILED):
+                    continue
+                finished_at = job.finished_at or job.created_at
+                if now - finished_at > self._job_ttl_s:
+                    del self.jobs[job_id]
+                    retired += 1
+            if retired:
+                log.info("jobs_evicted_ttl count=%d", retired)
+
+        terminal = [
+            jid
+            for jid in self._order
+            if self.jobs.get(jid) is not None
+            and self.jobs[jid].state in (JobState.COMPLETED, JobState.FAILED)
+        ]
+        overflow = len(terminal) - self._max_jobs
+        for jid in terminal:
+            if overflow <= 0:
+                break
+            if self.jobs[jid].queue is not None:
+                continue  # the SSE generator still holds a consumer
+            del self.jobs[jid]
+            log.info(
+                "job_evicted_history job=%s terminal=%d max=%d",
+                jid,
+                len(terminal),
+                self._max_jobs,
+            )
+            overflow -= 1
 
     def attach(self, job_id: str) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=4096)

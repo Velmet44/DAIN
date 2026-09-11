@@ -20,7 +20,8 @@ export function DashboardView({ baseUrl, apiKey }: Props) {
   useEffect(() => {
     logDebug("dashboard: initial load");
     let live = true;
-    clusterStatus(baseUrl, apiKey)
+    const controller = new AbortController();
+    clusterStatus(baseUrl, apiKey, controller.signal)
       .then((s) => {
         if (!live) return;
         logInfo(
@@ -30,12 +31,13 @@ export function DashboardView({ baseUrl, apiKey }: Props) {
         setError("");
       })
       .catch((err: Error) => {
-        if (!live) return;
+        if (!live || controller.signal.aborted) return;
         logError(`dashboard poll failed: ${err.message}`);
         setError(err.message);
       });
     return () => {
       live = false;
+      controller.abort();
     };
   }, [baseUrl, apiKey, tick]);
 

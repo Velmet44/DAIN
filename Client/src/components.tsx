@@ -1,21 +1,26 @@
-import { useCallback, useState } from "react";
+import { memo, useCallback, useMemo, useState } from "react";
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import type { ChatMessage } from "./api";
 import { logDebug, logInfo, logWarn } from "./logs";
 
-export function MessageBubble({
+function renderMarkdown(content: string): string {
+  // Model/user content is untrusted: sanitize the rendered markdown before it
+  // touches the DOM (no sanitizer here would be an XSS vector).
+  return DOMPurify.sanitize(marked.parse(content || "…", { async: false }) as string);
+}
+
+/** Memoized bubble: unchanged messages skip re-rendering entirely, and each
+ * bubble's markdown is parsed+cleaned only when its own content changes — the
+ * whole transcript is no longer re-parsed on every streamed token. */
+export const MessageBubble = memo(function MessageBubble({
   message,
   onStop,
 }: {
   message: ChatMessage;
   onStop?: () => void;
 }) {
-  // Model/user content is untrusted: sanitize the rendered markdown before it
-  // touches the DOM (no sanitizer here would be an XSS vector).
-  const html = DOMPurify.sanitize(
-    marked.parse(message.content || "…", { async: false }) as string,
-  );
+  const html = useMemo(() => renderMarkdown(message.content), [message.content]);
   return (
     <div className={`bubble ${message.role}`}>
       {message.role === "assistant" && message.streaming && (
@@ -26,7 +31,7 @@ export function MessageBubble({
       <div dangerouslySetInnerHTML={{ __html: html }} />
     </div>
   );
-}
+});
 
 export function useLocalStorage(key: string, initial: string): [string, (v: string) => void] {
   // Only persist values the user explicitly edits. On every fresh page load the

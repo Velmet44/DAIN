@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   defaultMaxTokens,
   defaultModel,
@@ -17,6 +17,10 @@ interface Props {
   setApiKey: (v: string) => void;
 }
 
+/** Streaming flushes are coalesced to this cadence so the growing transcript is
+ * not re-rendered (and re-marked-down) on every token. */
+const STREAM_FLUSH_MS = 60;
+
 export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -25,10 +29,17 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
   const [models, setModels] = useState<string[]>([]);
   const [status, setStatus] = useState("");
   const [streaming, setStreaming] = useState(false);
-  const [signal, setSignal] = useState<AbortController | null>(null);
+  const controllerRef = useRef<AbortController | null>(null);
 
-  useMemo(() => {
-    listModels(baseUrl, apiKey)
+  // Abort any in-flight completion when the view unmounts — the coordinator's
+  // SSE generator would otherwise keep pumping frames into a dead component.
+  useEffect(() => {
+    return () => controllerRef.current?.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    listModels(baseUrl, apiKey, controller.signal)
       .then((models) => {
         logOk(`model picker: ${models.join(", ") || "(none)"}`);
         setModels(models);
@@ -38,15 +49,20 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
         }
       })
       .catch((err: Error) => {
+        if (controller.signal.aborted) return; // unmounted / superseded
         logError(`models unavailable: ${err.message}`);
         setStatus(`models: ${err.message}`);
       });
-  }, [baseUrl, apiKey]);
+    return () => controller.abort();
+  }, [baseUrl, apiKey, modelId]);
 
   const send = async (prompt?: string) => {
     const text = (prompt ?? input).trim();
     if (!text || streaming || !modelId) return;
-    logInfo(`send model=${modelId} prompt="${text.slice(0, 80)}${text.length > 80 ? "…" : ""}" maxTokens=${maxTokens}`);
+    // Prompt content is debug-only: it must never reach the console in a
+    // production build.
+    logInfo(`send model=${modelId} promptChars=${text.length} maxTokens=${maxTokens}`);
+    logDebug(`prompt: ${text}`);
     setInput("");
     setMessages((m) => [
       ...m,
@@ -56,8 +72,19 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
     setStreaming(true);
     setStatus("");
     const controller = new AbortController();
-    setSignal(controller);
+    controllerRef.current = controller;
     let acc = "";
+    let committed = "";
+    const flush = () => {
+      if (acc === committed) return;
+      committed = acc;
+      setMessages((m) => {
+        const tail = [...m];
+        tail[tail.length - 1] = { role: "assistant", content: acc, streaming: true };
+        return tail;
+      });
+    };
+    const flusher = window.setInterval(flush, STREAM_FLUSH_MS);
     try {
       await streamCompletion(
         baseUrl,
@@ -66,12 +93,9 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
         (frame: SseFrame) => {
           if (frame.token) {
             acc += frame.token;
-            logDebug(`token frame: "${frame.token.length > 40 ? `${frame.token.slice(0, 40)}…` : frame.token}" (total ${acc.length} chars)`);
-            setMessages((m) => {
-              const tail = [...m];
-              tail[tail.length - 1] = { role: "assistant", content: acc, streaming: true };
-              return tail;
-            });
+            logDebug(
+              `token frame: "${frame.token.length > 40 ? `${frame.token.slice(0, 40)}…` : frame.token}" (total ${acc.length} chars)`,
+            );
           }
           if (frame.type === "final" || frame.type === "error") {
             if (frame.type === "error") logError(`stream error frame: ${frame.detail}`);
@@ -79,6 +103,7 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
           }
         },
       );
+      flush();
       setMessages((m) => {
         const tail = [...m];
         tail[tail.length - 1] = { role: "assistant", content: acc, streaming: false };
@@ -88,26 +113,27 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
       const aborted = controller.signal.aborted;
       if (aborted) logWarn(`completion aborted, ${acc.length} chars received`);
       else logError(`completion failed: ${(err as Error).message}`);
-      setStatus(`error: ${(err as Error).message}`);
+      setStatus(aborted ? "stopped" : `error: ${(err as Error).message}`);
       setMessages((m) => {
         const tail = [...m];
         tail[tail.length - 1] = {
           role: "assistant",
-          content: `⚠ ${(err as Error).message}`,
+          content: aborted ? acc || "⚠ stopped" : `⚠ ${(err as Error).message}`,
           streaming: false,
         };
         return tail;
       });
     } finally {
+      window.clearInterval(flusher);
       setStreaming(false);
-      setSignal(null);
+      controllerRef.current = null;
     }
   };
 
-  const stop = () => {
+  const stop = useCallback(() => {
     logInfo("stop requested");
-    signal?.abort();
-  };
+    controllerRef.current?.abort();
+  }, []);
 
   return (
     <div className="view">

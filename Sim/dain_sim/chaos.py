@@ -34,12 +34,8 @@ from dain_common.schemas import NodeState
 from dain_coordinator.settings import CoordinatorSettings
 from dain_node.shard_export import DEV_MODEL_ID, export_tiny_llama
 
+from dain_sim.dev import ADMIN_HEADERS, API_KEY, JOIN_TOKEN, ADMIN_KEY
 from dain_sim.server import start_server, stop_server
-
-JOIN_TOKEN = "dain-dev-join-token"
-API_KEY = "dain-dev-key"
-ADMIN_KEY = "dain-dev-admin-key"
-ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
 
 
 def _spawn_env(port: int, workdir: str, node_id: str) -> dict[str, str]:
@@ -150,6 +146,8 @@ async def run_chaos(
     layers_per_node_target: int = 4,
     prompt: str = "Once upon a time",
     workdir_root: str | None = None,
+    kill_at_s: float = 0.0,
+    kill_target: str = "sampling",
 ) -> dict:
     root = workdir_root or tempfile.mkdtemp(prefix="dain-chaos-")
     store_dir = os.path.join(root, "model_store")
@@ -190,7 +188,15 @@ async def run_chaos(
 
             if expect == "complete":
                 report.update(
-                    await _scenario_complete(client, server.base_url, procs, job_tokens, prompt)
+                    await _scenario_complete(
+                        client,
+                        server.base_url,
+                        procs,
+                        job_tokens,
+                        prompt,
+                        kill_at_s=kill_at_s,
+                        kill_target=kill_target,
+                    )
                 )
             elif expect == "degraded":
                 report.update(
@@ -214,14 +220,23 @@ async def run_chaos(
     return report
 
 
-async def _scenario_complete(client, base_url, procs, job_tokens, prompt) -> dict:
-    """Kill the sampling-stage node as soon as the job starts streaming; the
-    job must survive (stage retry onto a backup) and reach COMPLETED."""
+async def _scenario_complete(
+    client, base_url, procs, job_tokens, prompt, kill_at_s: float = 0.0, kill_target: str = "sampling"
+) -> dict:
+    """Kill a stage node mid-job; the job must survive (stage retry onto a
+    backup) and reach COMPLETED.
+
+    With `kill_target == "sampling"` (the historical behavior) the victim is the
+    node currently running the final sampling stage, chosen as soon as the first
+    token streams. `--kill-at TIME:NODE` instead waits TIME into the stream and
+    kills the named node, exercising the same retry path from a different point.
+    """
     job_id: str | None = None
     text: list[str] = []
     final: dict = {}
     killed = False
     result: dict = {}
+    stream_start = time.monotonic()
 
     async with client.stream(
         "POST",
@@ -241,7 +256,14 @@ async def _scenario_complete(client, base_url, procs, job_tokens, prompt) -> dic
             if frame.get("type") == "token":
                 text.append(frame["token"])
                 if job_id and not killed:
-                    victim = await _sampling_node(client, base_url, job_id)
+                    if kill_target == "sampling":
+                        victim = await _sampling_node(client, base_url, job_id)
+                    else:
+                        victim = kill_target
+                    if kill_at_s > 0:
+                        wait = kill_at_s - (time.monotonic() - stream_start)
+                        if wait > 0:
+                            await asyncio.sleep(wait)
                     killed = True
                     if victim in procs:
                         procs[victim].kill()
@@ -337,18 +359,56 @@ async def _scenario_reject(client, base_url, procs, job_tokens, prompt) -> dict:
     }
 
 
+def _parse_kill_at(spec: str) -> tuple[float, str]:
+    """Parse --kill-at TIME:NODE where NODE is a node id or the special marker
+    "sampling" (the node running the final sampling stage). Returns (seconds, target)."""
+    if ":" in spec:
+        raw_time, target = spec.split(":", 1)
+    else:
+        raw_time, target = spec, "sampling"
+    low = raw_time.strip().lower()
+    try:
+        if low.endswith("ms"):
+            kill_at_s = float(low[:-2]) / 1000.0
+        elif low.endswith("m"):
+            kill_at_s = float(low[:-1]) * 60.0
+        elif low.endswith("s") or low.endswith("sec"):
+            kill_at_s = float(low.removesuffix("sec").removesuffix("s"))
+        else:
+            kill_at_s = float(low)
+    except ValueError:
+        raise ValueError(f"--kill-at has an invalid TIME: {raw_time!r} (use e.g. 1s:node-03)") from None
+    return kill_at_s, target.strip()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="DAIN chaos harness (deterministic kills)")
     parser.add_argument("--nodes", type=int, default=6)
-    parser.add_argument("--kill-at", type=str, default="1s:sampling",
-                        help="TIME:NODE (accepted for CLI parity; the harness kills the "
-                             "sampling-stage node mid-job)")
+    parser.add_argument(
+        "--kill-at",
+        type=str,
+        default="1s:sampling",
+        help="TIME:NODE — kill the named node (or `sampling`) that far into the "
+             "job stream (e.g. 2s:node-03); `sampling` picks the final-stage node "
+             "on the first token",
+    )
     parser.add_argument("--expect", choices=["complete", "degraded", "reject"], default="complete")
     parser.add_argument("--tokens", type=int, default=40)
     args = parser.parse_args()
+    try:
+        kill_at_s, kill_target = _parse_kill_at(args.kill_at)
+    except ValueError as exc:
+        print(f"[chaos] {exc}", file=sys.stderr)
+        return 2
 
     result = asyncio.run(
-        run_chaos(node_count=args.nodes, expect=args.expect, job_tokens=args.tokens)
+        run_chaos(
+            node_count=args.nodes,
+            expect=args.expect,
+            job_tokens=args.tokens,
+            kill_at_s=kill_at_s,
+            kill_target=kill_target,
+        )
     )
     expected_key = {"complete": "completed", "degraded": "served", "reject": "rejected_cleanly"}[
         args.expect

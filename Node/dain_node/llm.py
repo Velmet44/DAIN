@@ -9,6 +9,7 @@ explicit weight mapping — only assigned layers are ever instantiated.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
 import hashlib
 import logging
@@ -31,6 +32,8 @@ from dain_node.byte_tokenizer import ByteTokenizer
 from dain_node.hf_tokenizer import HFTokenizer
 
 log = logging.getLogger("dain.node.llm")
+
+_CHUNK = 1 << 20  # 1 MiB stream chunks
 
 
 class ModelStoreClient:
@@ -59,7 +62,13 @@ class ModelStoreClient:
         return manifest
 
     async def ensure_shard(self, model_id: str, shard_id: str, content_hash: str) -> str:
-        """Download + verify one shard; returns the cached file path."""
+        """Download + verify one shard; returns the cached file path.
+
+        Streams the bytes to a temp file while hashing them incrementally, so a
+        multi-GB shard is neither double-loaded into RAM nor hashed separately
+        after download (the old path buffered `response.content` *and* hashed
+        the whole buffer again).
+        """
         model_cache = os.path.join(self.cache_dir, model_id)
         path = os.path.join(model_cache, f"{shard_id}.safetensors")
         if os.path.exists(path) and self._hash_file(path) == content_hash:
@@ -67,28 +76,39 @@ class ModelStoreClient:
         if self.base_url is None:
             raise RuntimeError("model store base URL not set yet")
         os.makedirs(model_cache, exist_ok=True)
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.get(
-                f"{self.base_url}/shard/{model_id}/{shard_id}", headers=self.auth
-            )
-            response.raise_for_status()
-            data = response.content
-        if hashlib.sha256(data).hexdigest() != content_hash:
-            raise RuntimeError(f"shard {shard_id} failed hash verification")
         # Unique temp name: two jobs can download the same missing shard
         # concurrently (both are spawned tasks), and a shared ".tmp" would let
         # their writes interleave into one corrupt file.
         tmp = f"{path}.{secrets.token_hex(4)}.tmp"
-        with open(tmp, "wb") as fh:
-            fh.write(data)
-        os.replace(tmp, path)
-        log.info("shard_cached model=%s shard=%s bytes=%d", model_id, shard_id, len(data))
+        hasher = hashlib.sha256()
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream(
+                    "GET", f"{self.base_url}/shard/{model_id}/{shard_id}", headers=self.auth
+                ) as response:
+                    response.raise_for_status()
+                    with open(tmp, "wb") as fh:
+                        async for chunk in response.aiter_bytes():
+                            fh.write(chunk)
+                            hasher.update(chunk)
+            if hasher.hexdigest() != content_hash:
+                raise RuntimeError(f"shard {shard_id} failed hash verification")
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+            raise
+        size = os.path.getsize(path)
+        log.info("shard_cached model=%s shard=%s bytes=%d", model_id, shard_id, size)
         return path
 
     @staticmethod
     def _hash_file(path: str) -> str:
+        hasher = hashlib.sha256()
         with open(path, "rb") as fh:
-            return hashlib.sha256(fh.read()).hexdigest()
+            for chunk in iter(lambda: fh.read(_CHUNK), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
 
     async def ensure_tokenizer(
         self, model_id: str, tokenizer_file: str, tokenizer_hash: str
@@ -102,17 +122,26 @@ class ModelStoreClient:
         if self.base_url is None:
             raise RuntimeError("model store base URL not set yet")
         os.makedirs(model_cache, exist_ok=True)
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.get(f"{self.base_url}/tokenizer/{model_id}", headers=self.auth)
-            response.raise_for_status()
-            data = response.content
-        if hashlib.sha256(data).hexdigest() != tokenizer_hash:
-            raise RuntimeError(f"tokenizer {file_name} failed hash verification")
         tmp = f"{path}.{secrets.token_hex(4)}.tmp"
-        with open(tmp, "wb") as fh:
-            fh.write(data)
-        os.replace(tmp, path)
-        log.info("tokenizer_cached model=%s file=%s bytes=%d", model_id, file_name, len(data))
+        hasher = hashlib.sha256()
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                async with client.stream(
+                    "GET", f"{self.base_url}/tokenizer/{model_id}", headers=self.auth
+                ) as response:
+                    response.raise_for_status()
+                    with open(tmp, "wb") as fh:
+                        async for chunk in response.aiter_bytes():
+                            fh.write(chunk)
+                            hasher.update(chunk)
+            if hasher.hexdigest() != tokenizer_hash:
+                raise RuntimeError(f"tokenizer {file_name} failed hash verification")
+            os.replace(tmp, path)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.remove(tmp)
+            raise
+        log.info("tokenizer_cached model=%s file=%s bytes=%d", model_id, file_name, os.path.getsize(path))
         return path
 
 

@@ -32,12 +32,8 @@ from dain_common.schemas import NodeState
 from dain_coordinator.settings import CoordinatorSettings
 from dain_node.shard_export import DEV_MODEL_ID, export_tiny_llama
 
+from dain_sim.dev import ADMIN_HEADERS, API_KEY, JOIN_TOKEN, ADMIN_KEY
 from dain_sim.server import start_server, stop_server
-
-JOIN_TOKEN = "dain-dev-join-token"
-API_KEY = "dain-dev-key"
-ADMIN_KEY = "dain-dev-admin-key"
-ADMIN_HEADERS = {"X-Admin-Key": ADMIN_KEY}
 
 
 @dataclass

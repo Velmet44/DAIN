@@ -100,6 +100,9 @@ class JobHandler:
         self._pending_header: ActivationRelayHeader | None = None
         self._send_lock = asyncio.Lock()
         self.node_lock = asyncio.Lock()
+        # Fire-and-forget step tasks are tracked so their exceptions surface in
+        # the log instead of vanishing into the event loop.
+        self._background: set[asyncio.Task] = set()
         # Activations arriving before the stage runtime is built (entry may prefill
         # immediately) are buffered here and drained in on_job_assign.
         self._early: dict[str, list[tuple[ActivationRelayHeader, bytes]]] = {}
@@ -113,19 +116,44 @@ class JobHandler:
     def set_store_base(self, base_url: str) -> None:
         self.store.set_base_url(base_url)
 
+    def _spawn_step(self, rt: JobRuntime, header: ActivationRelayHeader, payload: bytes) -> None:
+        task = asyncio.create_task(
+            self._run_step(rt, header, payload), name=f"step-{header.job_id}"
+        )
+        self._background.add(task)
+        task.add_done_callback(self._on_task_done)
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        self._background.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("job_task_failed name=%s err=%r", task.get_name(), exc)
+
+    async def shutdown(self) -> None:
+        for rt in self.jobs.values():
+            if rt.task is not None:
+                rt.task.cancel()
+        bg = list(self._background)
+        for task in bg:
+            task.cancel()
+        # Await *every* cancelled task (entry runners included) so generation
+        # has actually stopped before the stages are dropped; otherwise the
+        # process could exit mid-forward with live KV caches.
+        for task in list([rt.task for rt in self.jobs.values() if rt.task is not None]) + bg:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._stages.clear()
+        self.jobs.clear()
+        self._background.clear()
+
     async def warmup(self) -> None:
         if self.settings.model_id:
             try:
                 await self.store.fetch_manifest(self.settings.model_id)
             except Exception as exc:  # noqa: BLE001 — the model is optional at startup
                 log.warning("warmup_manifest_failed model=%s err=%s", self.settings.model_id, exc)
-
-    async def shutdown(self) -> None:
-        for rt in self.jobs.values():
-            if rt.task is not None:
-                rt.task.cancel()
-        self._stages.clear()
-        self.jobs.clear()
 
     # -- transport helpers -----------------------------------------------------------
 
@@ -284,7 +312,7 @@ class JobHandler:
             return
         # Acknowledge receipt so the sender can drop its replay buffer (S7).
         await self._status(rt, JobState.RUNNING, detail="step_ack")
-        asyncio.create_task(self._run_step(rt, header, payload), name=f"step-{header.job_id}")
+        self._spawn_step(rt, header, payload)
 
     async def on_stage_retry(self, retry: StageRetry) -> None:
         """Coordinator asks us (the failed stage's *upstream*) to replay the
