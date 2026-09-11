@@ -20,8 +20,17 @@ _SAFE_COMPONENT = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
 def is_safe_model_id(model_id: str) -> bool:
-    """True when *model_id* is a single safe directory component."""
-    return bool(model_id) and bool(_SAFE_COMPONENT.match(model_id))
+    """True when *model_id* is a single safe directory component.
+
+    Rejects "." / ".." (and Windows variants like ".. ") so a hostile id can
+    never make an `os.path.join` resolve outside the store directory.
+    """
+    if not model_id or _SAFE_COMPONENT.match(model_id) is None:
+        return False
+    # Windows normalizes trailing dots/spaces, so ".", "..", ".. ", "..." etc.
+    # all collapse onto the current or parent directory: reject any id that is
+    # entirely dots and spaces even though it matches the character class.
+    return bool(model_id.rstrip(". "))
 
 
 def load_manifest(store_dir: str, model_id: str) -> ModelManifest | None:

@@ -4,11 +4,16 @@ In standalone mode (``config.json`` exists next to the exe) the node watches
 for config edits and automatically restarts with the new settings.  In dev
 mode (no ``config.json``) behaviour is unchanged — settings come from
 environment variables.
+
+Alongside the agent, the node runs a small HTTP peer server that serves its
+cached shards to sibling nodes (P2P distribution): the agent advertises the
+peer URL to the coordinator, which routes its peers' downloads to it.
 """
 
 import asyncio
 import logging
 from pathlib import Path
+from urllib.parse import urlparse
 
 from dain_common.logging_setup import configure_logging
 
@@ -17,6 +22,7 @@ from dain_node.config import ConfigWatcher, find_base_dir, load_config, write_co
 from dain_node.discovery import discover_coordinator
 from dain_node.jobs import JobHandler
 from dain_node.llm import ModelStoreClient
+from dain_node.peer_server import PeerShardServer, resolve_lan_ip
 from dain_node.settings import DEFAULT_JOIN_TOKEN, NodeSettings
 
 
@@ -83,10 +89,37 @@ def main() -> int:
         )
 
         store = ModelStoreClient(cache_dir=settings.model_cache_dir)
+        store.set_peer_token(settings.join_token)
         handler = JobHandler(settings, store)
+        peer_server = None
+        peer_url = None
+        if settings.peer_enabled:
+            coord_host = urlparse(settings.coord_url).hostname
+            advertise = resolve_lan_ip(coord_host or None)
+            peer_server = PeerShardServer(
+                settings.model_cache_dir,
+                settings.peer_bind_host,
+                settings.peer_port,
+                advertise_host=advertise,
+                join_token=settings.join_token,
+            )
+
+        async def _run(
+            _peer_server=peer_server, _settings=settings, _handler=handler, _log=log
+        ) -> int:
+            nonlocal peer_url
+            if _peer_server is not None:
+                await _peer_server.start()
+                peer_url = _peer_server.url()
+                _log.info("peer_server_url=%s", peer_url)
+            try:
+                return await run_agent(_settings, _handler, peer_url=peer_url)
+            finally:
+                if _peer_server is not None:
+                    await _peer_server.stop()
 
         # Block until the agent exits (Ctrl+C, SIGTERM, or transport failure).
-        rc = asyncio.run(run_agent(settings, handler))
+        rc = asyncio.run(_run())
 
         # Check whether the config file changed while we were running.
         if watcher.check():

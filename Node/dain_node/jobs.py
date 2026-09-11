@@ -89,10 +89,19 @@ class JobRuntime:
 class JobHandler:
     """Agent-side job execution. Transport is injected (the agent owns the WS)."""
 
-    def __init__(self, settings: NodeSettings, store: ModelStoreClient) -> None:
+    def __init__(
+        self,
+        settings: NodeSettings,
+        store: ModelStoreClient,
+        *,
+        on_inventory_change=None,
+    ) -> None:
         torch.set_grad_enabled(False)  # inference-only agent
         self.settings = settings
         self.store = store
+        # Set by the agent: called after new shards land so the peer inventory
+        # (advertised to the coordinator) can be refreshed.
+        self.on_inventory_change = on_inventory_change
         self.send_envelope = None  # bound by the agent
         self.send_bytes = None
         self._stages: dict[tuple[str, int, int], StageModel] = {}
@@ -132,6 +141,7 @@ class JobHandler:
             log.error("job_task_failed name=%s err=%r", task.get_name(), exc)
 
     async def shutdown(self) -> None:
+        await self.store.close()
         for rt in self.jobs.values():
             if rt.task is not None:
                 rt.task.cancel()
@@ -377,6 +387,9 @@ class JobHandler:
         stage = self._stages.get(key)
         if stage is None:
             stage, _paths = await fetch_stage(self.store, rt.manifest, rt.layer_start, rt.layer_end)
+            if self.on_inventory_change is not None:
+                with contextlib.suppress(Exception):
+                    self.on_inventory_change()
             self._stages[key] = stage
         rt.stage = stage
         if rt.manifest.tokenizer_file is not None and not isinstance(rt.streamer, TokenStreamer):

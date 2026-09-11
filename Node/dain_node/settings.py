@@ -26,6 +26,12 @@ class NodeSettings:
     model_id: str | None = None
     model_cache_dir: str = "shard_cache"
     job_timeout_s: float = 120.0
+    # Peer-to-peer shard sharing (S11 extension): this node serves its cached
+    # shards to siblings over the LAN (port 0 = OS-assigned) and downloads from
+    # peers instead of always pulling from the coordinator's model store.
+    peer_enabled: bool = True
+    peer_bind_host: str = "0.0.0.0"
+    peer_port: int = 0
     # Stub network figures until the S10 measurement work (spec §6 notes they are
     # reported values; the coordinator's scoring treats all claims as unverified).
     net_bw_mbps: float = 100.0
@@ -54,6 +60,9 @@ class NodeSettings:
             model_id=env.get("DAIN_MODEL"),
             model_cache_dir=env.get("DAIN_MODEL_CACHE", "shard_cache"),
             job_timeout_s=float(env.get("DAIN_JOB_TIMEOUT_S", "120")),
+            peer_enabled=env.get("DAIN_PEER_ENABLED", "").lower() not in ("0", "false", "no"),
+            peer_bind_host=env.get("DAIN_PEER_HOST", "0.0.0.0"),
+            peer_port=int(env.get("DAIN_PEER_PORT", "0")),
             net_bw_mbps=float(env.get("DAIN_NET_BW_MBPS", "100")),
             net_lat_ms_p95=float(env.get("DAIN_NET_LAT_MS", "50")),
             log_json=env.get("DAIN_LOG_JSON", "").lower() in ("1", "true", "yes"),
@@ -82,6 +91,9 @@ class NodeSettings:
             model_id=config.get("model") or None,
             model_cache_dir=_resolve(config.get("cache_dir"), str(base_dir / "shard_cache")),
             job_timeout_s=float(config.get("job_timeout_s", 120.0)),
+            peer_enabled=bool(config.get("peer_enabled", True)),
+            peer_bind_host=str(config.get("peer_host", "0.0.0.0")),
+            peer_port=int(config.get("peer_port", 0)),
             net_bw_mbps=float(config.get("net_bw_mbps", 100.0)),
             net_lat_ms_p95=float(config.get("net_lat_ms", 50.0)),
             reconnect_min_s=float(config.get("reconnect_min_s", 0.5)),

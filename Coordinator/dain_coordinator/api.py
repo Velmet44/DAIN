@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import pathlib
+import random
 import secrets
 import shutil
 import time
@@ -1193,6 +1194,45 @@ def get_shard(model_id: str, shard_id: str, request: Request) -> FileResponse:
     # Stream the file in chunks: multi-GB shards must not buffer in RAM
     # (path.read_bytes() would balloon coordinator memory per download).
     return FileResponse(path, media_type="application/octet-stream", filename=path.name)
+
+
+@model_router.head("/shard/{model_id}/{shard_id}")
+def head_shard(model_id: str, shard_id: str, request: Request) -> Response:
+    """Shard size probe: nodes use `Content-Length` to plan parallel ranges."""
+    settings = request.app.state.settings
+    path = pathlib.Path(_shard_path(settings, model_id, shard_id))
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="unknown shard")
+    response = Response()
+    response.headers["Content-Length"] = str(path.stat().st_size)
+    response.headers["Accept-Ranges"] = "bytes"
+    return response
+
+
+@model_router.get("/peers/{model_id}/{shard_id}")
+def shard_peers(model_id: str, shard_id: str, request: Request) -> dict:
+    """Nodes whose cache already holds this shard, as HTTP peer URLs.
+
+    The requesting node downloads from peers first (each peer serves its own
+    cached copy at byte-range granularity) and only falls back to this
+    coordinator's store when no peer responds. Peers must be ONLINE *and*
+    currently connected (a stale registered row has no live bytes).
+    """
+    service: NodeService = request.app.state.service
+    connections = request.app.state.connections
+    me = request.headers.get("x-node-id", "")
+    peers = service.registry.peers_for_shard(model_id, shard_id, exclude=me)
+    urls: list[str] = []
+    for row in peers:
+        # Only live, currently-connected peers are useful sources of bytes.
+        if row.node_id == me:
+            continue
+        if row.state != NodeState.ONLINE or not connections.is_connected(row.node_id):
+            continue
+        if row.peer_url:
+            urls.append(row.peer_url.rstrip("/"))
+    random.shuffle(urls)
+    return {"model_id": model_id, "shard_id": shard_id, "peers": urls[:6]}
 
 
 @model_router.get("/tokenizer/{model_id}")

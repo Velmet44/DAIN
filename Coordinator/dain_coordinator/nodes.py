@@ -22,6 +22,7 @@ from dain_common.schemas import (
     NodeState,
     Register,
     RegisterAck,
+    ShardRef,
     parse_payload,
 )
 from dain_common.scoring import NodeReputation, ScoreResult, ewma, score_node
@@ -179,7 +180,13 @@ class NodeService:
 
     # -- heartbeats & metrics ------------------------------------------------------
 
-    def heartbeat(self, node_id: str, seq: int, metrics: MetricsReport | None) -> None:
+    def heartbeat(
+        self,
+        node_id: str,
+        seq: int,
+        metrics: MetricsReport | None,
+        cached_shards: tuple[ShardRef, ...] = (),
+    ) -> None:
         row = self.registry.get_node(node_id)
         if row is None:
             log.warning("heartbeat_from_unknown node=%s", node_id)
@@ -191,6 +198,11 @@ class NodeService:
         row.last_seq = seq
         row.last_heartbeat = time.time()
         row.uptime_ratio = ewma(row.uptime_ratio, 1.0, self.settings.uptime_alpha)
+        # Full replacement when the node reports inventory (None = "no change"
+        # on a regular beat, so silent heartbeats never wipe the list; an
+        # explicit empty tuple revokes shards the node no longer holds).
+        if cached_shards is not None:
+            row.cached_shards = cached_shards
         self._apply_metrics(row, metrics)
 
     def metrics_update(self, node_id: str, metrics: MetricsReport) -> None:
@@ -392,7 +404,7 @@ class NodeService:
 
         if envelope.type == MessageType.HEARTBEAT:
             assert isinstance(payload, Heartbeat)
-            self.heartbeat(node_id, payload.seq, payload.metrics)
+            self.heartbeat(node_id, payload.seq, payload.metrics, payload.cached_shards)
         elif envelope.type == MessageType.METRICS_REPORT:
             assert isinstance(payload, MetricsReport)
             self.metrics_update(node_id, payload)
@@ -435,6 +447,8 @@ class NodeService:
             last_seq=None,
             last_heartbeat=None,
             registered_at=now,
+            cached_shards=payload.cached_shards,
+            peer_url=payload.peer_url,
         )
 
     def _ack(

@@ -32,6 +32,7 @@ from dain_common.schemas import (
     MetricsReport,
     Register,
     RegisterAck,
+    ShardRef,
     StageRetry,
     parse_payload,
 )
@@ -73,9 +74,18 @@ class StopGuard:
 
 
 class NodeAgent:
-    def __init__(self, settings: NodeSettings, handler: JobHandler) -> None:
+    def __init__(
+        self,
+        settings: NodeSettings,
+        handler: JobHandler,
+        *,
+        peer_url: str | None = None,
+    ) -> None:
         self.settings = settings
         self.handler = handler
+        # Where siblings on the LAN can pull shards we have cached. Set when the
+        # node's peer server is alive; None disables peer serving/advertising.
+        self.peer_url = peer_url
         self.identity: IdentityState = IdentityState.load(
             settings.state_path
         ) or IdentityState.create(settings.state_path, settings.node_id)
@@ -84,8 +94,23 @@ class NodeAgent:
         self._ws = None
         self._ws_lock = asyncio.Lock()
         self._background_tasks: set[asyncio.Task] = set()
+        self._inventory: tuple[ShardRef, ...] = ()
+        self._inventory_dirty = True
+        handler.on_inventory_change = self._on_shards_cached
         self._bind_transport()
         psutil.cpu_percent(interval=None)  # prime the non-blocking sampler
+
+    # -- shard inventory ----------------------------------------------------------
+
+    def _on_shards_cached(self) -> None:
+        self._inventory_dirty = True
+
+    def _peer_inventory(self) -> tuple[ShardRef, ...]:
+        """Local cache inventory, lazily recomputed after new shards land."""
+        if self._inventory_dirty:
+            self._inventory = self.handler.store.cached_inventory()
+            self._inventory_dirty = False
+        return self._inventory
 
     def _spawn(self, coro, *, name: str) -> asyncio.Task:
         """Track a fire-and-forget task so its exceptions are observed instead
@@ -125,6 +150,8 @@ class NodeAgent:
             auth_token=self.identity.node_token or self.settings.join_token,
             manifest=probe(self.settings),
             agent_version=__version__,
+            cached_shards=self._peer_inventory(),
+            peer_url=self.peer_url,
         )
         response = await client.post(
             f"{self.settings.http_base_url}/node/register",
@@ -263,14 +290,29 @@ class NodeAgent:
                 await self._handle_server_message(message)
 
     async def _heartbeat_loop(self, ws, stop_event: asyncio.Event) -> None:
+        first = True
         while not stop_event.is_set():
+            # Advertise the shard inventory on the first beat and then only
+            # when it changed (new downloads); keeps heartbeats small normally.
+            # Omitting the field entirely (None) means "unchanged" so a silent
+            # beat never wipes the coordinator's copy of the inventory.
+            heartbeat_kwargs: dict[str, object] = {}
+            if first or self._inventory_dirty:
+                heartbeat_kwargs["cached_shards"] = self._peer_inventory()
+                self._inventory_dirty = False
             envelope = Envelope.wrap(
                 MessageType.HEARTBEAT,
-                Heartbeat(node_id=self.identity.node_id, seq=self._seq, metrics=self._metrics()),
+                Heartbeat(
+                    node_id=self.identity.node_id,
+                    seq=self._seq,
+                    metrics=self._metrics(),
+                    **heartbeat_kwargs,
+                ),
                 ts=time.time(),
             )
             await ws.send(envelope.model_dump_json())
             self._seq += 1
+            first = False
             with contextlib.suppress(asyncio.TimeoutError):
                 await asyncio.wait_for(stop_event.wait(), timeout=self.heartbeat_interval_s)
 
@@ -303,10 +345,12 @@ class NodeAgent:
             log.info("server_message node=%s type=%s", self.identity.node_id, envelope.type.value)
 
 
-async def run_agent(settings: NodeSettings, handler: JobHandler) -> int:
+async def run_agent(
+    settings: NodeSettings, handler: JobHandler, *, peer_url: str | None = None
+) -> int:
     stop = StopGuard()
     stop.install()
-    agent = NodeAgent(settings, handler)
+    agent = NodeAgent(settings, handler, peer_url=peer_url)
     try:
         await agent.run(stop.event)
     finally:

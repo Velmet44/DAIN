@@ -204,6 +204,8 @@ class Register(_Model):
     auth_token: str = Field(min_length=8, max_length=512)
     manifest: CapabilityManifest
     agent_version: str = "0.1.0"
+    cached_shards: tuple[ShardRef, ...] = ()
+    peer_url: str | None = Field(default=None, max_length=256)
 
 
 class RegisterAck(_Model):
@@ -234,6 +236,10 @@ class Heartbeat(_Model):
     node_id: str = Field(min_length=3, max_length=64)
     seq: int = Field(ge=0)
     metrics: MetricsReport | None = None
+    # Advertised shard inventory. `None` = "unchanged" (a regular silent beat),
+    # so the coordinator only rewrites a node's inventory when the node sends a
+    # value; an explicit empty tuple revokes shards the node no longer holds.
+    cached_shards: tuple[ShardRef, ...] | None = None
 
 
 class StageAssignment(_Model):

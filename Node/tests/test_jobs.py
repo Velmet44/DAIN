@@ -15,7 +15,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from safetensors.torch import load_file
 from dain_common.schemas import (
     ActivationRelayHeader,
     Envelope,
@@ -27,10 +26,12 @@ from dain_common.schemas import (
     StageRetry,
     parse_payload,
 )
+from safetensors.torch import load_file
+
 from dain_node.jobs import JobHandler
 from dain_node.llm import StageModel
-from dain_node.shard_export import export_tiny_llama
 from dain_node.settings import NodeSettings
+from dain_node.shard_export import export_tiny_llama
 
 
 @pytest.fixture(scope="module")
@@ -57,6 +58,10 @@ class FakeStore:
 
     def set_base_url(self, base_url: str) -> None:
         self.base = base_url
+
+    async def close(self) -> None:
+        """Result store teardown hook; the fake keeps no resources."""
+        return None
 
 
 class BoomStore(FakeStore):
@@ -249,17 +254,19 @@ def test_last_stage_ack_then_decode_to_final(exported, monkeypatch) -> None:
             before = rt.generated
             await feed(handler, hdr, data)
             await wait_until(
-                lambda: final_token_batch(envelopes) is not None or rt.generated > before
+                lambda before=before: final_token_batch(envelopes) is not None
+                or rt.generated > before
             )
             if final_token_batch(envelopes) is not None:
                 break
         if final_token_batch(envelopes) is None:
             await wait_until(lambda: final_token_batch(envelopes) is not None)
 
-        batches = events(envelopes, MessageType.TOKEN_BATCH)
         statuses = events(envelopes, MessageType.JOB_STATUS)
         # S7: every inbound step is acknowledged before its fire-and-forget runner.
-        assert any(s.detail == "step_ack" and s.state == JobState.RUNNING for s in statuses), statuses
+        assert any(
+            s.detail == "step_ack" and s.state == JobState.RUNNING for s in statuses
+        ), statuses
         final = final_token_batch(envelopes)
         assert final is not None and final.finish_reason in ("length", "eos")
         sampled = events(envelopes, MessageType.ACTIVATION_RELAY)
@@ -325,7 +332,9 @@ def test_stage_retry_replays_buffered_activation(exported, monkeypatch) -> None:
         assert len(relays) == relayed_before + 1, "retry must re-emit the buffered activation"
         replayed = relays[-1]
         assert replayed.attempt == 1 and replayed.is_final is False
-        assert sum(len(b) for b in raw) == bytes_before + len(rt.buffered[1]), "payload bytes re-sent"
+        assert sum(len(b) for b in raw) == bytes_before + len(rt.buffered[1]), (
+            "payload bytes re-sent"
+        )
 
         # Retries of a non-adjacent stage (this one included) must not emit.
         count = len(events(envelopes, MessageType.ACTIVATION_RELAY))
@@ -348,7 +357,11 @@ def test_setup_failure_emits_error_final(exported, monkeypatch) -> None:
         )
         await handler.on_job_assign(assign)
 
-        error = [b for b in events(envelopes, MessageType.TOKEN_BATCH) if b.finish_reason == "error"]
+        error = [
+            b
+            for b in events(envelopes, MessageType.TOKEN_BATCH)
+            if b.finish_reason == "error"
+        ]
         assert error and "boom" in (error[0].detail or "")
         assert "job-boom" not in handler.jobs
 

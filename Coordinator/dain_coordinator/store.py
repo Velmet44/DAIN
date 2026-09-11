@@ -16,7 +16,13 @@ import threading
 import time
 from dataclasses import dataclass
 
-from dain_common.schemas import CapabilityManifest, LedgerEvent, MetricsReport, NodeState
+from dain_common.schemas import (
+    CapabilityManifest,
+    LedgerEvent,
+    MetricsReport,
+    NodeState,
+    ShardRef,
+)
 
 log = logging.getLogger("dain.coordinator.store")
 
@@ -35,7 +41,9 @@ CREATE TABLE IF NOT EXISTS nodes (
     failure_rate      REAL NOT NULL DEFAULT 0.0,
     last_seq          INTEGER,
     last_heartbeat    REAL,
-    registered_at     REAL NOT NULL
+    registered_at     REAL NOT NULL,
+    cached_shards     TEXT NOT NULL DEFAULT '[]',
+    peer_url          TEXT
 );
 CREATE TABLE IF NOT EXISTS state_history (
     id          INTEGER PRIMARY KEY,
@@ -88,6 +96,8 @@ class NodeRow:
     last_seq: int | None
     last_heartbeat: float | None
     registered_at: float
+    cached_shards: tuple[ShardRef, ...] = ()
+    peer_url: str | None = None
 
     def heartbeat_ref(self) -> float:
         """Timestamp the timeout math runs against: last heartbeat, else registration."""
@@ -114,8 +124,23 @@ class SQLiteRegistry:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
         log.info("registry_opened path=%s", self._path)
+
+    def _migrate(self) -> None:
+        """Add columns that new agent versions need to pre-existing DBs.
+
+        Older registry DBs lack `cached_shards` / `peer_url`; CREATE TABLE IF
+        NOT EXISTS won't add them, so ALTER TABLE ADD COLUMN (cheap on SQLite).
+        """
+        cols = {r["name"] for r in self._require().execute("PRAGMA table_info(nodes)")}
+        if "cached_shards" not in cols:
+            self._require().execute(
+                "ALTER TABLE nodes ADD COLUMN cached_shards TEXT NOT NULL DEFAULT '[]'"
+            )
+        if "peer_url" not in cols:
+            self._require().execute("ALTER TABLE nodes ADD COLUMN peer_url TEXT")
 
     def close(self) -> None:
         if self._conn is not None:
@@ -146,6 +171,30 @@ class SQLiteRegistry:
             rows = cur.fetchall()
         return [self._row_from(r) for r in rows]
 
+    def peers_for_shard(
+        self, model_id: str, shard_id: str, exclude: str | None = None
+    ) -> list[NodeRow]:
+        """Nodes (other than `exclude`) whose cache holds this shard.
+
+        `state` is checked at the call site so scheduling stays the single
+        authority on node availability; here we just find who has the bytes.
+        """
+        with self._lock:
+            cur = self._require().execute(
+                "SELECT * FROM nodes WHERE node_id != ? AND peer_url IS NOT NULL"
+                " AND peer_url != ''",
+                (exclude or "",),
+            )
+            rows = cur.fetchall()
+        out: list[NodeRow] = []
+        for r in rows:
+            row = self._row_from(r)
+            if any(
+                s.model_id == model_id and s.shard_id == shard_id for s in row.cached_shards
+            ):
+                out.append(row)
+        return out
+
     def save_node(self, row: NodeRow) -> None:
         with self._lock:
             self._require().execute(
@@ -153,8 +202,9 @@ class SQLiteRegistry:
                 INSERT OR REPLACE INTO nodes (
                     node_id, node_token, agent_version, state, manifest, metrics,
                     score, score_components, overload_strikes, uptime_ratio,
-                    failure_rate, last_seq, last_heartbeat, registered_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    failure_rate, last_seq, last_heartbeat, registered_at,
+                    cached_shards, peer_url
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row.node_id,
@@ -171,6 +221,8 @@ class SQLiteRegistry:
                     row.last_seq,
                     row.last_heartbeat,
                     row.registered_at,
+                    json.dumps([s.model_dump(mode="json") for s in row.cached_shards]),
+                    row.peer_url,
                 ),
             )
             self._require().commit()
@@ -293,6 +345,10 @@ class SQLiteRegistry:
             last_seq=r["last_seq"],
             last_heartbeat=r["last_heartbeat"],
             registered_at=r["registered_at"],
+            cached_shards=tuple(
+                ShardRef.model_validate(s) for s in json.loads(r["cached_shards"] or "[]")
+            ),
+            peer_url=r["peer_url"] if "peer_url" in r.keys() else None,
         )
 
 
