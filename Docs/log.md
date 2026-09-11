@@ -1012,3 +1012,21 @@ first GGUF import surfaced (and fixed) a converter bug.
   validation, numeric bounds + live swap, unknown-field 422 / no-op), Node
   **29 passed** (rope_freqs regression folded into the existing 4), ruff
   clean; admin-page inline JS `node --check` clean.
+
+### 2026-09-10 — heartbeats keep placement capacity live (session 17, commit ef0127d)
+- **Problem:** capacity for placement was a registration-day snapshot — a node that joined
+  with little free RAM/VRAM stayed "small" forever, even after memory freed up (or vice
+  versa).
+- **Schema (Common):** `MetricsReport` gains `ram_free_gb` (mirrors `vram_free_gb`),
+  `ge=0`, optional. Round-trips through the heartbeat envelope like every payload.
+- **Node agent:** `_metrics()` fills `ram_free_gb` from `psutil.virtual_memory().available`
+  on every heartbeat (VRAM already flowed).
+- **Coordinator:** `_apply_metrics` now refreshes the persisted manifest's `cpu.ram_free_gb`
+  and `gpu.vram_free_gb` from each heartbeat before scoring — the node row's manifest is
+  saved every heartbeat, so the refreshed capacity sticks for the next `plan_placement`.
+- **Tests:** Common — schema accepts/round-trips `ram_free_gb`, rejects negative;
+  Coordinator — a node registered with 1 GB RAM becomes placeable after a heartbeat reports
+  8 GB (CPU), and a 2 GB-VRAM GPU node reflects 11.5 GB after its first heartbeat (GPU).
+- **Gates:** Common 56, Coordinator 79, Node 29 — all green; ruff clean. Also synced
+  `Sim/uv.lock` to the Node pyproject (picks up version 1.0.1 + `gguf` so the Sim
+  lockfile stops drifting).
