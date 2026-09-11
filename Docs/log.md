@@ -1118,3 +1118,8 @@ Sim unit tests (**8 passed**) clean; Sim integration tests have pre-existing
 - **`tests/test_registration.py`**: strengthened degraded test to assert the
   history `from_state` is `online` (regression guard for the bug).
 - **Gates:** Common 56, Coordinator 94, Node 36 — all green; ruff clean.
+- **Follow-up (18c):** `is_feasible()` also prefers `metrics.vram_free_gb` now —
+  it takes an optional `metrics` param (used by `score_node`; backward
+  compatible) so the hard-feasibility gate is as live as the score. Regression
+  test `test_feasibility_prefers_live_metrics` covers live-wins, boundary, and
+  fallback. Common 57, Coordinator 94, Node 36 — green; ruff clean.

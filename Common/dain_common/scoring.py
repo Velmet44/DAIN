@@ -76,17 +76,23 @@ class ScoreResult:
     components: dict[str, float] = field(default_factory=dict)
 
 
-def is_feasible(manifest: CapabilityManifest, required_vram_gb: float) -> bool:
+def is_feasible(
+    manifest: CapabilityManifest, required_vram_gb: float, metrics: MetricsReport | None = None
+) -> bool:
     """Hard feasibility: the node's free VRAM must cover the required shard.
 
     `required_vram_gb == 0` (CPU-servable partitions, embeddings/LM-head) is
-    feasible for any node, including CPU-only ones.
+    feasible for any node, including CPU-only ones. A live `metrics` report
+    (when supplied) takes precedence over the manifest's registration-day
+    snapshot, mirroring `score_node`.
     """
     if required_vram_gb <= 0:
         return True
     if manifest.gpu is None:
         return False
-    return manifest.gpu.vram_free_gb >= required_vram_gb
+    vram_free = metrics.vram_free_gb if metrics and metrics.vram_free_gb is not None else None
+    vram_free = vram_free if vram_free is not None else manifest.gpu.vram_free_gb
+    return vram_free >= required_vram_gb
 
 
 def score_node(
@@ -103,7 +109,7 @@ def score_node(
     optional metric fields fall back to manifest values where sensible.
     """
     config = config or ScoringConfig()
-    if not is_feasible(manifest, required_vram_gb):
+    if not is_feasible(manifest, required_vram_gb, metrics):
         return ScoreResult(score=0.0, feasible=False, components={})
 
     w, refs = config.weights, config.refs

@@ -104,6 +104,16 @@ def test_feasibility_hard_vram_gate() -> None:
     assert is_feasible(cpu_only, required_vram_gb=0.0)  # CPU-servable partition
 
 
+def test_feasibility_prefers_live_metrics() -> None:
+    poor = manifest(gpu(vram_free_gb=6.0))  # stale manifest snapshot: too small
+    live = MetricsReport(vram_free_gb=20.0)
+    assert not is_feasible(poor, required_vram_gb=8.0)
+    assert is_feasible(poor, required_vram_gb=8.0, metrics=live)
+    assert is_feasible(poor, required_vram_gb=20.0, metrics=live)  # live wins
+    # A report with no VRAM field falls back to the manifest.
+    assert not is_feasible(poor, required_vram_gb=8.0, metrics=MetricsReport())
+
+
 # -- golden scores --------------------------------------------------------------
 
 
