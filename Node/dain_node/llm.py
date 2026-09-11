@@ -15,6 +15,7 @@ import hashlib
 import logging
 import os
 import secrets
+import time
 
 import httpx
 import torch
@@ -35,6 +36,22 @@ log = logging.getLogger("dain.node.llm")
 
 _CHUNK = 1 << 20  # 1 MiB stream chunks
 
+_HASH_SUFFIX = ".sha256"
+
+
+def _read_chunk_size() -> int:
+    """Bigger read chunks keep the Python loop from stalling high-speed links.
+
+    httpx's default 64 KiB frames cap a 1 Gbps transfer at a few hundred MiB/s
+    because every byte goes through asyncio loop + sha256.update() per frame;
+    8 MiB frames keep the CPU far ahead of the NIC.
+    """
+    try:
+        limit = max(1, min(1 << 25, int(os.environ.get("DAIN_DOWNLOAD_CHUNK", "8388608"))))
+    except ValueError:
+        limit = 1 << 23
+    return limit
+
 
 class ModelStoreClient:
     def __init__(self, cache_dir: str) -> None:
@@ -48,6 +65,24 @@ class ModelStoreClient:
 
     def set_auth(self, node_id: str, node_token: str) -> None:
         self.auth = {"X-Node-Id": node_id, "X-Node-Token": node_token}
+
+    def _cached_hash_ok(self, path: str, content_hash: str) -> bool:
+        """Fast cache hit: trust a sidecar digest instead of re-hashing the file.
+
+        Re-hashing a ~1 GB shard on every job costs ~seconds of disk+CPU per
+        shard; the sidecar is written right after a verified download/verify, so
+        it is only stale when the file is externally replaced.
+        """
+        sidecar = path + _HASH_SUFFIX
+        try:
+            with open(sidecar, encoding="ascii") as fh:
+                return fh.read(64).strip() == content_hash
+        except OSError:
+            return False
+
+    def _write_hash_sidecar(self, path: str, content_hash: str) -> None:
+        with open(path + _HASH_SUFFIX, "w", encoding="ascii") as fh:
+            fh.write(content_hash)
 
     async def fetch_manifest(self, model_id: str, *, refresh: bool = False) -> ModelManifest:
         if not refresh and model_id in self._manifests:
@@ -78,9 +113,19 @@ class ModelStoreClient:
         """
         model_cache = os.path.join(self.cache_dir, model_id)
         path = os.path.join(model_cache, f"{shard_id}.safetensors")
-        if os.path.exists(path) and self._hash_file(path) == content_hash:
-            log.info("shard_hit model=%s shard=%s path=%s", model_id, shard_id, path)
-            return path
+        if os.path.exists(path):
+            if self._cached_hash_ok(path, content_hash):
+                log.info("shard_hit model=%s shard=%s path=%s", model_id, shard_id, path)
+                return path
+            # One-time migration: a pre-sidecar cache has no .sha256 yet. Verify
+            # in full once, write the sidecar, and avoid re-downloading ~1 GB.
+            try:
+                if self._hash_file(path) == content_hash:
+                    self._write_hash_sidecar(path, content_hash)
+                    log.info("shard_hit_verified model=%s shard=%s path=%s", model_id, shard_id, path)
+                    return path
+            except OSError:
+                pass
         if self.base_url is None:
             raise RuntimeError("model store base URL not set yet")
         os.makedirs(model_cache, exist_ok=True)
@@ -89,8 +134,10 @@ class ModelStoreClient:
         # their writes interleave into one corrupt file.
         tmp = f"{path}.{secrets.token_hex(4)}.tmp"
         hasher = hashlib.sha256()
+        started = time.monotonic()
+        chunk_size = _read_chunk_size()
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=120.0) as client:
                 async with client.stream(
                     "GET", f"{self.base_url}/shard/{model_id}/{shard_id}", headers=self.auth
                 ) as response:
@@ -99,20 +146,24 @@ class ModelStoreClient:
                     received = 0
                     last_pct = -1
                     with open(tmp, "wb") as fh:
-                        async for chunk in response.aiter_bytes():
+                        async for chunk in response.aiter_bytes(chunk_size):
                             fh.write(chunk)
                             hasher.update(chunk)
                             received += len(chunk)
                             if expected > 0:
                                 pct = int(100 * received / expected)
                                 if pct // 5 != last_pct // 5 or pct == 100:
+                                    elapsed = max(time.monotonic() - started, 1e-6)
+                                    mbps = received / elapsed / 1e6
                                     log.info(
-                                        "shard_download model=%s shard=%s progress=%d%% bytes=%d/%d",
+                                        "shard_download model=%s shard=%s progress=%d%% "
+                                        "bytes=%d/%d mbps=%.0f",
                                         model_id,
                                         shard_id,
                                         pct,
                                         received,
                                         expected,
+                                        mbps,
                                     )
                                     last_pct = pct
                             else:
@@ -125,12 +176,20 @@ class ModelStoreClient:
             if hasher.hexdigest() != content_hash:
                 raise RuntimeError(f"shard {shard_id} failed hash verification")
             os.replace(tmp, path)
+            self._write_hash_sidecar(path, content_hash)
         except BaseException:
             with contextlib.suppress(OSError):
                 os.remove(tmp)
             raise
         size = os.path.getsize(path)
-        log.info("shard_cached model=%s shard=%s bytes=%d", model_id, shard_id, size)
+        mbps = size / max(time.monotonic() - started, 1e-6) / 1e6
+        log.info(
+            "shard_cached model=%s shard=%s bytes=%d mbps=%.0f",
+            model_id,
+            shard_id,
+            size,
+            mbps,
+        )
         return path
 
     @staticmethod
@@ -148,14 +207,23 @@ class ModelStoreClient:
         model_cache = os.path.join(self.cache_dir, model_id)
         file_name = os.path.basename(tokenizer_file)
         path = os.path.join(model_cache, file_name)
-        if os.path.exists(path) and self._hash_file(path) == tokenizer_hash:
-            log.info("tokenizer_hit model=%s file=%s path=%s", model_id, file_name, path)
-            return path
+        if os.path.exists(path):
+            if self._cached_hash_ok(path, tokenizer_hash):
+                log.info("tokenizer_hit model=%s file=%s path=%s", model_id, file_name, path)
+                return path
+            try:
+                if self._hash_file(path) == tokenizer_hash:
+                    self._write_hash_sidecar(path, tokenizer_hash)
+                    log.info("tokenizer_hit_verified model=%s file=%s path=%s", model_id, file_name, path)
+                    return path
+            except OSError:
+                pass
         if self.base_url is None:
             raise RuntimeError("model store base URL not set yet")
         os.makedirs(model_cache, exist_ok=True)
         tmp = f"{path}.{secrets.token_hex(4)}.tmp"
         hasher = hashlib.sha256()
+        chunk_size = _read_chunk_size()
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 async with client.stream(
@@ -163,17 +231,23 @@ class ModelStoreClient:
                 ) as response:
                     response.raise_for_status()
                     with open(tmp, "wb") as fh:
-                        async for chunk in response.aiter_bytes():
+                        async for chunk in response.aiter_bytes(chunk_size):
                             fh.write(chunk)
                             hasher.update(chunk)
             if hasher.hexdigest() != tokenizer_hash:
                 raise RuntimeError(f"tokenizer {file_name} failed hash verification")
             os.replace(tmp, path)
+            self._write_hash_sidecar(path, tokenizer_hash)
         except BaseException:
             with contextlib.suppress(OSError):
                 os.remove(tmp)
             raise
-        log.info("tokenizer_cached model=%s file=%s bytes=%d", model_id, file_name, os.path.getsize(path))
+        log.info(
+            "tokenizer_cached model=%s file=%s bytes=%d",
+            model_id,
+            file_name,
+            os.path.getsize(path),
+        )
         return path
 
 
@@ -367,11 +441,19 @@ async def fetch_stage(
         layer_end,
         ",".join(shard_id for shard_id, _ in needed),
     )
+    # Parallel downloads: each stage pulls several ~0.5–1 GB shards over LAN, so
+    # serialize them would lock the stage behind ~N× the link time. gather() lets
+    # the streams run concurrently (the coordinator is async and serves them).
+    paths = (
+        await asyncio.gather(
+            *(store.ensure_shard(manifest.model_id, shard_id, content_hash) for shard_id, content_hash in needed)
+        )
+        if needed
+        else []
+    )
+    shard_paths = dict(zip((shard_id for shard_id, _ in needed), paths, strict=True))
     state: dict[str, torch.Tensor] = {}
-    shard_paths: dict[str, str] = {}
-    for shard_id, content_hash in needed:
-        path = await store.ensure_shard(manifest.model_id, shard_id, content_hash)
-        shard_paths[shard_id] = path
+    for path in paths:
         state.update(load_file(path))
     tokenizer_path: str | None = None
     if manifest.tokenizer_file is not None and manifest.tokenizer_hash is not None:
