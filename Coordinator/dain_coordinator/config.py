@@ -15,7 +15,12 @@ import os
 import sys
 from pathlib import Path
 
-from dain_coordinator.settings import COORDINATOR_ENV, DEFAULT_CONFIG, CoordinatorSettings
+from dain_coordinator.settings import (
+    COORDINATOR_ENV,
+    DEFAULT_CONFIG,
+    CoordinatorSettings,
+    harden_production_secrets,
+)
 
 log = logging.getLogger("dain.coordinator.config")
 
@@ -105,4 +110,5 @@ def resolve_settings(
         if env in os.environ:
             data[field] = os.environ[env]
 
-    return CoordinatorSettings.from_config(data, base), path, created
+    settings = harden_production_secrets(CoordinatorSettings.from_config(data, base))
+    return settings, path, created

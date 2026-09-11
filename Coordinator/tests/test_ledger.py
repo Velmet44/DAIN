@@ -10,6 +10,7 @@ import time
 
 import pytest
 from dain_common.schemas import (
+    JobState,
     ModelManifest,
     ShardRef,
     StageAssignment,
@@ -167,6 +168,39 @@ def test_ledger_failed_job_weights_zero(client: TestClient) -> None:
     # No stage finished: every final attempt is FAILED (§15 → ×0.0 credit).
     assert all(e["outcome"] == TaskOutcome.FAILED.value for e in events)
     assert all(e["credit"] == 0.0 for e in events)
+
+
+def test_ledger_running_acks_never_credit_failed_job(client: TestClient) -> None:
+    """A stage that acked RUNNING (or even streamed tokens) before a later job
+    failure must record FAILED, never SUCCESS — activity != a finished stage."""
+    jobs = client.app.state.jobs
+    ledger = client.app.state.ledger
+    record = jobs.create(
+        "dain-tiny-16L",
+        "Once upon a time",
+        {"max_tokens": 40, "temperature": 0.0},
+        MODEL,
+        api_key=API_KEY,
+    )
+    jobs.mark_dispatched(record.job_id, "node-0", STAGES)
+    job = jobs.get(record.job_id)
+    assert job is not None
+    now = time.time()
+    job.stage_started_at = {0: now - 3.0, 1: now - 2.5, 2: now - 2.0}
+
+    # The sampling stage acks RUNNING and starts emitting tokens…
+    jobs.on_job_status(record.job_id, 2, JobState.RUNNING, 0, None)
+    jobs.on_token_batch(
+        TokenBatch(job_id=record.job_id, tokens=("h", "e", "l", "l", "o"), is_final=False)
+    )
+    # …then the job dies mid-stream: nothing may look like a completed stage.
+    jobs.fail_job(record.job_id, "node-0 lost")
+
+    events = ledger.events_all()
+    assert len(events) == 3
+    assert all(e["outcome"] == TaskOutcome.FAILED.value for e in events)
+    assert all(e["credit"] == 0.0 for e in events)
+    assert all(e["compute_seconds"] > 0.0 for e in events)
 
 
 def test_ledger_dedupe_on_replay(client: TestClient) -> None:

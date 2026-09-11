@@ -10,8 +10,12 @@ from dain_coordinator.config import (
 )
 from dain_coordinator.settings import (
     COORDINATOR_ENV,
+    DEFAULT_ADMIN_API_KEY,
+    DEFAULT_API_KEY,
     DEFAULT_CONFIG,
+    DEFAULT_JOIN_TOKEN,
     CoordinatorSettings,
+    harden_production_secrets,
 )
 
 
@@ -137,3 +141,51 @@ def test_env_map_covers_every_default_key() -> None:
 
 def test_find_base_dir_points_to_project_root() -> None:
     assert (find_base_dir() / "dain_coordinator" / "__init__.py").is_file()
+
+
+def test_harden_replaces_default_secrets_when_exposed() -> None:
+    settings = harden_production_secrets(CoordinatorSettings(host="0.0.0.0"))
+    assert settings.join_token != DEFAULT_JOIN_TOKEN
+    assert settings.api_key != DEFAULT_API_KEY
+    assert settings.admin_api_key != DEFAULT_ADMIN_API_KEY
+    # Generated values must actually be credentials, not empty.
+    assert len(settings.api_key) >= 16
+
+
+def test_harden_keeps_defaults_on_loopback() -> None:
+    settings = harden_production_secrets(CoordinatorSettings(host="127.0.0.1"))
+    assert settings.join_token == DEFAULT_JOIN_TOKEN
+    assert settings.api_key == DEFAULT_API_KEY
+    assert settings.admin_api_key == DEFAULT_ADMIN_API_KEY
+
+
+def test_harden_keeps_explicit_secrets() -> None:
+    settings = harden_production_secrets(
+        CoordinatorSettings(
+            host="0.0.0.0",
+            join_token="explicit-join",
+            api_key="explicit-api",
+            admin_api_key="explicit-admin",
+        )
+    )
+    assert settings.join_token == "explicit-join"
+    assert settings.api_key == "explicit-api"
+    assert settings.admin_api_key == "explicit-admin"
+
+
+def test_harden_replaces_empty_secrets() -> None:
+    settings = harden_production_secrets(
+        CoordinatorSettings(host="0.0.0.0", join_token="", api_key="", admin_api_key="")
+    )
+    assert settings.join_token != ""
+    assert settings.api_key != ""
+    assert settings.admin_api_key != ""
+
+
+def test_resolve_hardens_default_secrets(tmp_path: Path) -> None:
+    # No config file and no env → the exposed 0.0.0.0 bind must not keep the
+    # source-checked-in defaults.
+    settings, _, _ = resolve_settings(tmp_path)
+    assert settings.join_token != DEFAULT_JOIN_TOKEN
+    assert settings.api_key != DEFAULT_API_KEY
+    assert settings.admin_api_key != DEFAULT_ADMIN_API_KEY

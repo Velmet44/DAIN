@@ -110,6 +110,26 @@ class PeeredOrigin(FakeOrigin):
         return super().__call__(request)
 
 
+class RangeIgnoringOrigin(FakeOrigin):
+    """Serves the full body for every GET — Range headers are ignored (HTTP 200)."""
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        rng = request.headers.get("range", "")
+        self.requests.append((request.method, request.url.host, path, rng))
+        if request.method == "HEAD" and "/shard/" in path:
+            return httpx.Response(
+                200,
+                headers={"Content-Length": str(len(self.data)), "Accept-Ranges": "bytes"},
+            )
+        if request.method == "GET" and path.endswith(f"/peers/{MODEL}/{SHARD}"):
+            return httpx.Response(200, json={"peers": []})
+        shard_paths = (f"/shard/{MODEL}/{SHARD}", f"/peer/shard/{MODEL}/{SHARD}")
+        if not any(path.endswith(sp) for sp in shard_paths):
+            return httpx.Response(404)
+        return httpx.Response(200, stream=FlakyStream(self.data))
+
+
 @pytest.fixture
 def origin():
     return FakeOrigin()
@@ -243,6 +263,29 @@ def test_failed_download_keeps_chunks_and_second_run_resumes(tmp_path) -> None:
         assert ranges == [f"bytes=0-{RD - 1}"]  # only the empty range was fetched
     finally:
         asyncio.run(close(store2))
+        os.environ.pop("DAIN_PARALLEL_CHUNKS", None)
+
+
+# -- Range-ignoring servers -------------------------------------------------------
+
+
+def test_range_ignoring_origin_falls_back_to_linear_get(tmp_path) -> None:
+    """A source (coordinator or peer) that answers ranged GETs with a full-body
+    200 must never be assembled chunk-by-chunk (byte misalignment); the whole
+    shard is re-streamed sequentially instead."""
+    origin = RangeIgnoringOrigin()
+    os.environ["DAIN_PARALLEL_CHUNKS"] = "4"
+    store = make_store(tmp_path, origin)
+    try:
+        path = asyncio.run(store.ensure_shard(MODEL, SHARD, HASH))
+        assert open(path, "rb").read() == DATA
+        gets = [(p, r) for (m, h, p, r) in origin.requests if m == "GET"]
+        ranged = [r for p, r in gets if r.startswith("bytes=")]
+        whole = [r for p, r in gets if not r]
+        assert ranged, "ranged path must be attempted before the fallback"
+        assert whole, "fallback must re-stream the full body un-ranged"
+    finally:
+        asyncio.run(close(store))
         os.environ.pop("DAIN_PARALLEL_CHUNKS", None)
 
 

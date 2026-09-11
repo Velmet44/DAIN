@@ -32,7 +32,7 @@ from dain_coordinator.monitor import HeartbeatMonitor
 from dain_coordinator.nodes import NodeService
 from dain_coordinator.partition import PlacementRecorder, recompute_pool
 from dain_coordinator.ratelimit import RateLimiter
-from dain_coordinator.settings import CoordinatorSettings
+from dain_coordinator.settings import CoordinatorSettings, harden_production_secrets
 from dain_coordinator.store import SQLiteRegistry
 
 log = logging.getLogger("dain.coordinator.app")
@@ -71,7 +71,8 @@ async def _watchdog_loop(faults, settings: CoordinatorSettings) -> None:
 def create_app(
     settings: CoordinatorSettings | None = None, settings_path: str | None = None
 ) -> FastAPI:
-    settings = settings or CoordinatorSettings.from_env()
+    if settings is None:
+        settings = harden_production_secrets(CoordinatorSettings.from_env())
     configure_logging(json_mode=settings.log_json)
     attach_ring()
 

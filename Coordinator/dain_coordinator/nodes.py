@@ -96,12 +96,28 @@ class NodeService:
         # cluster join token (self-heal: the node dropped its node_token and the
         # agent retries with the join token — admit it and rotate a fresh one so
         # it can authenticate heartbeats again).
-        node_token_ok = existing is not None and payload.auth_token == existing.node_token
-        join_token_ok = payload.auth_token == self.settings.join_token
+        node_token_ok = existing is not None and secrets.compare_digest(
+            payload.auth_token, existing.node_token
+        )
+        join_token_ok = payload.auth_token != "" and secrets.compare_digest(
+            payload.auth_token, self.settings.join_token
+        )
         if not (node_token_ok or join_token_ok):
             reason = "invalid node token" if existing is not None else "invalid join token"
             log.warning("register_rejected node=%s reason=%s", payload.node_id, reason)
             return self._ack(False, reason=reason)
+
+        # Join-token re-admission is for SELF-HEAL only: a node that dropped its
+        # per-node token proves itself with the cluster secret — but only while
+        # it is NOT actively serving. An ONLINE node must keep authenticating
+        # with its own token; otherwise anyone holding the (widely-broadcast)
+        # join token could impersonate and silently evict a working node.
+        if existing is not None and existing.state == NodeState.ONLINE and join_token_ok:
+            log.warning(
+                "register_rejected node=%s reason=join_token_cannot_displace_online",
+                payload.node_id,
+            )
+            return self._ack(False, reason="node is ONLINE; use its node token")
 
         reputation = (
             NodeReputation(uptime_ratio=existing.uptime_ratio, failure_rate=existing.failure_rate)

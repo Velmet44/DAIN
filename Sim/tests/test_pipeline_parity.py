@@ -20,6 +20,7 @@ from dain_node.shard_export import DEV_MODEL_ID, export_tiny_llama, tiny_config
 
 from dain_sim.dev import ADMIN_HEADERS, ADMIN_KEY, API_KEY, JOIN_TOKEN
 from dain_sim.server import start_server, stop_server
+
 PROMPT = "Once upon a time"
 MAX_TOKENS = 24
 
@@ -131,6 +132,7 @@ def test_pipeline_parity_four_agents(tmp_path) -> None:
             monitor_tick_s=0.25,
             api_key=API_KEY,
             admin_api_key=ADMIN_KEY,
+            join_token=JOIN_TOKEN,
             job_timeout_s=90.0,
             layers_per_node_target=4,
         )

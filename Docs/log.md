@@ -1172,3 +1172,47 @@ several peers in parallel.
 #### Gates
 Common ruff clean; **Coordinator 104 passed** (9 new), **Node 53 passed**
 (36 new), ruff **All checks passed** on every package. Sim untouched.
+
+## 2026-09-11 - S20: Auth & security hardening, ledger credit fix, minor sweep - "(to be committed)"
+
+- Coordinator settings.py/config.py: production secret hardening -
+  non-loopback host with a default/empty join token, API key, or admin key is
+  replaced at startup by `token_urlsafe(18)` (`harden_production_secrets`,
+  default-config values pinned by `test_coordinator_config.py`).
+- Registration auth (`nodes.py`): constant-time token comparison
+  (`secrets.compare_digest`); a join token can no longer displace an ONLINE
+  node - online nodes must re-authenticate with their per-node token (join-token
+  re-admission is self-heal for not-online nodes). New regression: displace +
+  re-admission tests in `test_registration.py`.
+- Ledger (`ledger.py`): SUCCESS is credited only when the job reached
+  COMPLETED (no more SUCCESS bookkeeping on RUNNING/activity frames);
+  `stage_finished_at` is written only on a COMPLETED ack or the last-stage
+  token-final edge, so an aborted stage no longer looks finished.
+- Fault manager (`faults.py`): entry-stage loss restarts the job from the
+  prompt (downstream caches would stream garbage from a lone entry reassign);
+  non-entry reassigns keep the completed prefix and replay via STAGE_RETRY.
+  New `test_faults.py` (3 tests).
+- Node KV-cache lifecycle (`jobs.py`): `begin_job()`/`end_job()` are now
+  scoped under `node_lock` so a staged KV cache cannot be torn down by a
+  concurrent generation; bootstrap builds under the lock then replays.
+- Node model store (`llm.py`): a source that answers a Range request with a
+  full-body HTTP 200 raises `RangeIgnoredError` and the shard download falls
+  back to a single linear GET (resume can no longer append misaligned bodies);
+  per-chunk `write_lock` removed (each chunk owns its file). New
+  `RangeIgnoringOrigin` regression in `test_download.py`.
+- Node peer server (`peer_server.py`): `_client_ok` uses
+  `hmac.compare_digest`.
+- Job tracker (`jobs.py`): `_order` history log is now capped and pruned of
+  TTL-retired ids (bounded memory on high-churn runs); the /v1/jobs view reports
+  `latency_ms` for intermediate stages via the ledger's terminal-edge clamp
+  (drops the S8 regression where relayed stages showed `None`). New
+  `test_jobs_tracker.py` (3 tests).
+- Node bumped to 1.1.0 (`__init__.py`/`pyproject.toml`/`uv.lock`);
+  Sim keeps agent version in sync for parity checks; Deploy `.env.example`
+  aligned; CI/devcontainers unchanged (Client dashboard poll already aborts
+  cleanly on tick/unmount).
+
+#### Gates
+Common: pytest OK, ruff clean. Coordinator: **113 passed**, ruff clean.
+Node: pytest OK, ruff clean. Sim: pytest OK (incl. 4-agent pipeline parity +
+2-agent HF e2e), ruff clean. Client `npm run build` OK (tsc + vite).

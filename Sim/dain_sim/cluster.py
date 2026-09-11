@@ -32,7 +32,7 @@ from dain_common.schemas import NodeState
 from dain_coordinator.settings import CoordinatorSettings
 from dain_node.shard_export import DEV_MODEL_ID, export_tiny_llama
 
-from dain_sim.dev import ADMIN_HEADERS, API_KEY, JOIN_TOKEN, ADMIN_KEY
+from dain_sim.dev import ADMIN_HEADERS, ADMIN_KEY, API_KEY, JOIN_TOKEN
 from dain_sim.server import start_server, stop_server
 
 
@@ -220,6 +220,8 @@ async def run_cluster(
         db_path=os.path.join(workdir_root, "coordinator.sqlite3"),
         model_store_dir=store_dir,
         heartbeat_interval_s=heartbeat_s,
+        join_token=JOIN_TOKEN,
+        api_key=API_KEY,
         admin_api_key=ADMIN_KEY,
     )
     server = await start_server(settings)

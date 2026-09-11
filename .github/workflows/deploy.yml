@@ -25,15 +25,16 @@ jobs:
         working-directory: Client
     env:
       # Baked into the static bundle so the site opens pre-configured.
-      # Set these to YOUR deployment before going live:
-      #   VITE_API_URL  = public coordinator origin, must be https://
-      #   VITE_API_KEY  = DAIN_API_KEY the coordinator runs with
-      #                   (remember: a static site exposes it; prototype posture)
-      #   VITE_MODEL_ID = model id served by the coordinator store
-      VITE_API_URL: "http://127.0.0.1:8000"
-      VITE_API_KEY: ""
-      VITE_MODEL_ID: "dain-tiny-16L"
-      VITE_DEFAULT_MAX_TOKENS: "64"
+      # Set these in repo Settings → Secrets and variables → Actions → Variables
+      # (or in a fork's secrets) before going live:
+      #   vars.DAIN_API_URL   — public coordinator origin, must be https:// for Pages
+      #   secrets.DAIN_API_KEY — DAIN_API_KEY the coordinator runs with
+      #                         (remember: a static site exposes it; prototype posture)
+      #   vars.DAIN_MODEL_ID  — model id served by the coordinator store
+      VITE_API_URL: ${{ vars.DAIN_API_URL || 'http://127.0.0.1:8000' }}
+      VITE_API_KEY: ${{ secrets.DAIN_API_KEY || '' }}
+      VITE_MODEL_ID: ${{ vars.DAIN_MODEL_ID || 'dain-tiny-16L' }}
+      VITE_DEFAULT_MAX_TOKENS: ${{ vars.DAIN_DEFAULT_MAX_TOKENS || '64' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4

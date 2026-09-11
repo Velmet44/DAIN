@@ -10,11 +10,11 @@ import subprocess
 import sys
 
 import pytest
+from dain_node.shard_export import DEV_MODEL_ID
 
 from dain_sim.chaos import _parse_kill_at
 from dain_sim.cluster import _graceful_stop, _node_env, _spawn_flags
 from dain_sim.dev import JOIN_TOKEN
-from dain_node.shard_export import DEV_MODEL_ID
 
 
 def test_spawn_flags_platform_consistent() -> None:

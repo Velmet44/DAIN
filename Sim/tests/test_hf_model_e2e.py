@@ -23,6 +23,7 @@ from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
 from dain_sim.dev import ADMIN_HEADERS, ADMIN_KEY, API_KEY, JOIN_TOKEN
 from dain_sim.server import start_server, stop_server
+
 MODEL_ID = "hf-e2e-llama"
 PROMPT = "hello world"
 MAX_TOKENS = 12
@@ -134,6 +135,7 @@ def test_hf_model_e2e_two_agents(tmp_path) -> None:
             monitor_tick_s=0.25,
             api_key=API_KEY,
             admin_api_key=ADMIN_KEY,
+            join_token=JOIN_TOKEN,
             job_timeout_s=90.0,
             layers_per_node_target=6,  # 12 layers → 2 stages
         )

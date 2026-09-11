@@ -178,6 +178,23 @@ class FaultManager:
     def _reassign(self, job: JobRecord, stage_idx: int, *, reason: str) -> None:
         if job.state in (JobState.COMPLETED, JobState.FAILED):
             return
+        # Entry stage (0): the KV prefix chain starts at the prompt, so a lone
+        # entry reassign cannot resume — live downstream stages still hold caches
+        # built on the old activations and would stream garbage (§13). Restart
+        # the whole job from the prompt instead; the re-fired JOB_ASSIGN is what
+        # revokes the old (possibly still-connected) entry task.
+        if stage_idx == 0:
+            if job.restarts >= self.settings.max_job_restarts:
+                log.error(
+                    "entry_restarts_exhausted job=%s restarts=%d reason=%s",
+                    job.job_id,
+                    job.restarts,
+                    reason,
+                )
+                self.jobs.fail_job(job.job_id, f"entry stage lost beyond max restarts ({reason})")
+                return
+            self._restart_from_entry(job)
+            return
         attempts = job.retries.get(stage_idx, 0)
         if attempts >= self.settings.max_stage_attempts:
             log.error(

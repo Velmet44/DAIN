@@ -23,7 +23,10 @@ from dain_common.schemas import (
     NetInfo,
     PowerInfo,
 )
+
 from dain_sim.dev import ADMIN_HEADERS, ADMIN_KEY, JOIN_TOKEN
+
+__all__ = ["ADMIN_HEADERS", "ADMIN_KEY", "JOIN_TOKEN"]
 
 
 async def register_node(

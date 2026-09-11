@@ -71,12 +71,21 @@ def test_register_issues_persistent_token(client: TestClient) -> None:
 def test_register_join_token_re_admits_existing_node(client: TestClient) -> None:
     """Self-heal: a node that lost its node_token re-registers with the join
     token (agent clears its token on 'invalid node token' and retries with the
-    join token); it must be re-admitted with a freshly rotated node_token."""
+    join token); it must be re-admitted with a freshly rotated node_token.
+
+    Re-admission by join token is only allowed for nodes that are NOT actively
+    ONLINE — an ONLINE node must authenticate with its own per-node token."""
     ack = client.post("/node/register", json=register_payload("node-a", auth_token=JOIN)).json()
     assert ack["accepted"] is True
     old_token = ack["node_token"]
 
-    # Simulate a node that lost its DB row / token: presents only the join token.
+    # A lost-token node has not been heartbeating, so it sits OFFLINE; move it
+    # there the way the agent would (deregister), then present only the join token.
+    off = client.post(
+        "/node/deregister", json={"node_id": "node-a", "auth_token": old_token}
+    ).json()
+    assert off["ok"] is True
+
     healed = client.post(
         "/node/register", json=register_payload("node-a", auth_token=JOIN)
     ).json()
@@ -95,6 +104,31 @@ def test_register_join_token_re_admits_existing_node(client: TestClient) -> None
         "/node/register", json=register_payload("node-a", auth_token=healed["node_token"])
     ).json()
     assert again["accepted"] is True
+
+
+def test_register_join_token_cannot_displace_online_node(client: TestClient) -> None:
+    """An ONLINE node keeps its identity: the (widely-shared) join token must
+    never rotate a working node's token or flip its state — that would let
+    anyone impersonate and evict a live member."""
+    ack = client.post("/node/register", json=register_payload("node-a", auth_token=JOIN)).json()
+    assert ack["accepted"] is True
+    token = ack["node_token"]
+    detail = client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()
+    assert detail["state"] == "online"
+
+    hijack = client.post(
+        "/node/register", json=register_payload("node-a", auth_token=JOIN)
+    ).json()
+    assert hijack["accepted"] is False
+    assert "token" in hijack["reason"]
+
+    # The node keeps its state and token (nothing was rotated).
+    assert client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["state"] == "online"
+    still = client.post(
+        "/node/register", json=register_payload("node-a", auth_token=token)
+    ).json()
+    assert still["accepted"] is True
+    assert still["node_token"] == token
 
 
 def test_register_low_score_rejected(client: TestClient, tmp_path) -> None:

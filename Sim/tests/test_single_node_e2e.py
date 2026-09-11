@@ -32,6 +32,7 @@ def test_single_node_streaming_e2e(tmp_path) -> None:
             monitor_tick_s=0.25,
             api_key=API_KEY,
             admin_api_key=ADMIN_KEY,
+            join_token=JOIN_TOKEN,
             job_timeout_s=60.0,
         )
         server = await start_server(settings)
@@ -71,9 +72,12 @@ def test_single_node_streaming_e2e(tmp_path) -> None:
                 else:
                     raise AssertionError("node never came ONLINE with a live WS")
 
-                # Auth is enforced on the client API.
+                # Auth is enforced on the client API: keyless localhost is
+                # trusted (session 15 console posture), but an explicit wrong
+                # key is rejected even from loopback.
                 unauth = await client.post(
                     f"{server.base_url}/v1/completions",
+                    headers={"X-API-Key": "wrong-key-1"},
                     json={"model_id": DEV_MODEL_ID, "prompt": "hi", "max_tokens": 4},
                 )
                 assert unauth.status_code == 401

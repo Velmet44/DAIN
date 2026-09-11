@@ -8,9 +8,11 @@ into the coordinator store. Everything is coordinator-derived and trusted:
 - `tokens_out` is the client-visible count the coordinator already streams;
   `tokens_in` is a deterministic prompt-length estimate.
 - `compute_seconds` is the observed per-stage wall time from the job tracker.
-- `outcome` per §15: the final attempt of a finished stage is SUCCESS; attempts
-  that were reassigned away are RETRIED_AWAY (×0.2); a stage left unfinished
-  when the job fails is FAILED (×0.0).
+- `outcome` per §15: when the job COMPLETES, the final attempt of every stage is
+  SUCCESS; attempts that were reassigned away are RETRIED_AWAY (×0.2); when the
+  job FAILS every stage's final attempt is FAILED (×0.0) — a stage is never
+  credited for a job that did not finish (a RUNNING ack is activity, not proof
+  of a completed stage).
 - a verification pass cross-checks each stage's duration against the p99 latency
   window and flags statistical outliers to the caller (score penalties, §15).
 
@@ -103,7 +105,11 @@ class Ledger:
         final_attempt = job.retries.get(stage_idx, 0)
         if attempt < final_attempt:
             return TaskOutcome.RETRIED_AWAY
-        if job.state == JobState.COMPLETED or stage_idx in job.stage_finished_at:
+        # SUCCESS is granted only when the whole job completed — a terminal job
+        # that FAILED leaves every stage's final attempt FAILED, even if a stage
+        # had streamed tokens or acked RUNNING before the failure (last-stage
+        # nodes must never be credited for a job they did not finish).
+        if job.state == JobState.COMPLETED:
             return TaskOutcome.SUCCESS
         return TaskOutcome.FAILED
 

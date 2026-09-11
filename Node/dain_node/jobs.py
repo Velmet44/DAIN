@@ -402,7 +402,10 @@ class JobHandler:
         """Build a reassigned stage, then replay any activations that arrived
         before this runtime existed (S7: a replacement resumes mid-stream)."""
         try:
-            await self._build_stage(rt)
+            # begin_job() (fresh KV cache) must not tear another generation's
+            # cache: build under the lock. The steps below re-acquire it each.
+            async with self.node_lock:
+                await self._build_stage(rt)
             for header, payload in buffered:
                 await self._run_step(rt, header, payload)
         except Exception:  # noqa: BLE001 — surface the failure to the client
@@ -415,20 +418,26 @@ class JobHandler:
         """Entry stage: owns the generation loop for the whole job."""
         job = rt.job
         try:
-            stage = await self._build_stage(rt)
             async with self.node_lock:  # exclusive: one generation per node
-                await self._status(rt, JobState.RUNNING, detail="entry_ready")
-                ids = stage.tokenizer.encode(job.prompt or "")
-                generator = (
-                    torch.Generator().manual_seed(job.params.seed)
-                    if job.params.seed is not None
-                    else None
-                )
-                if rt.first and rt.last:
-                    await self._run_single_stage(rt, stage, ids, generator)
-                else:
-                    await self._run_distributed_entry(rt, stage, ids, generator)
-                await self._status(rt, JobState.COMPLETED, detail=f"generated={rt.generated}")
+                stage = await self._build_stage(rt)
+                try:
+                    await self._status(rt, JobState.RUNNING, detail="entry_ready")
+                    ids = stage.tokenizer.encode(job.prompt or "")
+                    generator = (
+                        torch.Generator().manual_seed(job.params.seed)
+                        if job.params.seed is not None
+                        else None
+                    )
+                    if rt.first and rt.last:
+                        await self._run_single_stage(rt, stage, ids, generator)
+                    else:
+                        await self._run_distributed_entry(rt, stage, ids, generator)
+                    await self._status(rt, JobState.COMPLETED, detail=f"generated={rt.generated}")
+                finally:
+                    # end_job() (cache teardown) must stay under the lock too; a
+                    # concurrent step on the shared stage would otherwise read a
+                    # half-freed DynamicCache.
+                    rt.stage.end_job()
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — every failure must reach the client
@@ -437,9 +446,6 @@ class JobHandler:
             with contextlib.suppress(Exception):
                 await self._send_tokens(rt, [], is_final=True, finish_reason="error")
                 await self._status(rt, JobState.FAILED, detail=str(exc)[:200])
-        finally:
-            if rt.stage is not None:
-                rt.stage.end_job()
 
     async def _run_single_stage(
         self, rt: JobRuntime, stage: StageModel, ids: list[int], generator

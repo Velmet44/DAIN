@@ -21,12 +21,13 @@ from dain_sim.server import start_server, stop_server
 def test_reconnect_cycle(tmp_path) -> None:
     async def main() -> None:
         settings = CoordinatorSettings(
-            db_path=str(tmp_path / "coordinator.sqlite3"),
-            heartbeat_interval_s=1.0,
-            offline_after_missed=3,
-            monitor_tick_s=0.25,
-            admin_api_key=ADMIN_KEY,
-        )
+                db_path=str(tmp_path / "coordinator.sqlite3"),
+                heartbeat_interval_s=1.0,
+                offline_after_missed=3,
+                monitor_tick_s=0.25,
+                admin_api_key=ADMIN_KEY,
+                join_token=JOIN_TOKEN,
+            )
         server = await start_server(settings)
         workdir = tmp_path / "node"
         workdir.mkdir()

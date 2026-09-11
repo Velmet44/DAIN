@@ -46,6 +46,10 @@ _PEER_CACHE_TTL = 5.0
 _RANGE_RETRIES = 3
 
 
+class RangeIgnoredError(RuntimeError):
+    """Raised when a source returns HTTP 200 to a Range request (body not byte-aligned)."""
+
+
 def _read_chunk_size() -> int:
     """Bigger read chunks keep the Python loop from stalling high-speed links.
 
@@ -407,13 +411,11 @@ class ModelStoreClient:
         _write_chunk_state(chunk_dir, ranges)
 
         prog = _Progress(model_id, shard_id, total)
-        write_lock = asyncio.Lock()
         fetchers = [
             asyncio.create_task(
                 self._fetch_range(
                     client,
                     chunk_dir,
-                    write_lock,
                     prog,
                     model_id,
                     shard_id,
@@ -426,18 +428,38 @@ class ModelStoreClient:
             for i, (start, end) in enumerate(ranges)
         ]
         try:
-            results = await asyncio.gather(*fetchers)
-        finally:
-            for task in fetchers:
-                task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await asyncio.gather(*fetchers, return_exceptions=True)
-        for ok, err in results:
-            if not ok:
-                raise RuntimeError(
-                    f"shard {shard_id} range fetch failed: {err}"
-                ) from err
-        _assemble_chunks(chunk_dir, dst, total)
+            try:
+                results = await asyncio.gather(*fetchers)
+            finally:
+                for task in fetchers:
+                    task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await asyncio.gather(*fetchers, return_exceptions=True)
+            for ok, err in results:
+                if not ok:
+                    if all(
+                        not ok and isinstance(e, RangeIgnoredError)
+                        for ok, e in results
+                    ):
+                        raise RangeIgnoredError(
+                            f"shard {shard_id}: every source ignored Range"
+                        ) from err
+                    raise RuntimeError(
+                        f"shard {shard_id} range fetch failed: {err}"
+                    ) from err
+            _assemble_chunks(chunk_dir, dst, total)
+        except RangeIgnoredError:
+            # Every source ignored the Range header (full-body HTTP 200), so
+            # ranged chunks would be misaligned — never assemble them whole-body.
+            # Fall back to a single sequential stream instead.
+            log.warning(
+                "shard_range_fallback model=%s shard=%s — sources ignored Range; linear GET",
+                model_id,
+                shard_id,
+            )
+            with contextlib.suppress(OSError):
+                os.remove(dst)
+            await self._linear_fallback(client, sources, model_id, shard_id, dst, chunk_size)
 
     async def _probe_size(
         self, client: httpx.AsyncClient, model_id: str, shard_id: str
@@ -501,6 +523,10 @@ class ModelStoreClient:
             url = f"{base}/peer/shard/{model_id}/{shard_id}"
         async with client.stream("GET", url, headers=request_headers) as response:
             response.raise_for_status()
+            if resume and response.status_code != 206:
+                # Resume sent a Range header; a full-body 200 would append at
+                # the wrong offset. Skip the source (which the retry loop does).
+                raise RangeIgnoredError(f"{base} ignored Range (HTTP {response.status_code})")
             with open(dst, "ab") as fh:
                 async for chunk in response.aiter_bytes(chunk_size):
                     fh.write(chunk)
@@ -509,7 +535,6 @@ class ModelStoreClient:
         self,
         client: httpx.AsyncClient,
         chunk_dir: str,
-        write_lock: asyncio.Lock,
         prog: _Progress,
         model_id: str,
         shard_id: str,
@@ -522,7 +547,8 @@ class ModelStoreClient:
 
         Resumes at the chunk's current on-disk size; tries each source in
         order (peers first) with a small backoff, so a dropping hotspot link
-        never restarts the file from byte 0.
+        never restarts the file from byte 0. Each chunk owns its file, so the
+        parallel fetchers never contend on a shared write cursor.
         """
         start, end = byte_range
         chunk_path = os.path.join(chunk_dir, f"c{index}.part")
@@ -551,17 +577,24 @@ class ModelStoreClient:
                             "GET", url, headers=request_headers
                         ) as response:
                             response.raise_for_status()
-                            async with write_lock:
-                                with open(chunk_path, "ab") as fh:
-                                    # aiter_raw yields each chunk the transport
-                                    # delivers. aiter_bytes() would buffer into
-                                    # an 8 MiB frame and *discard* the partial
-                                    # on a mid-stream error, so a dropped
-                                    # hotspot would restart from byte 0.
-                                    async for chunk in response.aiter_raw():
-                                        fh.write(chunk)
-                                        local += len(chunk)
-                                        prog.add(len(chunk))
+                            if response.status_code != 206:
+                                # Range-ignoring server: a full-body 200 would
+                                # land at the wrong offset on resume and corrupt
+                                # the chunk. Skip the source; the caller's
+                                # linear fallback covers these servers.
+                                raise RangeIgnoredError(
+                                    f"{base} ignored Range (HTTP {response.status_code})"
+                                )
+                            with open(chunk_path, "ab") as fh:
+                                # aiter_raw yields each chunk the transport
+                                # delivers. aiter_bytes() would buffer into
+                                # an 8 MiB frame and *discard* the partial
+                                # on a mid-stream error, so a dropped
+                                # hotspot would restart from byte 0.
+                                async for chunk in response.aiter_raw():
+                                    fh.write(chunk)
+                                    local += len(chunk)
+                                    prog.add(len(chunk))
                     if local >= end - start:
                         return True, None
             except Exception as exc:  # noqa: BLE001

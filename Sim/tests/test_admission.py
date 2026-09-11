@@ -32,6 +32,7 @@ def test_admission_under_load(tmp_path) -> None:
             monitor_tick_s=0.25,
             api_key=API_KEY,
             admin_api_key=ADMIN_KEY,
+            join_token=JOIN_TOKEN,
             job_timeout_s=60.0,
             queue_limit=3,
             max_concurrent_per_key=2,

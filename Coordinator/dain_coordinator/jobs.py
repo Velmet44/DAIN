@@ -153,9 +153,8 @@ class JobTracker:
 
         terminal = [
             jid
-            for jid in self._order
-            if self.jobs.get(jid) is not None
-            and self.jobs[jid].state in (JobState.COMPLETED, JobState.FAILED)
+            for jid in self.jobs
+            if self.jobs[jid].state in (JobState.COMPLETED, JobState.FAILED)
         ]
         overflow = len(terminal) - self._max_jobs
         for jid in terminal:
@@ -171,6 +170,10 @@ class JobTracker:
                 self._max_jobs,
             )
             overflow -= 1
+        # The `_order` log exists for the admin history endpoint; drop ids not
+        # in `self.jobs` (TTL-retired) and cap the list so a high-churn run
+        # with many live jobs never grows it unboundedly.
+        self._order = [jid for jid in self._order if jid in self.jobs][-self._max_jobs :]
 
     def attach(self, job_id: str) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue(maxsize=4096)
@@ -229,8 +232,9 @@ class JobTracker:
             JobState.RETRYING,
         ):
             self._transition(job, JobState.RUNNING)
-        if state == JobState.RUNNING and stage_idx in job.stage_started_at:
-            job.stage_finished_at[stage_idx] = time.time()  # last activity per stage
+        # stage_finished_at is ONLY the terminal edge of a stage (a COMPLETED
+        # ack or the job final). RUNNING acks must never write it — otherwise a
+        # stage that later fails would still look finished and credit SUCCESS.
         if state == JobState.COMPLETED and job.state not in (
             JobState.COMPLETED,
             JobState.FAILED,
@@ -281,6 +285,13 @@ class JobTracker:
             )
             job.finish_reason = batch.finish_reason or "length"
             job.finished_at = time.time()
+            # The streaming final is the terminal edge of the reporting stage
+            # (the last/sampling stage in the pipeline). Intermediate stages are
+            # finished by their own COMPLETED acks; stages clamped only by the
+            # job's terminal edge stay unfinished so the latency window is not
+            # polluted by aborted runs.
+            if job.stages:
+                job.stage_finished_at.setdefault(job.stages[-1].stage_idx, job.finished_at)
             self._observe_stage_latencies(job)
             self._push(
                 job,
@@ -319,6 +330,20 @@ class JobTracker:
                 failed += 1
         return failed
 
+    def _stage_latency_ms(self, job: JobRecord, stage_idx: int) -> float | None:
+        # A stage reports its own finish only via a non-entry COMPLETED ack or
+        # the token-final edge; intermediate stages send per-step RUNNING acks
+        # (S8: RUNNING must never write stage_finished_at or a later failure
+        # would still look finished). Mirror the ledger's terminal-edge clamp so
+        # a started stage on a completed job still records real wall time.
+        started = job.stage_started_at.get(stage_idx)
+        if started is None:
+            return None
+        finished = job.stage_finished_at.get(stage_idx) or job.finished_at
+        if finished is None or finished <= started:
+            return None
+        return round((finished - started) * 1000, 2)
+
     def view(self, job_id: str) -> dict | None:
         job = self.jobs.get(job_id)
         if job is None:
@@ -343,16 +368,7 @@ class JobTracker:
                     "node_id": s.node_id,
                     "layer_start": s.layer_start,
                     "layer_end": s.layer_end,
-                    "latency_ms": (
-                        round(
-                            (job.stage_finished_at[s.stage_idx] - job.stage_started_at[s.stage_idx])
-                            * 1000,
-                            2,
-                        )
-                        if s.stage_idx in job.stage_finished_at
-                        and s.stage_idx in job.stage_started_at
-                        else None
-                    ),
+                    "latency_ms": self._stage_latency_ms(job, s.stage_idx),
                 }
                 for s in job.stages
             ],

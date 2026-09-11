@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import logging
 import os
 import socket
@@ -196,7 +197,9 @@ class PeerShardServer:
 
     def _client_ok(self, headers: dict[str, str]) -> bool:
         provided = headers.get("x-peer-token", "")
-        return bool(self._join_token) and provided == self._join_token
+        return bool(self._join_token) and hmac.compare_digest(
+            provided, self._join_token
+        )
 
     async def _respond(
         self, writer: asyncio.StreamWriter, status: bytes, media: str, body: bytes

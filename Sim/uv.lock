@@ -242,7 +242,7 @@ dev = [
 
 [[package]]
 name = "dain-node"
-version = "1.0.1"
+version = "1.1.0"
 source = { editable = "../Node" }
 dependencies = [
     { name = "dain-common" },

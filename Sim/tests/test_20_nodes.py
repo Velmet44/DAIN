@@ -11,6 +11,7 @@ from dain_coordinator.settings import CoordinatorSettings
 from helpers import (
     ADMIN_HEADERS,
     ADMIN_KEY,
+    JOIN_TOKEN,
     cpu_only_manifest,
     fake_node,
     gpu_manifest,
@@ -29,6 +30,7 @@ def test_twenty_nodes_sixty_seconds_stable(tmp_path) -> None:
         settings = CoordinatorSettings(
             db_path=str(tmp_path / "coordinator.sqlite3"),
             admin_api_key=ADMIN_KEY,
+            join_token=JOIN_TOKEN,
         )  # production timing
         cluster: ClusterServer = await start_server(settings)
         tokens: dict[str, str] = {}

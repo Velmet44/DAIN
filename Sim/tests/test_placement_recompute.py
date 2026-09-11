@@ -28,6 +28,7 @@ def test_placement_recompute_after_node_loss(tmp_path) -> None:
             monitor_tick_s=0.25,
             api_key=API_KEY,
             admin_api_key=ADMIN_KEY,
+            join_token=JOIN_TOKEN,
             # 4 stages do real CPU inference; on a 4-core host full-suite
             # contention can stretch a non-streaming run well past the default
             # 60 s — match the S5 parity test's generous bound (S5 lesson: tests

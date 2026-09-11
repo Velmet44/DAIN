@@ -34,7 +34,7 @@ from dain_common.schemas import NodeState
 from dain_coordinator.settings import CoordinatorSettings
 from dain_node.shard_export import DEV_MODEL_ID, export_tiny_llama
 
-from dain_sim.dev import ADMIN_HEADERS, API_KEY, JOIN_TOKEN, ADMIN_KEY
+from dain_sim.dev import ADMIN_HEADERS, ADMIN_KEY, API_KEY, JOIN_TOKEN
 from dain_sim.server import start_server, stop_server
 
 
@@ -160,6 +160,7 @@ async def run_chaos(
         offline_after_missed=3,
         monitor_tick_s=0.2,
         watchdog_tick_s=0.2,
+        join_token=JOIN_TOKEN,
         api_key=API_KEY,
         admin_api_key=ADMIN_KEY,
         job_timeout_s=90.0,
@@ -221,7 +222,13 @@ async def run_chaos(
 
 
 async def _scenario_complete(
-    client, base_url, procs, job_tokens, prompt, kill_at_s: float = 0.0, kill_target: str = "sampling"
+    client,
+    base_url,
+    procs,
+    job_tokens,
+    prompt,
+    kill_at_s: float = 0.0,
+    kill_target: str = "sampling",
 ) -> dict:
     """Kill a stage node mid-job; the job must survive (stage retry onto a
     backup) and reach COMPLETED.
@@ -377,7 +384,9 @@ def _parse_kill_at(spec: str) -> tuple[float, str]:
         else:
             kill_at_s = float(low)
     except ValueError:
-        raise ValueError(f"--kill-at has an invalid TIME: {raw_time!r} (use e.g. 1s:node-03)") from None
+        raise ValueError(
+            f"--kill-at has an invalid TIME: {raw_time!r} (use e.g. 1s:node-03)"
+        ) from None
     return kill_at_s, target.strip()
 
 

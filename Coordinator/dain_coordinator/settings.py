@@ -10,12 +10,16 @@ launchers like ``Scripts/start-samepc.ps1`` keep taking precedence.
 
 from __future__ import annotations
 
+import logging
 import os
-from dataclasses import dataclass, field
+import secrets
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from dain_common.accounting import CreditWeights
 from dain_common.config import ScoringConfig
+
+log = logging.getLogger("dain.coordinator.settings")
 
 DEFAULT_JOIN_TOKEN = "Jj3L7ewD"
 DEFAULT_API_KEY = "DzOjEXqs"
@@ -111,6 +115,41 @@ def _truthy(value: object) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+# Loopback hosts are not reachable from the network, so the baked-in dev
+# defaults are acceptable there. Any other bind is exposed.
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+
+
+def harden_production_secrets(settings: CoordinatorSettings) -> CoordinatorSettings:
+    """Replace secrets still at their well-known compile-time default.
+
+    A coordinator reachable from the network while running with a secret that is
+    checked into the source tree is effectively unauthenticated. This keeps the
+    ergonomic defaults for loopback-only dev but, for any exposed bind, swaps
+    each untouched default for a random value and warns loudly. Operators should
+    set the secrets explicitly via ``config.json`` or the ``DAIN_*`` env vars.
+    """
+    if settings.host in _LOOPBACK_HOSTS:
+        return settings
+    updates: dict[str, str] = {}
+    for field_name, default in (
+        ("join_token", DEFAULT_JOIN_TOKEN),
+        ("api_key", DEFAULT_API_KEY),
+        ("admin_api_key", DEFAULT_ADMIN_API_KEY),
+    ):
+        if getattr(settings, field_name) in (default, ""):
+            updates[field_name] = secrets.token_urlsafe(18)
+            log.warning(
+                "harden_secret field=%s in_use=well_known_default — generated a "
+                "random replacement; set it explicitly in config.json or the env "
+                "to keep it stable across restarts",
+                field_name,
+            )
+    if not updates:
+        return settings
+    return replace(settings, **updates)
 
 
 @dataclass(frozen=True)
