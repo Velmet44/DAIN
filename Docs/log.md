@@ -971,3 +971,44 @@ all** when opened on the same machine — remote hosts still need keys.
   without key / 200 with key; wrong key still 401 locally.
 - **Gates:** Coordinator **88 passed** (83 + 5), ruff clean. Node/Common/
   Client untouched.
+
+### 2026-09-11 — admin runtime settings + web-UI controls (session 16)
+
+The admin page gains a **Settings** card and a ledger drill-down; the real-world
+first GGUF import surfaced (and fixed) a converter bug.
+
+- **`GET /admin/settings`**: every live-editable setting with value/type/
+  env-override flag, plus restart-required fields (host/port, heartbeat &
+  watchdog timing, discovery, CORS, db_path) read-only. `PUT /admin/settings`
+  validates (pydantic bounds + path checks), swaps the live settings object
+  (`app.state.settings` + `NodeService.settings`), rebuilds the rate limiter
+  when `rate_limit_per_min` changes, rescans placements when
+  `model_store_dir` changes, and persists the **raw as-typed values** to
+  config.json (relative paths stay relative → folder moves keep working).
+  Editable live: `model_store_dir`, `node_project_dir`,
+  `max_completion_tokens`, `queue_limit`, `max_concurrent_per_key`,
+  `rate_limit_per_min`, `layers_per_node_target`, `backup_count`, `min_score`,
+  `job_timeout_s`.
+- **Admin UI**: new Settings card (all ten fields + Apply; env-wins-at-restart
+  warnings; restart-required chips), click a ledger-summary row for a per-node
+  event drill-down (last 40 events, verified/unverified with hover note),
+  header link to the local chat console (/msg). Card degrades to hidden on
+  401 like the others.
+- **Converter fix (real-world bug)**: the user's actual
+  `Llama-3.2-1B-Instruct-Q4_K_M.gguf` failed the tensor-mapping check —
+  Llama-3.x GGUFs carry a `rope_freqs.weight` rotary-inv-freq *cache* buffer
+  that HF recomputes from config. `_GGUF_IGNORE_TENSORS` now drops it (and
+  `rotary_emb.inv_freq`) before the strict load; the test GGUF writer includes
+  the buffer so every test exercises the path. Missing `lm_head` on tied
+  models stays exempt (confirmed on this tied 1B).
+- **Verified live**: that GGUF now imports cleanly — `llama-3.2-1b-instruct`,
+  4 fp16 shards (2858 MiB), ~30 s dequantize+shard.
+- **Ops fix during session**: the user's `Coordinator/config.json` pointed
+  `model_store_dir` at the (nonexistent) coordinator-local store, so the API
+  served 0 models; corrected to `../model_store` (applies at restart; the new
+  Settings card makes this a UI action from now on).
+- **Gates:** Coordinator **98 passed** (93 + 5 settings tests: GET shape,
+  live model-store swap + as-typed persistence + rescan, node_project_dir
+  validation, numeric bounds + live swap, unknown-field 422 / no-op), Node
+  **29 passed** (rope_freqs regression folded into the existing 4), ruff
+  clean; admin-page inline JS `node --check` clean.

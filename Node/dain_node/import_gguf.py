@@ -47,6 +47,10 @@ log = logging.getLogger("dain.node.import_gguf")
 
 MARKER_FILE = ".gguf-imports.json"
 _SAFE_ID = re.compile(r"[^a-z0-9_-]+")
+# Buffers llama.cpp writes that HF models recompute from config (rotary inv
+# freq caches) — present in real Llama-3.x GGUFs, not parameters; dropped
+# before load instead of failing the strict tensor-mapping check.
+_GGUF_IGNORE_TENSORS = frozenset({"rope_freqs.weight", "rotary_emb.inv_freq"})
 
 
 # -- gguf metadata ------------------------------------------------------------
@@ -224,9 +228,10 @@ def _load_llama_from_gguf(gguf: Path) -> LlamaForCausalLM:
     raw = {k: v for k, v in parsed["config"].items() if k != "_model_name_or_path"}
     config = LlamaConfig.from_dict(raw)
     model = LlamaForCausalLM(config)
-    missing, unexpected = model.load_state_dict(parsed["tensors"], strict=False, assign=True)
-    # A missing lm_head is legitimate (tied embeddings — synthesized by the
-    # caller); anything else means the GGUF is incomplete.
+    tensors = {k: v for k, v in parsed["tensors"].items() if k not in _GGUF_IGNORE_TENSORS}
+    missing, unexpected = model.load_state_dict(tensors, strict=False, assign=True)
+    # A missing lm_head is legitimate (tied embeddings — the caller synthesizes
+    # it or relies on tying); anything else means the GGUF is incomplete.
     if unexpected or [k for k in missing if k != "lm_head.weight"]:
         raise ValueError(
             f"GGUF tensors do not map onto a Llama model "

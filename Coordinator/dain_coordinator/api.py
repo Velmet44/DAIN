@@ -58,6 +58,7 @@ from dain_coordinator.jobs import ActivationRelay, JobTracker
 from dain_coordinator.logs import snapshot as log_snapshot
 from dain_coordinator.nodes import MessageOutcome, NodeService
 from dain_coordinator.partition import event_view, plan_placement
+from dain_coordinator.ratelimit import RateLimiter
 from dain_coordinator.settings import (
     COORDINATOR_ENV,
     DEFAULT_ADMIN_API_KEY,
@@ -438,6 +439,147 @@ def update_keys(payload: KeysUpdate, request: Request) -> KeyState:
 
 
 # -- admin controls: nodes, jobs, models, logs ------------------------------------
+
+
+# Settings editable live from the admin page (session 16). Each entry: the
+# field name → its input type; changing any of them swaps the live settings
+# object and persists to config.json. Fields NOT listed here (host/port,
+# heartbeat/watchdog timing, discovery, CORS, db_path) are built into the app,
+# monitor loops, or middleware at startup — the UI shows them read-only as
+# "restart required".
+LIVE_SETTINGS: dict[str, str] = {
+    "model_store_dir": "path",
+    "node_project_dir": "path",
+    "max_completion_tokens": "int",
+    "queue_limit": "int",
+    "max_concurrent_per_key": "int",
+    "rate_limit_per_min": "int",
+    "layers_per_node_target": "int",
+    "backup_count": "int",
+    "min_score": "float",
+    "job_timeout_s": "float",
+}
+RESTART_FIELDS = (
+    "host",
+    "port",
+    "db_path",
+    "heartbeat_interval_s",
+    "offline_after_missed",
+    "monitor_tick_s",
+    "min_stages",
+    "max_stages",
+    "watchdog_tick_s",
+    "stage_deadline_min_s",
+    "stage_deadline_max_s",
+    "max_stage_attempts",
+    "max_job_restarts",
+    "min_nodes",
+    "cors_origins",
+    "discovery_enabled",
+    "discovery_port",
+)
+
+
+class SettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model_store_dir: str | None = Field(default=None, min_length=1)
+    node_project_dir: str | None = None  # empty string = default sibling Node/
+    max_completion_tokens: int | None = Field(default=None, ge=1, le=32768)
+    queue_limit: int | None = Field(default=None, ge=1, le=4096)
+    max_concurrent_per_key: int | None = Field(default=None, ge=1, le=256)
+    rate_limit_per_min: int | None = Field(default=None, ge=0, le=100000)
+    layers_per_node_target: int | None = Field(default=None, ge=1, le=128)
+    backup_count: int | None = Field(default=None, ge=0, le=16)
+    min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    job_timeout_s: float | None = Field(default=None, ge=1.0, le=3600.0)
+
+
+def _settings_state(request: Request) -> dict:
+    settings = request.app.state.settings
+    env_overridden = {
+        field for field in LIVE_SETTINGS if COORDINATOR_ENV.get(field) in os.environ
+    }
+    fields = {
+        field: {
+            "value": getattr(settings, field),
+            "type": kind,
+            "env_overridden": field in env_overridden,
+        }
+        for field, kind in LIVE_SETTINGS.items()
+    }
+    return {
+        "settings": fields,
+        "restart": {field: getattr(settings, field) for field in RESTART_FIELDS},
+        "writable": bool(getattr(request.app.state, "settings_path", None)),
+    }
+
+
+@admin_router.get("/settings")
+def get_settings(request: Request) -> dict:
+    """Live-editable settings + restart-required fields, for the admin UI."""
+    return _settings_state(request)
+
+
+@admin_router.put("/settings")
+def update_settings(payload: SettingsUpdate, request: Request) -> dict:
+    """Apply runtime settings from the admin page.
+
+    Fields present in the body are validated, applied to the live settings
+    object immediately, and persisted (as-typed, so relative paths stay
+    portable) to ``config.json`` when one exists. ``model_store_dir`` triggers
+    a placement rescan; ``rate_limit_per_min`` rebuilds the limiter. Path
+    fields accept relative values resolved against the coordinator directory.
+    """
+    settings = request.app.state.settings
+    base_dir = find_base_dir()
+    changes: dict[str, object] = {}
+    for field in LIVE_SETTINGS:
+        value = getattr(payload, field)
+        if value is None or value == getattr(settings, field):
+            continue
+        if field == "model_store_dir":
+            store = pathlib.Path(str(value))
+            resolved = store if store.is_absolute() else base_dir / store
+            try:
+                resolved.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"model_store_dir unusable: {exc}"
+                ) from None
+        elif field == "node_project_dir" and str(value):
+            node = pathlib.Path(str(value))
+            resolved = node if node.is_absolute() else base_dir / node
+            if not (resolved / "pyproject.toml").is_file():
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"node_project_dir has no pyproject.toml: {resolved}",
+                )
+        changes[field] = value
+    if not changes:
+        return _settings_state(request)
+
+    new_settings = dataclass_replace(settings, **changes)
+    request.app.state.settings = new_settings
+    request.app.state.service.settings = new_settings
+    if "rate_limit_per_min" in changes:
+        request.app.state.rate_limiter = RateLimiter(new_settings.rate_limit_per_min)
+    if "model_store_dir" in changes:
+        request.app.state.recompute_pool("admin_settings")
+
+    persisted = False
+    path = getattr(request.app.state, "settings_path", None)
+    if path:
+        try:
+            persist_config(pathlib.Path(path), dict(changes))
+            persisted = True
+        except OSError as exc:
+            log.warning("settings_persist_failed path=%s error=%s", path, exc)
+    log.info("admin_settings_updated fields=%s persisted=%s", ",".join(changes), persisted)
+    state = _settings_state(request)
+    state["applied"] = sorted(changes)
+    state["persisted"] = persisted
+    return state
 
 
 @admin_router.post("/nodes/{node_id}/offline")

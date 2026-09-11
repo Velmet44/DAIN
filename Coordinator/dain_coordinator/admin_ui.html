@@ -16,6 +16,9 @@
     border-bottom: 1px solid #21262d; background: #161b22; position: sticky; top: 0; z-index: 5;
   }
   header h1 { font-size: 15px; margin: 0 12px 0 0; white-space: nowrap; }
+  header nav { display: flex; gap: 8px; margin-left: 8px; }
+  header nav a { color: #58a6ff; font-size: 12px; text-decoration: none; }
+  header nav a:hover { text-decoration: underline; }
   label { display: flex; align-items: center; gap: 6px; color: #9198a1; font-size: 12px; white-space: nowrap; }
   input {
     background: #0d1117; border: 1px solid #30363d; border-radius: 6px; color: #e6edf3;
@@ -76,6 +79,7 @@
 <body>
 <header>
   <h1>DAIN Coordinator</h1>
+  <nav><a href="/msg" title="local chat console">Chat console</a></nav>
   <label>Admin key <input id="adminKey" type="password" placeholder="X-Admin-Key"></label>
   <label>API key <input id="apiKey" type="password" placeholder="X-API-Key"></label>
   <label><input id="auto" type="checkbox" checked> auto 5s</label>
@@ -119,6 +123,26 @@
         </div>
       </div>
     </div>
+    <div class="card" id="settingsCard" hidden>
+      <h2>Settings <span class="tag" id="settingsNote"></span></h2>
+      <div class="keys">
+        <div class="krow"><label>Model store dir</label><input id="sModelStore" type="text" spellcheck="false"></div>
+        <div class="krow"><label>Node project dir</label><input id="sNodeProject" type="text" spellcheck="false" placeholder="(default: sibling Node/)"></div>
+        <div class="krow"><label>Max completion tokens</label><input id="sMaxTokens" type="number" min="1" max="32768"></div>
+        <div class="krow"><label>Queue limit</label><input id="sQueueLimit" type="number" min="1" max="4096"></div>
+        <div class="krow"><label>Max concurrent / key</label><input id="sMaxConc" type="number" min="1" max="256"></div>
+        <div class="krow"><label>Rate limit / min</label><input id="sRateLimit" type="number" min="0" max="100000"></div>
+        <div class="krow"><label>Layers / node target</label><input id="sLayersNode" type="number" min="1" max="128"></div>
+        <div class="krow"><label>Backup count</label><input id="sBackups" type="number" min="0" max="16"></div>
+        <div class="krow"><label>Min score</label><input id="sMinScore" type="number" min="0" max="1" step="0.01"></div>
+        <div class="krow"><label>Job timeout (s)</label><input id="sJobTimeout" type="number" min="1" max="3600"></div>
+        <div class="kactions">
+          <button id="applySettings">Apply settings</button>
+          <span id="settingsWarn" class="tag"></span>
+        </div>
+        <div class="krow" style="margin-top:8px"><label>Restart required</label><span id="sRestart" class="tag mono" style="flex:1"></span></div>
+      </div>
+    </div>
     <div class="card">
       <h2>Placements</h2>
       <div id="placements"></div>
@@ -131,6 +155,7 @@
         <thead><tr><th>Node</th><th>Success</th><th>Retried</th><th>Failed</th><th>Flagged</th><th>tokens out</th><th>credits</th></tr></thead>
         <tbody id="ledger"></tbody>
       </table>
+      <div id="ledgerDetail" class="detail-row" hidden></div>
     </div>
     <div class="card">
       <h2>Models</h2>
@@ -251,7 +276,7 @@ async function nodeDetail(nodeId) {
 
 function renderLedger(data) {
   const rows = (data.nodes || []).map(b => `
-    <tr>
+    <tr class="node" data-ledger="${esc(b.node_id)}">
       <td class="mono">${esc(b.node_id)}</td>
       <td class="num">${b.success}</td>
       <td class="num">${b.retried_away}</td>
@@ -266,6 +291,26 @@ function renderLedger(data) {
      <td class="num">${t.flagged ?? 0}</td><td class="num">${t.tokens_out ?? 0}</td>
      <td class="num">${Number(t.credits ?? 0).toFixed(2)}</td></tr>` ||
     `<tr><td colspan="7" class="tag">no ledger events yet</td></tr>`;
+  document.querySelectorAll("tr[data-ledger]").forEach(tr => tr.onclick = () => ledgerDetail(tr.dataset.ledger));
+}
+
+async function ledgerDetail(nodeId) {
+  const d = $("ledgerDetail");
+  if (!d.hidden && d.dataset.node === nodeId) { d.hidden = true; return; }
+  d.dataset.node = nodeId;
+  try {
+    const events = await api("/ledger/node/" + encodeURIComponent(nodeId), "api");
+    d.innerHTML = `<b class="mono">${esc(nodeId)}</b> — ${events.length} event(s)
+      ${events.length ? `<table><thead><tr><th>when</th><th>job</th><th>model</th><th>outcome</th><th>tokens</th><th>credits</th><th>verified</th></tr></thead><tbody>` +
+        events.slice(-40).reverse().map(e => `
+          <tr><td>${ago(e.ts)}</td><td class="mono">${esc(e.job_id || "")}</td><td class="mono">${esc(e.model_id || "")}</td>
+          <td>${esc(e.outcome || "")}</td><td class="num">${e.tokens_out ?? 0}</td>
+          <td class="num">${Number(e.credit ?? 0).toFixed(2)}</td>
+          <td>${e.verified ? '<span class="ok">yes</span>' : '<span class="err" title="' + esc(e.verification_note || "") + '">no</span>'}</td></tr>`).join("") +
+        `</tbody></table>` : ""}
+      <button onclick="this.closest('div').hidden=true" style="margin-top:6px">Close</button>`;
+    d.hidden = false;
+  } catch (e) { fail(e); }
 }
 
 function renderPlacements(pl) {
@@ -419,6 +464,55 @@ $("applyKeys").onclick = async () => {
   } catch (e) { fail(e); }
 };
 
+// -- settings ----------------------------------------------------------------
+const SETTINGS_FIELDS = {
+  model_store_dir: "sModelStore",
+  node_project_dir: "sNodeProject",
+  max_completion_tokens: "sMaxTokens",
+  queue_limit: "sQueueLimit",
+  max_concurrent_per_key: "sMaxConc",
+  rate_limit_per_min: "sRateLimit",
+  layers_per_node_target: "sLayersNode",
+  backup_count: "sBackups",
+  min_score: "sMinScore",
+  job_timeout_s: "sJobTimeout",
+};
+let settingsState = null;
+
+function paintSettings(state) {
+  settingsState = state;
+  Object.entries(SETTINGS_FIELDS).forEach(([f, id]) => { $(id).value = state.settings[f] ? state.settings[f].value : ""; });
+  const over = Object.entries(state.settings).filter(([, v]) => v.env_overridden).map(([f]) => f);
+  $("settingsNote").textContent = state.writable ? "applied live + persisted to config.json" : "applied live, in-memory only (no config file)";
+  $("settingsWarn").textContent = over.length ? "env still wins at restart for: " + over.join(", ") : "";
+  $("sRestart").textContent = Object.entries(state.restart).map(([k, v]) => k + "=" + v).join("  ·  ");
+  $("settingsCard").hidden = false;
+}
+
+async function loadSettings() {
+  try { paintSettings(await api("/admin/settings", "admin")); }
+  catch (e) {
+    if (String(e.message || e).startsWith("401")) { $("settingsCard").hidden = true; return; }
+    throw e;
+  }
+}
+
+$("applySettings").onclick = async () => {
+  if (!settingsState) return;
+  const body = {};
+  Object.entries(SETTINGS_FIELDS).forEach(([f, id]) => {
+    const raw = $(id).value.trim();
+    if (String(settingsState.settings[f]?.value ?? "") === raw) return;
+    body[f] = f === "model_store_dir" || f === "node_project_dir" || isNaN(Number(raw)) ? raw : Number(raw);
+  });
+  if (!Object.keys(body).length) { ok("no setting changes"); return; }
+  try {
+    const res = await api("/admin/settings", "admin", { method: "PUT", body });
+    paintSettings(res);
+    ok("settings applied" + (res.persisted ? " + persisted" : "") + (res.applied.includes("model_store_dir") ? " · placements rescanned" : ""));
+  } catch (e) { fail(e); }
+};
+
 $("refreshLogs").onclick = loadLogs;
 $("exportJson").onclick = () => exportLedger("json");
 $("exportCsv").onclick = () => exportLedger("csv");
@@ -495,6 +589,7 @@ async function refresh() {
     catch (e) { if (!String(e.message || e).startsWith("401")) throw e; }
     if ($("logAuto").checked) loadLogs();
     await loadKeys();
+    await loadSettings();
     await loadGgufs();
   } catch (e) { fail(e); }
 }

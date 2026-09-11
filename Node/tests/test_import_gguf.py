@@ -102,6 +102,11 @@ def write_tiny_gguf(path, *, layers: int = 8, arch: str = "llama") -> tuple[dict
         t(g + "ffn_down.weight", state[p + "mlp.down_proj.weight"])
     t("output_norm.weight", state["model.norm.weight"])
     t("output.weight", state["lm_head.weight"])
+    # Real Llama-3.x GGUFs carry this rotary-inv-freq cache buffer; the
+    # converter must drop it instead of failing the tensor-mapping check.
+    head_dim = hidden // heads
+    inv_freq = 1.0 / (cfg.rope_theta ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    w.add_tensor("rope_freqs.weight", inv_freq.numpy())
 
     w.write_header_to_file()
     w.write_kv_data_to_file()

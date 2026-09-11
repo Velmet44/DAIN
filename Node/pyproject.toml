@@ -1,6 +1,6 @@
 [project]
 name = "dain-node"
-version = "1.0.0"
+version = "1.0.1"
 description = "DAIN compute-node agent: registration, heartbeats, model executors"
 requires-python = ">=3.12"
 dependencies = [
