@@ -191,6 +191,32 @@ class NodeService:
         self._apply_metrics(row, metrics)
 
     def _apply_metrics(self, row: NodeRow, metrics: MetricsReport | None) -> None:
+        # Capacity numbers drift (apps open/close) while the manifest snapshot
+        # is from registration day — refresh free RAM/VRAM from live metrics so
+        # placement feasibility uses current memory, not stale memory (S17).
+        if metrics is not None:
+            manifest = row.manifest
+            if metrics.ram_free_gb is not None and manifest.cpu.ram_free_gb != metrics.ram_free_gb:
+                manifest = manifest.model_copy(
+                    update={
+                        "cpu": manifest.cpu.model_copy(
+                            update={"ram_free_gb": metrics.ram_free_gb}
+                        )
+                    }
+                )
+            if (
+                metrics.vram_free_gb is not None
+                and manifest.gpu is not None
+                and manifest.gpu.vram_free_gb != metrics.vram_free_gb
+            ):
+                manifest = manifest.model_copy(
+                    update={
+                        "gpu": manifest.gpu.model_copy(
+                            update={"vram_free_gb": metrics.vram_free_gb}
+                        )
+                    }
+                )
+            row.manifest = manifest
         reputation = NodeReputation(uptime_ratio=row.uptime_ratio, failure_rate=row.failure_rate)
         score = self._score(row.manifest, metrics, reputation)
         row.metrics = metrics if metrics is not None else row.metrics

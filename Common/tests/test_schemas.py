@@ -16,6 +16,7 @@ from dain_common import (
     JobState,
     LedgerEvent,
     MessageType,
+    MetricsReport,
     ModelManifest,
     NetInfo,
     NodeState,
@@ -286,3 +287,19 @@ def test_manifest_accepts_tokenizer_pair() -> None:
 def test_manifest_rejects_half_tokenizer_tuple() -> None:
     with pytest.raises(ValidationError, match="set together"):
         model_manifest(tokenizer_file="tokenizer.json")
+
+
+def test_metrics_report_accepts_ram_free_gb() -> None:
+    m = MetricsReport(ram_free_gb=3.6, vram_free_gb=11.0)
+    assert m.ram_free_gb == 3.6
+    # Round-trips through a heartbeat envelope like every other payload (S17).
+    hb = Heartbeat(node_id="node-x", seq=0, metrics=m)
+    env = Envelope.wrap(MessageType.HEARTBEAT, hb, ts=1.75e9)
+    restored = Envelope.model_validate_json(env.model_dump_json())
+    parsed = Heartbeat.model_validate(restored.payload).metrics
+    assert parsed is not None and parsed.ram_free_gb == 3.6
+
+
+def test_metrics_report_rejects_negative_ram() -> None:
+    with pytest.raises(ValidationError):
+        MetricsReport(ram_free_gb=-1.0)

@@ -157,6 +157,9 @@ class NodeAgent:
         return MetricsReport(
             gpu_util_pct=None,
             vram_free_gb=vram_free,
+            # Same psutil "available" figure the registration probe reports —
+            # the coordinator refreshes placement capacity from it.
+            ram_free_gb=psutil.virtual_memory().available / 1e9,
             cpu_util_pct=psutil.cpu_percent(interval=None),
             net_bw_mbps=self.settings.net_bw_mbps,
         )

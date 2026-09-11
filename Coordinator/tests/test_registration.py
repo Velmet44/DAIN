@@ -10,8 +10,10 @@ import pytest
 from conftest import (
     ADMIN_HEADERS,
     cpu_only_manifest,
+    gpu,
     make_client,
     make_settings,
+    manifest,
     register_payload,
     wait_for,
 )
@@ -231,3 +233,35 @@ def test_register_payload_is_wire_valid(client: TestClient) -> None:
     parsed = json.loads(envelope.model_dump_json())
     assert parsed["type"] == "register"
     assert parse_payload(envelope).node_id == "node-wire"
+
+
+def test_heartbeat_refreshes_capacity_snapshot(client: TestClient) -> None:
+    """Free RAM/VRAM in the manifest track live metrics (S17) — a node that
+    registered with little free memory becomes placeable once memory frees up."""
+    from dain_common.schemas import CPUInfo
+
+    small_cpu = cpu_only_manifest().model_copy(
+        update={"cpu": CPUInfo(cores=8, ram_total_gb=32.0, ram_free_gb=1.0)}
+    )
+    ack = client.post(
+        "/node/register", json=register_payload("node-a", manifest_model=small_cpu, auth_token=JOIN)
+    ).json()
+    send_heartbeat(client, "node-a", ack["node_token"], 0, MetricsReport(cpu_util_pct=40.0))
+    service = client.app.state.service
+    assert service.registry.get_node("node-a").manifest.cpu.ram_free_gb == 1.0
+
+    send_heartbeat(
+        client, "node-a", ack["node_token"], 1, MetricsReport(cpu_util_pct=40.0, ram_free_gb=8.0)
+    )
+    assert service.registry.get_node("node-a").manifest.cpu.ram_free_gb == 8.0
+
+    # GPU nodes refresh vram_free_gb the same way.
+    gpu_manifest = manifest(gpu(vram_free_gb=2.0))
+    ack2 = client.post(
+        "/node/register",
+        json=register_payload("node-b", manifest_model=gpu_manifest, auth_token=JOIN),
+    ).json()
+    send_heartbeat(
+        client, "node-b", ack2["node_token"], 0, MetricsReport(gpu_util_pct=10.0, vram_free_gb=11.5)
+    )
+    assert service.registry.get_node("node-b").manifest.gpu.vram_free_gb == 11.5

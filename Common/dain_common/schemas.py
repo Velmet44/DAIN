@@ -220,6 +220,10 @@ class RegisterAck(_Model):
 class MetricsReport(_Model):
     gpu_util_pct: float | None = Field(default=None, ge=0, le=100)
     vram_free_gb: float | None = Field(default=None, ge=0)
+    # Live free system RAM (spec §12 capacity): refreshed every heartbeat so a
+    # node's placement capacity never goes stale with its registration-day
+    # snapshot (session 17).
+    ram_free_gb: float | None = Field(default=None, ge=0)
     cpu_util_pct: float | None = Field(default=None, ge=0, le=100)
     net_bw_mbps: float | None = Field(default=None, ge=0)
     temp_c: float | None = Field(default=None, ge=-50, le=200)
