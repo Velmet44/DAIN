@@ -1326,3 +1326,23 @@ environment — nodes fail to finish torch/torchao import within the 40 s
 connection window on this 4-core host; confirmed it fails identically on the
 clean pre-change tree (not a regression). Client: `npm run build` passes.
 
+
+## 2026-09-12 - Fix Linux CI failures (commit aead815)
+
+The GitHub Actions "CI — Python tests & lint" Coordinator job was failing on
+every recent push (already red on 15b9c5c / 10f6c62 — pre-existing, unrelated
+to today's export fixes). Root cause: two Windows-authored tests broke on the
+Linux runner. Deploy workflow "failures" were GitHub quirks: path-filtered
+runs (commits not touching `Client/**`) appear as failure with 0 jobs + no
+logs and never schedule a job.
+
+- `Coordinator/tests/test_admin_gguf_import.py`: `shutil.which("uv")` returns
+  an absolute path on Linux (`/opt/hostedtoolcache/uv/.../uv`), so the strict
+  `argv[0] == "uv"` check failed. Assert on the resolved basename instead.
+- `Coordinator/dain_coordinator/settings.py`: `from_config`'s `_path`
+  relied on `Path.is_absolute()`, which cannot see Windows drive-letter paths
+  (`C:/...`) from a POSIX host, so `db_path` was wrongly joined to
+  `base_dir`. Added `_is_abs` (drive-letter regex) — no behavior change on
+  Windows, absolute paths kept on Linux too.
+- Verified: local `pytest` green, ruff clean; CI run 34666043256 all jobs pass.
+
