@@ -1375,3 +1375,9 @@ returns Windows `Access denied`.
 - Added inference mode to stage forward paths and stopped the watchdog from falsely restarting jobs before the first token; token arrival now refreshes liveness for every stage.
 - Made every admin refresh/status text update null-safe and verified the served page has no unsafe direct `textContent` writes.
 - `torchao`'s missing-Triton message is informational: it means Triton-only kernels are unavailable. The current `int4_cpu` artifact does not require Triton; it may affect optional optimized kernels and is not an export or correctness failure.
+## 2026-09-12 — Quantized node event-loop fix
+
+- Root cause of the missing INT4 response: synchronous TorchAO CPU inference ran inside the node's asyncio event loop, preventing WebSocket heartbeats and causing the coordinator to see the node disconnect during prefill.
+- Moved all StageModel forward/logit operations to worker threads with `asyncio.to_thread`, keeping the agent transport and heartbeat loop responsive during slow CPU inference.
+- Error SSE frames now reach the client and terminate the stream with a visible error instead of leaving the assistant bubble on the `…` placeholder.
+- Full Node and Coordinator pytest suites plus Ruff pass; Client TypeScript/Vite build passes.

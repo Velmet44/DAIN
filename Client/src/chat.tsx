@@ -97,8 +97,10 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
               `token frame: "${frame.token.length > 40 ? `${frame.token.slice(0, 40)}…` : frame.token}" (total ${acc.length} chars)`,
             );
           }
-          if (frame.type === "final" || frame.type === "error") {
-            if (frame.type === "error") logError(`stream error frame: ${frame.detail}`);
+          if (frame.type === "error") {
+            logError(`stream error frame: ${frame.detail}`);
+            setStatus(`error: ${frame.detail || "completion failed"}`);
+          } else if (frame.type === "final") {
             setStatus(`done (${frame.usage?.tokens ?? acc.length} tokens)`);
           }
         },

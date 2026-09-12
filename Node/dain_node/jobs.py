@@ -461,7 +461,7 @@ class JobHandler:
             rt.job.params.temperature,
         )
         while True:
-            logits = stage.next_token_logits_full(current)
+            logits = await asyncio.to_thread(stage.next_token_logits_full, current)
             token_id = sample_token(logits, rt.job.params.temperature, generator)
             current = [token_id]
             if token_id == stage.manifest.eos_token_id:
@@ -485,7 +485,7 @@ class JobHandler:
     async def _run_distributed_entry(
         self, rt: JobRuntime, stage: StageModel, ids: list[int], generator
     ) -> None:
-        hidden = stage.forward_ids(ids)
+        hidden = await asyncio.to_thread(stage.forward_ids, ids)
         await self._send_activation(
             rt,
             role="hidden",
@@ -502,7 +502,7 @@ class JobHandler:
                 break  # the sampling stage already emitted the final TOKEN_BATCH
             token_id = _INT64.unpack(payload)[0]
             rt.generated += 1
-            hidden = stage.embed_one(token_id)
+            hidden = await asyncio.to_thread(stage.embed_one, token_id)
             await self._send_activation(
                 rt,
                 role="hidden",
@@ -523,9 +523,9 @@ class JobHandler:
                     bytearray(payload),
                     dtype=_ACTIVATION_DTYPES.get(header.dtype, torch.float32),
                 ).reshape(tuple(header.shape))
-                out = stage.forward_hidden(hidden)
+                out = await asyncio.to_thread(stage.forward_hidden, hidden)
                 if rt.last:
-                    logits = stage.logits_from(out)[:, -1, :]
+                    logits = (await asyncio.to_thread(stage.logits_from, out))[:, -1, :]
                     generator = (
                         torch.Generator().manual_seed((rt.job.params.seed or 0) + rt.generated)
                         if rt.job.params.seed is not None

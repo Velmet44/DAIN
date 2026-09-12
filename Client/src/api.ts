@@ -230,7 +230,12 @@ export async function streamCompletion(
           frames += 1;
           if (frame.token) tokens += 1;
           if (frame.job_id && frame.status) logOk(`job ${frame.job_id} ${frame.status}`);
-          if (frame.type === "error") logError(`job ${frame.job_id ?? "?"} error: ${frame.detail}`);
+          if (frame.type === "error") {
+            const detail = frame.detail || "completion failed";
+            logError(`job ${frame.job_id ?? "?"} error: ${detail}`);
+            onFrame(frame);
+            throw new Error(detail);
+          }
           if (frame.type === "final")
             logOk(`final finish=${frame.finish_reason} usageTokens=${frame.usage?.tokens ?? tokens}`);
           onFrame(frame);
