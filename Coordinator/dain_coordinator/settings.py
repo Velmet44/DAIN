@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -291,11 +292,18 @@ class CoordinatorSettings:
         so extra documentation fields never break loading.
         """
 
+        def _is_abs(p: Path) -> bool:
+            if p.is_absolute():
+                return True
+            # Windows-style drive paths (e.g. "C:/data/...") are absolute even
+            # when resolved on a POSIX host (Linux CI); never join them to base_dir.
+            return bool(re.match(r"^[A-Za-z]:[\\/]", str(p)))
+
         def _path(val: object, default: str) -> str:
             if not val:
                 return default
             p = Path(str(val))
-            return str(p if p.is_absolute() else base_dir / p)
+            return str(p if _is_abs(p) else base_dir / p)
 
         def _cors(val: object) -> tuple[str, ...]:
             if isinstance(val, (list, tuple)):

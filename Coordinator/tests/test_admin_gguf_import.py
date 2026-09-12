@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import pathlib
 import threading
 import time
@@ -144,7 +145,7 @@ def test_import_runs_converter_and_recomputes(tmp_path, monkeypatch) -> None:
 
         assert done.wait(5), "runner never invoked"
         argv = captured["argv"]
-        assert argv[0].lower().endswith("uv.exe") or argv[0] == "uv"  # resolved via shutil.which
+        assert os.path.basename(argv[0]).lower() in ("uv", "uv.exe")  # resolved via shutil.which
         assert argv[1:6] == ["run", "--project", str(tmp_path / "NodeFake"), "python", "-m"]
         assert "dain_node.import_gguf" in argv
         assert str(store) in argv
