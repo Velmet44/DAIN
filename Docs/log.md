@@ -1280,3 +1280,49 @@ Common: pytest OK, ruff clean. Coordinator: pytest OK (128 - incl
 test_admin_model_export.py 7 + backend-aware scheduler tests 4), ruff clean.
 Node: pytest OK (74 - incl test_model_export.py 12 + test_quantized_stage.py 6
 + test_capabilities.py 4), ruff clean. Sim: unchanged this session.
+
+## 2026-09-12 - Post-S21 hardening: production-blocking gaps (commit 5390963)
+
+Follow-up to S21. While validating the export pipeline end-to-end we found six
+gaps that would block production use of quantized models or hang the server;
+all fixed with targeted tests.
+
+- Coordinator .pt shard serving: `ShardRef.format` was not resolved to a
+  real file when serving quantized models, so `torch_pt` shards 404'd. Now
+  `_shard_ext` maps `torch_pt -> .pt` and `_shard_path` appends it;
+  GET/HEAD tests added (`test_peers.py`).
+- UI Detect 422: `POST /admin/models/export/validate` required `model_id`
+  but the admin page only sends `source_dir`. New `ExportValidateRequest`
+  makes `model_id` optional (`test_export_validate_without_model_id`).
+- Node device selection (`llm.py`): `select_device(manifest)` — the
+  `tensor_core_tiled` layout requires CUDA (raises when unavailable),
+  `int4_cpu` always runs on CPU, legacy fp16/fp32 use CUDA when available.
+  Quantized AQT params are moved to the chosen device in `StageModel`
+  (`state[...].to(device)` — safe on CPU, no-op) and `fetch_stage` passes
+  the device through. `TestSelectDevice` covers the CUDA branches via
+  monkeypatch (`test_quantized_stage.py`).
+- Tokenizer strictness (`model_export.py`): a real (non-`--dry-run`)
+  export with no usable tokenizer now raises instead of writing a broken model
+  (`test_export_refuses_real_model_without_tokenizer`); `_read_tokenizer`
+  no longer reads `tokenizer.json` twice.
+- Export guards (`api.py`): source weight/size computed up front and capped
+  by `max_export_size_gb` — validate reports `valid=False`, start returns
+  HTTP 413. `export_timeout_s` enforced via `asyncio.wait_for`/`asyncio.timeout`
+  with terminate-then-kill for the subprocess runner. Tests: over-size
+  validate/start + timeout (`test_admin_model_export.py`).
+- Scheduler capability filtering (`partition.py`): `_is_backend_feasible`
+  now also requires `manifest.adapter_id` in the node's advertised adapters
+  and the quantized `activation_dtype` in its supported dtypes, so an
+  adapter- or dtype-mismatched node is never placed (`test_scheduler.py`).
+- `Sim/uv.lock` resynced: the committed lock was missing the `torchao`
+  dependency that `Node/pyproject.toml` requires (`uv run` refreshed it);
+  without this the Sim e2e/chaos runs were not reproducible from a clean lock.
+
+#### Gates
+Common: pytest OK, ruff clean. Coordinator: 137 passed (was 128), ruff clean.
+Node: 80 passed (was 74), ruff clean. Sim: 20 passed, ruff clean; the chaos
+8-node test (`test_kill_three_of_eight_still_serves`) is flaky in this
+environment — nodes fail to finish torch/torchao import within the 40 s
+connection window on this 4-core host; confirmed it fails identically on the
+clean pre-change tree (not a regression). Client: `npm run build` passes.
+

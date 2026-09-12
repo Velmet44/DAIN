@@ -106,6 +106,11 @@ admin page (**Model Export** card) — `source_dir` must resolve under an
 approved `export_roots` (or `DAIN_EXPORT_ROOTS`, semicolon-separated). The
 exporter writes `manifest.json` + `tokenizer.json` into the store model dir and
 runs as a subprocess so the coordinator never imports torch/torchao.
+`int4_cpu` shards always execute on CPU; the optional `tensor_core_tiled`
+layout requirement: CUDA-only packing, placed only on nodes that advertise
+CUDA (device selection falls back to CPU for un-quantized models). Exports are
+guarded by `max_export_size_gb` (rejected with HTTP 413 when the source is too
+large) and `export_timeout_s` (the subprocess is terminated when it overruns).
 
 ## Repository layout
 
