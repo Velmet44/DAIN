@@ -129,6 +129,8 @@ class TestExportModel:
         assert manifest.quantization.bits == 4
         assert manifest.quantization.group_size == 128
         assert manifest.quantization.packing_layout in (LAYOUT_CPU, "tensor_core_tiled")
+        assert manifest.architecture_config["rms_norm_eps"] == pytest.approx(1e-6)
+        assert manifest.architecture_config["rope_scaling"] is None
         assert manifest.artifact_version == 1
 
     def test_manifest_json_written(self, src_dir, store):

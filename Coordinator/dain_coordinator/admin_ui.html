@@ -444,7 +444,7 @@ function fail(e) {
     return;
   }
   status.className = "err";
-  status.textContent = String(e.message || e);
+  setText("status", String(e.message || e));
   clearTimeout(failTimer); failTimer = setTimeout(() => setText("status", ""), 4000);
 }
 
@@ -456,7 +456,7 @@ function ok(msg) {
     return;
   }
   status.className = "ok";
-  status.textContent = msg;
+  setText("status", msg);
   clearTimeout(okTimer); okTimer = setTimeout(() => setText("status", ""), 4000);
 }
 
@@ -622,10 +622,10 @@ async function renderExportCard() {
     busy = busy || !!exR.busy;
     error = exR.error || null;
   } catch (e) { /* unauthorized */ }
-  $("expRoots").textContent = roots.length
+  setText("expRoots", roots.length
     ? roots.map(r => r.path).join("; ")
-    : "(none configured — set export_roots / DAIN_EXPORT_ROOTS)";
-  $("expBusyTag").textContent = busy ? "running" : "";
+    : "(none configured — set export_roots / DAIN_EXPORT_ROOTS)");
+  setText("expBusyTag", busy ? "running" : "");
   $("expStart").disabled = busy;
   const rows = exports.filter(e => e.exported).map(e =>
     `<div class="pl" style="display:flex;align-items:center;gap:8px;padding:2px 0;border-bottom:none;">
@@ -633,9 +633,9 @@ async function renderExportCard() {
        <span class="pill st-online" style="margin-left:auto">${e.active ? "exporting…" : "exported"}</span>
      </div>`).join("");
   $("expLog").style.display = rows || error || busy ? "" : "none";
-  $("expLog").textContent = (rows ? "" : exports.length ? exports.map(e => e.model_id).join("\n") + "\n" : "")
+  setText("expLog", (rows ? "" : exports.length ? exports.map(e => e.model_id).join("\n") + "\n" : "")
     + (busy ? "export running — follow progress in Logs\n" : "")
-    + (error ? "last result: " + error + "\n" : "");
+    + (error ? "last result: " + error + "\n" : ""));
 }
 
 function pollExportBusy() {
@@ -654,16 +654,16 @@ function pollExportBusy() {
 $("expValidate").onclick = async () => {
   const src = $("expSource").value.trim();
   if (!src) return fail(new Error("source dir required"));
-  $("expDetected").textContent = "checking…";
+  setText("expDetected", "checking…");
   try {
     const r = await api("/admin/models/export/validate", "admin", { method: "POST", body: { source_dir: src } });
-    $("expDetected").textContent = r.error
+    setText("expDetected", r.error
       ? "✗ " + r.error
       : (r.valid
         ? `✓ HF model dir · ${r.weight_count} weight file(s) · ${fmtBytes(r.size_bytes)} · fast tokenizer ${r.has_fast_tokenizer ? "yes" : "no"}`
-        : "✗ invalid model directory");
+        : "✗ invalid model directory"));
   } catch (e) {
-    $("expDetected").textContent = "✗ " + (e.message || e);
+    setText("expDetected", "✗ " + (e.message || e));
   }
 };
 
@@ -713,7 +713,7 @@ async function refresh() {
     const status = $("status");
     if (status) {
       status.className = "ok";
-      status.textContent = new Date().toLocaleTimeString();
+      setText("status", new Date().toLocaleTimeString());
     }
     // Admin-only extras degrade gracefully while unauthorized (401).
     try { renderJobs(await api("/admin/jobs", "admin")); }

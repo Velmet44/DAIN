@@ -85,7 +85,8 @@ class FaultManager:
         `deadline = 4 × p99(stage latency)`, clamped to
         [stage_deadline_min_s, stage_deadline_max_s] (spec §13). Only the stage
         that stalled is reassigned; a whole-job stall (no progress at all since
-        dispatch) is handled as a restart from the prompt.
+        dispatch) is covered by the request timeout; only post-token stage
+        inactivity is handled by the watchdog.
         """
         now = time.time()
         deadline = self.jobs.stage_stats.deadline(
@@ -94,16 +95,11 @@ class FaultManager:
         for job in self.jobs.active_jobs():
             if job.state in (JobState.COMPLETED, JobState.FAILED, JobState.RETRYING):
                 continue
-            if job.last_token_at is None and now - (job.dispatched_at or now) > deadline:
-                log.warning("job_stalled job=%s deadline=%.1fs", job.job_id, deadline)
+            if job.last_token_at is None:
+                continue
                 # `restarts` is incremented inside _restart_from_entry — the only
                 # place — so `>=` here means the job gets exactly
                 # `max_job_restarts` useful restarts before being failed.
-                if job.restarts >= self.settings.max_job_restarts:
-                    self.jobs.fail_job(job.job_id, "job stalled beyond max restarts")
-                else:
-                    self._restart_from_entry(job)
-                continue
             for stage_idx in range(len(job.stages)):
                 last = job.stage_last_activity.get(stage_idx)
                 if last is None:

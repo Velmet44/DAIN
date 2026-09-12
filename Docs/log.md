@@ -1368,3 +1368,10 @@ passed (8); Coordinator and Node Ruff checks passed; admin inline JavaScript
 syntax check passed; Client `npm.cmd run build` passed. Pytest required a
 workspace-local `--basetemp` because the machine's global pytest temp folder
 returns Windows `Access denied`.
+## 2026-09-12 — INT4 slow-prefill and admin refresh follow-up
+
+- Compared the real exported `llama-3.2-1b-int4` artifact against a Hugging Face model loaded from the same serialized shards; DAIN and Hugging Face now select the same first token (`Paris`).
+- Preserved Llama architecture settings in the manifest and reconstructed them in `StageModel`, including Llama 3 RoPE scaling, RMS norm epsilon, head dimension, biases, and tied embeddings.
+- Added inference mode to stage forward paths and stopped the watchdog from falsely restarting jobs before the first token; token arrival now refreshes liveness for every stage.
+- Made every admin refresh/status text update null-safe and verified the served page has no unsafe direct `textContent` writes.
+- `torchao`'s missing-Triton message is informational: it means Triton-only kernels are unavailable. The current `int4_cpu` artifact does not require Triton; it may affect optional optimized kernels and is not an export or correctness failure.

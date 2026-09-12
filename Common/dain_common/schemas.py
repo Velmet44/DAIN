@@ -251,6 +251,7 @@ class ModelManifest(_Model):
     base_model_id: str | None = Field(default=None, min_length=1)
     architecture: str | None = Field(default=None, min_length=1)
     adapter_id: str | None = Field(default=None, min_length=1)
+    architecture_config: dict[str, Any] = Field(default_factory=dict)
     # Monotonic artifact-format version; bump when shard layout changes shape.
     artifact_version: int = Field(default=1, ge=1)
     source_config_hash: str | None = Field(default=None, min_length=8)

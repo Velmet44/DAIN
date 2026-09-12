@@ -833,6 +833,7 @@ class StageModel:
         self.layer_end = layer_end
         self.first = layer_start == 0
         self.last = layer_end == manifest.layers - 1
+        architecture_config = manifest.architecture_config
         cfg = LlamaConfig(
             vocab_size=manifest.vocab_size,
             hidden_size=manifest.hidden,
@@ -840,8 +841,16 @@ class StageModel:
             num_hidden_layers=manifest.layers,
             num_attention_heads=manifest.heads,
             num_key_value_heads=manifest.kv_heads,
+            hidden_act=architecture_config.get("hidden_act", "silu"),
+            max_position_embeddings=architecture_config.get("max_position_embeddings", 2048),
+            rms_norm_eps=architecture_config.get("rms_norm_eps", 1e-6),
             rope_theta=manifest.rope_theta,
-            tie_word_embeddings=False,
+            rope_scaling=architecture_config.get("rope_scaling"),
+            attention_bias=architecture_config.get("attention_bias", False),
+            attention_dropout=architecture_config.get("attention_dropout", 0.0),
+            mlp_bias=architecture_config.get("mlp_bias", False),
+            head_dim=architecture_config.get("head_dim"),
+            tie_word_embeddings=architecture_config.get("tie_word_embeddings", False),
         )
         self.cfg = cfg
         self.device = device
@@ -870,7 +879,11 @@ class StageModel:
                     # a tensor_core_tiled model must land on CUDA, int4_cpu on
                     # CPU; `.to()` on an AQT transfers the packed payload.
                     subset = {
-                        name: state[prefix + name].to(device)
+                        name: (
+                            state[prefix + name]
+                            if device == "cpu"
+                            else state[prefix + name].to(device)
+                        )
                         for name, _param in layer.named_parameters()
                         if prefix + name in state
                     }
@@ -957,6 +970,7 @@ class StageModel:
             )[0]
         return hidden
 
+    @torch.inference_mode()
     def forward_ids(self, input_ids: list[int]) -> torch.Tensor:
         """Entry stage: embed token ids → run layers → hidden [1, T, H]."""
         if not self.first:
@@ -964,27 +978,32 @@ class StageModel:
         hidden = self.embed(torch.tensor([input_ids], device=self.device, dtype=torch.long))
         return self._run_layers(hidden)
 
+    @torch.inference_mode()
     def forward_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
         """Middle/last stage: run layers on inbound activations."""
         return self._run_layers(hidden)
 
+    @torch.inference_mode()
     def logits_from(self, hidden: torch.Tensor) -> torch.Tensor:
         """Last stage: final norm + lm_head → logits [1, T, vocab]."""
         if not self.last:
             raise RuntimeError("logits_from requires the last stage")
         return self.lm_head(self.norm(hidden))
 
+    @torch.inference_mode()
     def next_token_logits(self, token_id: int) -> torch.Tensor:
         """Entry stage decode step: embed one token → logits for that position."""
         hidden = self.embed(torch.tensor([[token_id]], device=self.device, dtype=torch.long))
         hidden = self._run_layers(hidden)
         return self.lm_head(self.norm(hidden))[:, -1, :]
 
+    @torch.inference_mode()
     def embed_one(self, token_id: int) -> torch.Tensor:
         """Distributed entry decode step: embed one token → hidden after layers."""
         hidden = self.embed(torch.tensor([[token_id]], device=self.device, dtype=torch.long))
         return self._run_layers(hidden)
 
+    @torch.inference_mode()
     def next_token_logits_full(self, input_ids: list[int]) -> torch.Tensor:
         """Full-model step (single-stage): embed → layers → logits of last position."""
         hidden = self.embed(torch.tensor([input_ids], device=self.device, dtype=torch.long))

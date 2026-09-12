@@ -276,6 +276,8 @@ class JobTracker:
         for token in batch.tokens:
             job.tokens.append(token)
             self._push(job, {"type": "token", "job_id": batch.job_id, "token": token})
+        for stage_idx in job.stage_last_activity:
+            job.stage_last_activity[stage_idx] = job.last_token_at
         if batch.is_final:
             log.info(
                 "token_final job=%s reason=%s tokens=%d",

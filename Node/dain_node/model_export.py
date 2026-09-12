@@ -361,6 +361,17 @@ def export_shards(
         base_model_id=base_model_id,
         architecture=adapter.architecture,
         adapter_id=adapter.architecture,
+        architecture_config={
+            "hidden_act": getattr(config, "hidden_act", "silu"),
+            "max_position_embeddings": getattr(config, "max_position_embeddings", 2048),
+            "rms_norm_eps": getattr(config, "rms_norm_eps", 1e-6),
+            "rope_scaling": getattr(config, "rope_scaling", None),
+            "attention_bias": getattr(config, "attention_bias", False),
+            "attention_dropout": getattr(config, "attention_dropout", 0.0),
+            "mlp_bias": getattr(config, "mlp_bias", False),
+            "head_dim": getattr(config, "head_dim", None),
+            "tie_word_embeddings": getattr(config, "tie_word_embeddings", False),
+        },
         artifact_version=1,
         source_config_hash=source_config_hash,
     )

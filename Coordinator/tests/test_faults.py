@@ -137,6 +137,19 @@ def test_entry_stage_loss_exhausts_restarts_fails_job() -> None:
     assert conn.sent == []  # nothing re-dispatched
 
 
+def test_slow_prefill_is_not_restarted_by_stage_watchdog() -> None:
+    faults, conn, job = make_fault_manager()
+    job.stage_last_activity = {stage_idx: 1.0 for stage_idx in range(len(STAGES))}
+
+    async def scenario() -> None:
+        await faults.tick()
+
+    _run(scenario())
+
+    assert job.restarts == 0
+    assert conn.sent == []
+
+
 def test_non_entry_reassign_keeps_prefix_and_replays() -> None:
     faults, conn, job = make_fault_manager()
     job.state = JobState.RUNNING

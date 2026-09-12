@@ -69,5 +69,15 @@ def test_view_latency_falls_back_to_job_finish_for_intermediate_stages() -> None
     assert all(s["latency_ms"] is not None for s in view["stages"]), view["stages"]
 
 
+def test_token_activity_refreshes_all_stage_watchdogs() -> None:
+    jobs = JobTracker()
+    record = jobs.create("dain-tiny-16L", "hi", {"max_tokens": 2}, MANIFEST)
+    jobs.mark_dispatched(record.job_id, "node-0", STAGES)
+    before = {stage_idx: 1.0 for stage_idx in record.stage_last_activity}
+    record.stage_last_activity = before.copy()
+    jobs.on_token_batch(TokenBatch(job_id=record.job_id, tokens=("a",)))
+    assert all(record.stage_last_activity[idx] > before[idx] for idx in before)
+
+
 def _final_batch(job_id: str) -> TokenBatch:
     return TokenBatch(job_id=job_id, tokens=("a", "b"), is_final=True, finish_reason="length")
