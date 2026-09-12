@@ -201,7 +201,20 @@ class JobTracker:
             try:
                 job.queue.put_nowait(frame)
             except asyncio.QueueFull:
-                log.warning("sse_queue_full job=%s (client too slow)", job.job_id)
+                # A client too slow to drain is wedged, not just late: a silently
+                # dropped frame would leave it waiting forever. Fail loudly —
+                # drain the queue, emit an error frame (the SSE loop terminates
+                # on it), and mark the job failed so nodes get freed.
+                log.error(
+                    "sse_queue_overflow job=%s — client stream too slow; failing",
+                    job.job_id,
+                )
+                while True:
+                    try:
+                        job.queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                self.fail_job(job.job_id, "client stream too slow (sse queue overflow)")
 
     def _transition(self, job: JobRecord, state: JobState) -> None:
         if state in (JobState.RUNNING, JobState.STREAMING) and job.state in (

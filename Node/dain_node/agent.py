@@ -254,11 +254,18 @@ class NodeAgent:
                     await asyncio.wait_for(stop_event.wait(), timeout=backoff)
 
     async def _session(self, stop_event: asyncio.Event) -> None:
-        url = (
-            f"{self.settings.ws_base_url}/node/ws"
-            f"?node_id={self.identity.node_id}&token={self.identity.node_token}"
-        )
-        async with websockets.connect(url, ping_interval=20, ping_timeout=20) as ws:
+        # Credentials ride in headers, never query params: node tokens would
+        # otherwise land in uvicorn/proxy access logs verbatim.
+        url = f"{self.settings.ws_base_url}/node/ws"
+        async with websockets.connect(
+            url,
+            ping_interval=20,
+            ping_timeout=20,
+            additional_headers={
+                "X-Node-Id": self.identity.node_id,
+                "X-Node-Token": self.identity.node_token,
+            },
+        ) as ws:
             log.info("ws_connected node=%s", self.identity.node_id)
             self._ws = ws
             heartbeat_task = asyncio.create_task(

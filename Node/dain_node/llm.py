@@ -200,6 +200,7 @@ class _Progress:
         self.total = total
         self.done = 0
         self._last_pct = -1
+        self._t0 = time.monotonic()
 
     def add(self, n: int) -> None:
         self.done += n
@@ -216,8 +217,6 @@ class _Progress:
                 self.done / elapsed / 1e6,
             )
             self._last_pct = pct
-
-    _t0 = time.monotonic()
 
 
 class ModelStoreClient:
@@ -449,6 +448,7 @@ class ModelStoreClient:
             # Another task may have finished the same shard while we waited.
             if os.path.exists(path) and await self._verify(path, content_hash):
                 log.info("shard_hit_race model=%s shard=%s", model_id, shard_id)
+                self._shard_locks.pop((model_id, shard_id), None)
                 return path
             started = time.monotonic()
             # Stable per-shard chunk dir (keyed to the *final* path): a failed
@@ -462,6 +462,11 @@ class ModelStoreClient:
                     raise RuntimeError(f"shard {shard_id} failed hash verification")
                 os.replace(tmp, path)
                 self._write_hash_sidecar(path, content_hash)
+                # Shard is now cached: drop the per-shard lock so the dict does
+                # not grow with every model ever downloaded. Any task already
+                # waiting on this (old) lock re-checks the cache and no-ops;
+                # later arrivals take the fast cache-hit path at the top.
+                self._shard_locks.pop((model_id, shard_id), None)
                 # Success: sweep the per-chunk partials. On failure they stay in
                 # place so the next attempt resumes mid-file instead of restarting.
                 with contextlib.suppress(OSError, shutil.Error):
@@ -783,11 +788,21 @@ def _write_chunk_state(chunk_dir: str, ranges: list[tuple[int, int]]) -> None:
         json.dump({"ranges": [list(r) for r in ranges]}, fh)
 
 
+def _chunk_sort_key(fh_name: str) -> tuple[int, str]:
+    """Order chunk files numerically (c2.part < c10.part), not lexicographically."""
+    if fh_name.startswith("c") and fh_name.endswith(".part"):
+        try:
+            return int(fh_name[1 : -len(".part")]), fh_name
+        except ValueError:
+            pass
+    return (2**31, fh_name)
+
+
 def _assemble_chunks(chunk_dir: str, dst: str, total: int) -> None:
     """Concatenate c0, c1, … into `dst` (+ a length sanity check)."""
     with open(dst, "wb") as out:
         written = 0
-        for fh_name in sorted(os.listdir(chunk_dir)):
+        for fh_name in sorted(os.listdir(chunk_dir), key=_chunk_sort_key):
             if not fh_name.startswith("c") or not fh_name.endswith(".part"):
                 continue
             with open(os.path.join(chunk_dir, fh_name), "rb") as fh:
@@ -1065,15 +1080,21 @@ async def fetch_stage(
             else []
         )
     shard_paths = dict(zip((shard_id for shard_id, _, _ in needed), paths, strict=True))
+    # deserialize_shard (torch.load / load_file on multi-GB shards) is CPU+disk
+    # bound: run it off the event loop so heartbeats/streams never stall while
+    # a stage is being fetched (same class of fix as inference runs).
+    loop = asyncio.get_running_loop()
+    states = await asyncio.gather(
+        *(loop.run_in_executor(None, backend.deserialize_shard, path) for path in paths)
+    )
     state: dict[str, torch.Tensor] = {}
-    for path in paths:
-        state.update(backend.deserialize_shard(path))
+    for tensors in states:
+        state.update(tensors)
     tokenizer_path: str | None = None
     if manifest.tokenizer_file is not None and manifest.tokenizer_hash is not None:
         tokenizer_path = await store.ensure_tokenizer(
             manifest.model_id, manifest.tokenizer_file, manifest.tokenizer_hash
         )
-    loop = asyncio.get_running_loop()
     build = functools.partial(
         StageModel,
         manifest,

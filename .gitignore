@@ -13,6 +13,7 @@ build/
 Builds/
 models/
 model_store/
+model_sources/
 node_state.json
 node_state-*.json
 shard_cache*/

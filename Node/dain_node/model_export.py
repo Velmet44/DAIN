@@ -34,6 +34,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -613,6 +614,19 @@ def _record_export(source_dir: str, model_id: str, cfg) -> None:
 # -- CLI ----------------------------------------------------------------------
 
 
+#: Model ids become store directory names: the admin API only enforces
+#: min_length=1, so a caller-supplied id must be sanitized here (matching the
+#: import_gguf/delete guards) or ``../../x`` writes outside the model store.
+_SAFE_ID = re.compile(r"[^a-z0-9_-]+")
+
+
+def _sanitize_model_id(value: str) -> str:
+    cleaned = _SAFE_ID.sub("-", value.lower()).strip("-")
+    if not cleaned:
+        raise ValueError(f"model id {value!r} contains no usable filename characters")
+    return cleaned
+
+
 class ExportConfig:
     """Validated export parameters (CLI flags or Coordinator POST body)."""
 
@@ -632,7 +646,7 @@ class ExportConfig:
         json_progress: bool = False,
     ) -> None:
         self.source_dir = source_dir
-        self.model_id = model_id
+        self.model_id = _sanitize_model_id(model_id)
         self.output_store = output_store
         self.quantization = quantization
         self.group_size = group_size

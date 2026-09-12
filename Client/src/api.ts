@@ -225,23 +225,24 @@ export async function streamCompletion(
           logOk(`stream complete: ${frames} frames, ${tokens} tokens`);
           return;
         }
+        let frame: SseFrame;
         try {
-          const frame = JSON.parse(payload) as SseFrame;
-          frames += 1;
-          if (frame.token) tokens += 1;
-          if (frame.job_id && frame.status) logOk(`job ${frame.job_id} ${frame.status}`);
-          if (frame.type === "error") {
-            const detail = frame.detail || "completion failed";
-            logError(`job ${frame.job_id ?? "?"} error: ${detail}`);
-            onFrame(frame);
-            throw new Error(detail);
-          }
-          if (frame.type === "final")
-            logOk(`final finish=${frame.finish_reason} usageTokens=${frame.usage?.tokens ?? tokens}`);
-          onFrame(frame);
+          frame = JSON.parse(payload) as SseFrame;
         } catch {
-          /* ignore malformed frame */
+          continue; // ignore malformed frame
         }
+        frames += 1;
+        if (frame.token) tokens += 1;
+        if (frame.job_id && frame.status) logOk(`job ${frame.job_id} ${frame.status}`);
+        if (frame.type === "error") {
+          const detail = frame.detail || "completion failed";
+          logError(`job ${frame.job_id ?? "?"} error: ${detail}`);
+          onFrame(frame);
+          throw new Error(detail);
+        }
+        if (frame.type === "final")
+          logOk(`final finish=${frame.finish_reason} usageTokens=${frame.usage?.tokens ?? tokens}`);
+        onFrame(frame);
       }
     }
   } catch (err) {

@@ -30,6 +30,12 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
   const [status, setStatus] = useState("");
   const [streaming, setStreaming] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
+  // Mirror modelId into a ref so the model-list refetch below never depends on
+  // it (changing the picker must not re-poll the coordinator on every switch).
+  const modelIdRef = useRef(modelId);
+  useEffect(() => {
+    modelIdRef.current = modelId;
+  }, [modelId]);
 
   // Abort any in-flight completion when the view unmounts — the coordinator's
   // SSE generator would otherwise keep pumping frames into a dead component.
@@ -43,7 +49,7 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
       .then((models) => {
         logOk(`model picker: ${models.join(", ") || "(none)"}`);
         setModels(models);
-        if (models.length > 0 && !modelId) {
+        if (models.length > 0 && !modelIdRef.current) {
           logInfo(`auto-selecting first model: ${models[0]}`);
           setModelId(models[0]);
         }
@@ -54,7 +60,7 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
         setStatus(`models: ${err.message}`);
       });
     return () => controller.abort();
-  }, [baseUrl, apiKey, modelId]);
+  }, [baseUrl, apiKey]);
 
   const send = async (prompt?: string) => {
     const text = (prompt ?? input).trim();

@@ -12,15 +12,18 @@ import logging
 import time
 
 from dain_coordinator.nodes import NodeService
-from dain_coordinator.settings import CoordinatorSettings
 
 log = logging.getLogger("dain.coordinator.monitor")
 
 
 class HeartbeatMonitor:
-    def __init__(self, service: NodeService, settings: CoordinatorSettings) -> None:
+    def __init__(self, service: NodeService) -> None:
         self.service = service
-        self.settings = settings
+
+    @property
+    def settings(self):
+        # Live: the admin PUT /settings handler replaces service.settings.
+        return self.service.settings
 
     async def run(self) -> None:
         log.info(

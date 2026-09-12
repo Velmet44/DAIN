@@ -64,9 +64,19 @@ class DeregisterResult:
 
 
 class NodeService:
-    def __init__(self, registry: SQLiteRegistry, settings: CoordinatorSettings) -> None:
+    def __init__(
+        self,
+        registry: SQLiteRegistry,
+        settings: CoordinatorSettings,
+        is_connected: Callable[[str], bool] | None = None,
+    ) -> None:
         self.registry = registry
         self.settings = settings
+        # Set by the app: liveness of the node's live WS connection. Used to tell
+        # a restarted node (row ONLINE but no live socket) from a live one, so
+        # join-token re-admission can be instant instead of waiting out the
+        # heartbeat timeout without relaxing the anti-impersonation guard.
+        self.is_connected = is_connected
         # Set by the app: callable(node_id, to_state) fired when the *pool
         # composition* changes for scheduling purposes (DEGRADED entry/recovery,
         # spec §12 placement recompute on DEGRADED transitions).
@@ -112,7 +122,16 @@ class NodeService:
         # it is NOT actively serving. An ONLINE node must keep authenticating
         # with its own token; otherwise anyone holding the (widely-broadcast)
         # join token could impersonate and silently evict a working node.
-        if existing is not None and existing.state == NodeState.ONLINE and join_token_ok:
+        # When the app wires a liveness callback and the ONLINE row has NO live
+        # connection, the row is a restarted node: re-admit immediately via the
+        # join token instead of making it wait out the heartbeat timeout.
+        live = self.is_connected is None or self.is_connected(payload.node_id)
+        if (
+            existing is not None
+            and existing.state == NodeState.ONLINE
+            and join_token_ok
+            and live
+        ):
             log.warning(
                 "register_rejected node=%s reason=join_token_cannot_displace_online",
                 payload.node_id,

@@ -70,6 +70,7 @@ COORDINATOR_ENV: dict[str, str] = {
     "export_roots": "DAIN_EXPORT_ROOTS",
     "max_export_size_gb": "DAIN_MAX_EXPORT_SIZE_GB",
     "export_timeout_s": "DAIN_EXPORT_TIMEOUT_S",
+    "gguf_timeout_s": "DAIN_GGUF_TIMEOUT_S",
 }
 
 # Default config.json written next to the coordinator on first run.  Key names
@@ -220,6 +221,10 @@ class CoordinatorSettings:
     export_roots: tuple[str, ...] = ()
     max_export_size_gb: float = 100.0
     export_timeout_s: float = 3600.0
+    # GGUF import (session 14) runs the same kind of long-lived converter
+    # subprocess as model export; bound it so a hung converter never wedges the
+    # admin "import busy" flag until the coordinator restarts.
+    gguf_timeout_s: float = 3600.0
     # Completed-job retention: terminal jobs are evicted once the history grows
     # past `job_history_max` (oldest first) or a job has been terminal for
     # longer than `job_ttl_s` — the tracker must not grow forever on long runs.
@@ -281,6 +286,7 @@ class CoordinatorSettings:
             ),
             max_export_size_gb=float(env.get("DAIN_MAX_EXPORT_SIZE_GB", "100")),
             export_timeout_s=float(env.get("DAIN_EXPORT_TIMEOUT_S", "3600")),
+            gguf_timeout_s=float(env.get("DAIN_GGUF_TIMEOUT_S", "3600")),
         )
 
     @classmethod
@@ -358,4 +364,5 @@ class CoordinatorSettings:
             ),
             max_export_size_gb=float(data.get("max_export_size_gb", 100.0)),
             export_timeout_s=float(data.get("export_timeout_s", 3600.0)),
+            gguf_timeout_s=float(data.get("gguf_timeout_s", 3600.0)),
         )

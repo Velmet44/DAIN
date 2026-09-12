@@ -247,8 +247,8 @@ async def node_ws(websocket: WebSocket) -> None:
     connections = websocket.app.state.connections
     jobs: JobTracker = websocket.app.state.jobs
     relay: ActivationRelay = websocket.app.state.relay
-    node_id = websocket.query_params.get("node_id", "")
-    token = websocket.query_params.get("token", "")
+    node_id = websocket.headers.get("x-node-id") or websocket.query_params.get("node_id", "")
+    token = websocket.headers.get("x-node-token") or websocket.query_params.get("token", "")
     if not service.authenticate(node_id, token):
         await websocket.close(code=4401, reason="invalid node credentials")
         return
@@ -825,9 +825,14 @@ async def admin_import_gguf(payload: GgufImportRequest, request: Request) -> dic
 
 
 async def _run_gguf_import(app, argv: list[str]) -> None:
+    settings = getattr(app.state, "settings", None)
+    timeout = getattr(settings, "gguf_timeout_s", None)
     try:
         runner = getattr(app.state, "gguf_runner", None)
-        rc = await runner(argv) if runner is not None else _subprocess_import(argv)
+        if runner is not None:
+            rc = await asyncio.wait_for(runner(argv), timeout=timeout)
+        else:
+            rc = await _subprocess_import(argv, timeout_s=timeout)
         if rc == 0:
             app.state.gguf_import_error = None
             app.state.recompute_pool("gguf_import")
@@ -835,6 +840,9 @@ async def _run_gguf_import(app, argv: list[str]) -> None:
         else:
             app.state.gguf_import_error = f"converter exited with code {rc} (see logs)"
             log.error("gguf_import_failed rc=%d", rc)
+    except TimeoutError:
+        app.state.gguf_import_error = f"gguf import timed out after {timeout}s"
+        log.error("gguf_import_timeout timeout=%s", timeout)
     except Exception as exc:  # noqa: BLE001 — background task must never crash the loop
         app.state.gguf_import_error = str(exc)
         log.exception("gguf_import_error")
@@ -842,7 +850,7 @@ async def _run_gguf_import(app, argv: list[str]) -> None:
         app.state.gguf_import = None
 
 
-async def _subprocess_import(argv: list[str]) -> int:
+async def _subprocess_import(argv: list[str], timeout_s: float | None = None) -> int:
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
     proc = await asyncio.create_subprocess_exec(
         *argv,
@@ -851,9 +859,32 @@ async def _subprocess_import(argv: list[str]) -> int:
         env=env,
     )
     assert proc.stdout is not None
-    async for raw in proc.stdout:
-        log.info("gguf_import %s", raw.decode("utf-8", "replace").rstrip())
-    return await proc.wait()
+    try:
+        if timeout_s is None:
+            async for raw in proc.stdout:
+                log.info("gguf_import %s", raw.decode("utf-8", "replace").rstrip())
+            return await proc.wait()
+        # Bound the whole run (including a converter that stalls silently) and
+        # never leak the child on timeout.
+        async with asyncio.timeout(timeout_s):
+            async for raw in proc.stdout:
+                log.info("gguf_import %s", raw.decode("utf-8", "replace").rstrip())
+            return await proc.wait()
+    except TimeoutError:
+        log.error("gguf_import_proc_timeout timeout=%s", timeout_s)
+        proc.terminate()
+        with contextlib.suppress(ProcessLookupError):
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+        raise
+    except asyncio.CancelledError:
+        proc.terminate()
+        with contextlib.suppress(ProcessLookupError):
+            await proc.wait()
+        raise
 
 
 # -- admin: model export (session N) ---------------------------------------------------------------
@@ -1246,7 +1277,10 @@ async def completions(payload: CompletionRequest, request: Request):
         manifest,
         rows,
         layers_per_node_target=settings.layers_per_node_target,
+        min_k=settings.min_stages,
+        max_k=settings.max_stages,
         backup_count=settings.backup_count,
+        min_nodes=settings.min_nodes,
     )
     if plan is None:
         raise HTTPException(

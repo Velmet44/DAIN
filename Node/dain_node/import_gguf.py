@@ -53,6 +53,19 @@ _SAFE_ID = re.compile(r"[^a-z0-9_-]+")
 _GGUF_IGNORE_TENSORS = frozenset({"rope_freqs.weight", "rotary_emb.inv_freq"})
 
 
+def _sanitize_model_id(value: str) -> str:
+    """Normalize a caller-supplied id to a safe store directory component.
+
+    The admin API only enforces a non-empty string, so an explicit
+    ``--model-id ../../x`` must be sanitized here (mirrors the read/delete
+    guards) or it would write outside the model store.
+    """
+    cleaned = _SAFE_ID.sub("-", value.lower()).strip("-")
+    if not cleaned:
+        raise ValueError(f"model id {value!r} contains no usable filename characters")
+    return cleaned
+
+
 # -- gguf metadata ------------------------------------------------------------
 
 
@@ -139,7 +152,7 @@ def import_gguf(
             f"GGUF architecture {arch!r} is not supported — DAIN's kernels are "
             "Llama-family only (see Docs/stages.md S10)"
         )
-    derived = model_id or _derive_model_id(reader, gguf)
+    derived = _sanitize_model_id(model_id) if model_id else _derive_model_id(reader, gguf)
 
     sha = _sha256_file(gguf)
     marker = load_marker(store)

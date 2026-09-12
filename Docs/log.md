@@ -1381,3 +1381,58 @@ returns Windows `Access denied`.
 - Moved all StageModel forward/logit operations to worker threads with `asyncio.to_thread`, keeping the agent transport and heartbeat loop responsive during slow CPU inference.
 - Error SSE frames now reach the client and terminate the stream with a visible error instead of leaving the assistant bubble on the `…` placeholder.
 - Full Node and Coordinator pytest suites plus Ruff pass; Client TypeScript/Vite build passes.
+## 2026-09-12 - P2/P3 bug-fix pass (SSE, live settings, model_id sanitization, WS auth)
+
+A consolidated correctness pass across all four packages; the full Coordinator
+and Node suites, Ruff, and the Client TypeScript/Vite build are green.
+
+SSE correctness:
+- Client no longer swallows coordinator "error" frames: the try/catch in the
+  stream loop now wraps only JSON.parse, and error frames throw out of the loop
+  so the chat callers surface the failure instead of hanging on an empty bubble.
+- The model picker no longer re-fetches the model list whenever the selected
+  model changes (modelId moved out of the effect deps into a ref mirror).
+
+Node fixes:
+- `_assemble_chunks` now sorts shard chunks numerically (`c2.part` after
+  `c10.part`) instead of lexicographically ("c10" < "c2").
+- `fetch_stage` runs `backend.deserialize_shard` through
+  `loop.run_in_executor`, so torch deserialization no longer blocks the agent
+  event loop (heartbeats stayed responsive).
+- `_Progress._t0` moved from a class attribute (set at import time) into
+  `__init__`, so reported elapsed time is per-shard again.
+- `_shard_locks` entries are released on every completion path (cached
+  re-check, successful os.replace + hash write) instead of growing unbounded.
+- `on_job_assign` guards `job.stages[job.my_stage_idx]`; an invalid stage index
+  now emits a final TOKEN_BATCH error frame rather than a 500.
+- Last-stage sampling reuses one `torch.Generator` seeded from job params
+  (continuous sequence, matching single-stage output) instead of a fresh RNG
+  per token; cross-node aggregation now deterministic for a given seed.
+
+Coordinator fixes:
+- Live settings finally apply everywhere: `FaultManager` and
+  `HeartbeatMonitor` read current `app.state.settings` (getters), and
+  `_watchdog_loop`/`recompute_pool_events` stop using the startup snapshot.
+- `/v1/completions` placement now honors the pool floor: `plan_placement`
+  receives `min_k/max_k/min_nodes` from settings, so a single powerful GPU is
+  no longer bypassed.
+- Node join-token re-admission: a restarted node whose row is still ONLINE
+  (heartbeat timeout not yet hit) is admitted immediately through the
+  `is_connected` liveness callback; the anti-impersonation guard now only
+  protects rows with a live WebSocket. Tests updated + regression added.
+- `_run_gguf_import` has a configurable timeout (`gguf_timeout_s`, default
+  3600); the exporter/stream loop is killed on timeout and the busy flag is
+  always cleared.
+- `/node/ws` accepts credentials in `X-Node-Id`/`X-Node-Token` headers (agent
+  no longer puts secrets in query strings); query params still work.
+
+Security hardening:
+- `model_id` from override/url input is sanitized with a `[a-z0-9_-]` profile in
+  `import_gguf.py`, `model_export.py`, and a defense-in-depth `is_safe_model_id`
+  guard in `shard_export._write_shards`.
+
+Housekeeping:
+- Bug-list fixes: SSE queue overflow now fails the job loudly instead of
+  silently dropping frames; `model_sources/` added to `.gitignore`;
+  `Docs/stages.md` status table updated (S8/S9 done, S10 pilot in progress,
+  S11 stretch, post-S9 sessions tabulated).

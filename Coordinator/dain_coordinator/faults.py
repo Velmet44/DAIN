@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Callable
 
 from dain_common.schemas import (
     Envelope,
@@ -47,17 +48,26 @@ log = logging.getLogger("dain.coordinator.faults")
 class FaultManager:
     def __init__(
         self,
-        settings: CoordinatorSettings,
+        settings_getter: CoordinatorSettings | Callable[[], CoordinatorSettings],
         jobs: JobTracker,
         connections,
         registry,
         service,
     ) -> None:
-        self.settings = settings
+        # Accept either a snapshot or a getter so admin edits to runtime settings
+        # (layers_per_node_target, max_job_restarts, …) apply live instead of
+        # being frozen at startup.
+        self._settings: Callable[[], CoordinatorSettings] = (
+            settings_getter if callable(settings_getter) else (lambda: settings_getter)
+        )
         self.jobs = jobs
         self.connections = connections
         self.registry = registry
         self.service = service
+
+    @property
+    def settings(self) -> CoordinatorSettings:
+        return self._settings()
 
     # -- triggers ---------------------------------------------------------------
 

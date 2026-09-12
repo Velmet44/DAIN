@@ -103,8 +103,20 @@ Runtime model (dev = everything on one machine):
 | S7 | Fault tolerance & degraded mode | ✅ 2026-09-09 |
 | S8 | Accounting ledger | ✅ 2026-09-09 |
 | S9 | Web client + deployment (GitHub Pages + public coordinator) | ✅ 2026-09-09 |
-| S10 | GPU pilot & measurement campaign | ☐ |
+| S10 | GPU pilot & measurement campaign | 🛠 in progress (real-model bring-up done; pilot report pending) |
 | S11 | (Stretch) MoE expert placement — OLMoE-1B-7B | ☐ |
+
+Post-S9 implementation sessions (not spec stages; they land real-model / ops
+work ahead of the pilot) — full detail in `Docs/log.md`:
+
+| Session | Name | Status |
+|---|---|---|
+| 8–16 | Real-model path, admin UI, LAN discovery, config.json, key rotation, GGUF import, keyless localhost admin, live admin settings | ✅ 2026-09-10/11 |
+| 17 | Live capacity heartbeats (placement reflects free VRAM/RAM) | ✅ 2026-09-11 (ef0127d) |
+| 18/18b/18c | Bug-fix sweeps across Common/Coordinator/Node/Client/Sim | ✅ 2026-09-11 |
+| 19 | P2P peer shard distribution (LAN peer server, parallel resume, inventory) | ✅ 2026-09-11 (c2ced0b) |
+| 20 | Auth, security, ledger & infra fixes | ✅ 2026-09-11 |
+| 21 | TorchAO INT4 quantization export pipeline | ✅ 2026-09-12 |
 
 ---
 

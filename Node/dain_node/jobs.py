@@ -86,6 +86,7 @@ class JobRuntime:
     attempt: int = 0
     started_at: float = 0.0
     buffered: tuple[ActivationRelayHeader, bytes] | None = None
+    sampler_rng: torch.Generator | None = None
 
 
 class JobHandler:
@@ -263,7 +264,29 @@ class JobHandler:
                 )
             )
             return
-        mine = job.stages[job.my_stage_idx]
+        try:
+            mine = job.stages[job.my_stage_idx]
+        except (IndexError, TypeError) as exc:
+            log.error(
+                "job_assign_bad_stage job=%s stage_idx=%r stages=%d",
+                job.job_id,
+                job.my_stage_idx,
+                len(job.stages),
+            )
+            await self._emit(
+                Envelope.wrap(
+                    MessageType.TOKEN_BATCH,
+                    TokenBatch(
+                        job_id=job.job_id,
+                        tokens=(),
+                        is_final=True,
+                        finish_reason="error",
+                        detail=f"invalid stage assignment: {exc}",
+                    ),
+                    ts=time.time(),
+                )
+            )
+            return
         log.info(
             "job_assigned job=%s model=%s stage=%d layers=[%d,%d] of %d",
             job.job_id,
@@ -526,11 +549,13 @@ class JobHandler:
                 out = await asyncio.to_thread(stage.forward_hidden, hidden)
                 if rt.last:
                     logits = (await asyncio.to_thread(stage.logits_from, out))[:, -1, :]
-                    generator = (
-                        torch.Generator().manual_seed((rt.job.params.seed or 0) + rt.generated)
-                        if rt.job.params.seed is not None
-                        else None
-                    )
+                    # One continuous generator per job (seeded once from
+                    # params.seed), matching the single-stage path: reseeding
+                    # fresh generators per step made the two modes differ even
+                    # with identical seeds.
+                    if rt.job.params.seed is not None and rt.sampler_rng is None:
+                        rt.sampler_rng = torch.Generator().manual_seed(rt.job.params.seed)
+                    generator = rt.sampler_rng
                     token_id = sample_token(logits, rt.job.params.temperature, generator)
                     is_eos = token_id == stage.manifest.eos_token_id
                     rt.generated += 1

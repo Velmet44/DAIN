@@ -57,10 +57,14 @@ def _chat_ui() -> str:
     return _CHAT_UI_HTML
 
 
-async def _watchdog_loop(faults, settings: CoordinatorSettings) -> None:
-    """Background stage-watchdog task (spec §13 detection)."""
+async def _watchdog_loop(faults, settings_getter) -> None:
+    """Background stage-watchdog task (spec §13 detection).
+
+    Reads live settings through `settings_getter` so an admin PUT /settings
+    applies to the loop instead of the startup snapshot.
+    """
     while True:
-        await asyncio.sleep(settings.watchdog_tick_s)
+        await asyncio.sleep(settings_getter().watchdog_tick_s)
         try:
             await faults.tick()
         except Exception:
@@ -80,12 +84,18 @@ def create_app(
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         registry = SQLiteRegistry(settings.db_path)
         registry.open()
-        service = NodeService(registry, settings)
         connections = NodeConnections()
+        service = NodeService(registry, settings, is_connected=connections.is_connected)
         jobs = JobTracker(max_jobs=settings.job_history_max, job_ttl_s=settings.job_ttl_s)
         relay = ActivationRelay(connections)
         placements = PlacementRecorder()
-        faults = FaultManager(settings, jobs, connections, registry, service)
+        faults = FaultManager(
+            settings_getter=lambda: app.state.settings,
+            jobs=jobs,
+            connections=connections,
+            registry=registry,
+            service=service,
+        )
         ledger = Ledger(settings, registry, jobs)
 
         def recompute_pool_events(trigger: str) -> None:
@@ -93,9 +103,13 @@ def create_app(
 
             Recomputes the plan for every model in the store (dev serves one);
             a store read failure must never break the triggering path.
+
+            Reads live settings from `app.state.settings` (admin PUT /settings
+            replaces it) rather than the startup snapshot captured at lifespan.
             """
+            live = app.state.settings
             try:
-                manifests: list[ModelManifest] = list(shard_store_list(settings.model_store_dir))
+                manifests: list[ModelManifest] = list(shard_store_list(live.model_store_dir))
             except OSError:
                 return
             rows = [
@@ -107,11 +121,11 @@ def create_app(
                 recompute_pool(
                     manifest,
                     rows,
-                    layers_per_node_target=settings.layers_per_node_target,
-                    min_k=settings.min_stages,
-                    max_k=settings.max_stages,
-                    backup_count=settings.backup_count,
-                    min_nodes=settings.min_nodes,
+                    layers_per_node_target=live.layers_per_node_target,
+                    min_k=live.min_stages,
+                    max_k=live.max_stages,
+                    backup_count=live.backup_count,
+                    min_nodes=live.min_nodes,
                     trigger=trigger,
                     recorder=placements,
                 )
@@ -138,9 +152,11 @@ def create_app(
         app.state.ledger = ledger
         app.state.rate_limiter = RateLimiter(settings.rate_limit_per_min)
         app.state.recompute_pool = recompute_pool_events
-        monitor = HeartbeatMonitor(service, settings)
+        monitor = HeartbeatMonitor(service)
         task = asyncio.create_task(monitor.run(), name="heartbeat-monitor")
-        watchdog = asyncio.create_task(_watchdog_loop(faults, settings), name="stage-watchdog")
+        watchdog = asyncio.create_task(
+            _watchdog_loop(faults, lambda: app.state.settings), name="stage-watchdog"
+        )
         discovery: DiscoveryResponder | None
         if settings.discovery_enabled:
             discovery = DiscoveryResponder(

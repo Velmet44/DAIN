@@ -21,7 +21,7 @@ import hashlib
 import os
 
 import torch
-from dain_common.model_store import load_manifest  # noqa: F401 (re-exported)
+from dain_common.model_store import is_safe_model_id, load_manifest  # noqa: F401 (re-exported)
 from dain_common.schemas import ModelManifest, ShardRef
 from safetensors.torch import save_file
 from transformers.models.llama.configuration_llama import LlamaConfig
@@ -66,6 +66,8 @@ def _write_shards(
     tokenizer_hash: str | None = None,
 ) -> ModelManifest:
     """Emit per-layer safetensors shards + manifest (+ tokenizer.json)."""
+    if not is_safe_model_id(model_id):
+        raise ValueError(f"unsafe model id {model_id!r} refused at write time")
     dtype = _dtype_for(dtype_label)
     layers = config.num_hidden_layers
     os.makedirs(out_dir, exist_ok=True)

@@ -106,21 +106,23 @@ def test_register_join_token_re_admits_existing_node(client: TestClient) -> None
     assert again["accepted"] is True
 
 
-def test_register_join_token_cannot_displace_online_node(client: TestClient) -> None:
-    """An ONLINE node keeps its identity: the (widely-shared) join token must
-    never rotate a working node's token or flip its state — that would let
-    anyone impersonate and evict a live member."""
+def test_register_join_token_cannot_displace_live_online_node(client: TestClient) -> None:
+    """A node with a LIVE connection keeps its identity: the (widely-shared)
+    join token must never rotate a working node's token or flip its state —
+    that would let anyone impersonate and evict a live member."""
     ack = client.post("/node/register", json=register_payload("node-a", auth_token=JOIN)).json()
     assert ack["accepted"] is True
     token = ack["node_token"]
     detail = client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()
     assert detail["state"] == "online"
 
-    hijack = client.post(
-        "/node/register", json=register_payload("node-a", auth_token=JOIN)
-    ).json()
-    assert hijack["accepted"] is False
-    assert "token" in hijack["reason"]
+    # Hold the node's live WS open so the coordinator sees it as connected.
+    with client.websocket_connect(f"/node/ws?node_id=node-a&token={token}") as ws:
+        hijack = client.post(
+            "/node/register", json=register_payload("node-a", auth_token=JOIN)
+        ).json()
+        assert hijack["accepted"] is False
+        assert "token" in hijack["reason"]
 
     # The node keeps its state and token (nothing was rotated).
     assert client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["state"] == "online"
@@ -129,6 +131,25 @@ def test_register_join_token_cannot_displace_online_node(client: TestClient) -> 
     ).json()
     assert still["accepted"] is True
     assert still["node_token"] == token
+
+
+def test_register_join_token_re_admits_disconnected_online_node(client: TestClient) -> None:
+    """A restarted node's row can sit ONLINE (heartbeat timeout not yet hit)
+    with no live WS. Self-heal via the join token must succeed immediately
+    instead of waiting out the offline timeout — the anti-impersonation guard
+    only protects nodes that are actually serving."""
+    ack = client.post("/node/register", json=register_payload("node-a", auth_token=JOIN)).json()
+    assert ack["accepted"] is True
+    old_token = ack["node_token"]
+    assert client.get("/admin/nodes/node-a", headers=ADMIN_HEADERS).json()["state"] == "online"
+
+    # No WS is open anywhere; the restart presents only the join token.
+    healed = client.post(
+        "/node/register", json=register_payload("node-a", auth_token=JOIN)
+    ).json()
+    assert healed["accepted"] is True
+    assert healed["node_token"] != old_token
+    assert len(healed["node_token"]) >= 16
 
 
 def test_register_low_score_rejected(client: TestClient, tmp_path) -> None:
