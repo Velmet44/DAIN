@@ -1346,3 +1346,25 @@ logs and never schedule a job.
   Windows, absolute paths kept on Linux too.
 - Verified: local `pytest` green, ruff clean; CI run 34666043256 all jobs pass.
 
+
+## 2026-09-12 — Registration recovery, SSE liveness, and admin refresh
+
+- Node registration now recovers from a stale persisted node token by retrying
+  with the configured cluster join token; regression coverage verifies the
+  stale-token-to-fresh-token flow.
+- The same-PC launcher now reads credentials from `Coordinator/config.json`,
+  validates an existing coordinator before reuse, selects a free compatible
+  port, passes `-ModelId`, and starts isolated component processes.
+- Coordinator SSE streams now emit ten-second heartbeat frames during model
+  loading or slow first-token computation. Completion queues attach before
+  dispatch, preventing fast jobs from losing their first frames.
+- The admin shell is served with `Cache-Control: no-store`; status/log/optional
+  text updates tolerate missing elements instead of masking refresh errors with
+  a null `textContent` exception.
+
+#### Gates
+Node registration regression test passed; Coordinator admin/chat UI tests
+passed (8); Coordinator and Node Ruff checks passed; admin inline JavaScript
+syntax check passed; Client `npm.cmd run build` passed. Pytest required a
+workspace-local `--basetemp` because the machine's global pytest temp folder
+returns Windows `Access denied`.

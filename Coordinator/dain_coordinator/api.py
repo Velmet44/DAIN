@@ -1285,6 +1285,7 @@ async def completions(payload: CompletionRequest, request: Request):
         top_p=1.0,
         seed=payload.seed,
     )
+    queue = jobs.attach(record.job_id)
     dispatched = True
     for stage in stages:
         assign = JobAssign(
@@ -1307,21 +1308,24 @@ async def completions(payload: CompletionRequest, request: Request):
         jobs.fail_job(record.job_id, "stage node connection lost before dispatch")
         raise HTTPException(status_code=503, detail="stage node connection lost")
     jobs.mark_dispatched(record.job_id, stages[0].node_id, stages)
-    queue = jobs.attach(record.job_id)
 
     async def event_stream():
         try:
             yield _sse({"job_id": record.job_id, "status": "dispatched"})
             deadline = asyncio.get_running_loop().time() + settings.job_timeout_s
             while True:
-                try:
-                    frame = await asyncio.wait_for(
-                        queue.get(), timeout=max(0.1, deadline - asyncio.get_running_loop().time())
-                    )
-                except TimeoutError:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
                     jobs.fail_job(record.job_id, "job timeout")
                     yield _sse({"type": "error", "job_id": record.job_id, "detail": "job timeout"})
                     break
+                try:
+                    frame = await asyncio.wait_for(
+                        queue.get(), timeout=min(10.0, remaining)
+                    )
+                except TimeoutError:
+                    yield _sse({"type": "heartbeat", "job_id": record.job_id})
+                    continue
                 yield _sse(frame)
                 if frame["type"] in ("final", "error"):
                     break

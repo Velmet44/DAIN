@@ -19,6 +19,7 @@ def test_admin_ui_served(client: TestClient) -> None:
     response = client.get("/admin/")
     assert response.status_code == 200
     assert response.headers["content-type"] == "text/html; charset=utf-8"
+    assert response.headers["cache-control"] == "no-store"
     assert "DAIN Coordinator" in response.text
     assert "adminKey" in response.text and "apiKey" in response.text
 

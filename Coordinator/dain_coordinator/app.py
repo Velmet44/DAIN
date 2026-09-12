@@ -202,7 +202,7 @@ def create_app(
     @app.get("/admin/", include_in_schema=False)
     def admin_ui() -> HTMLResponse:
         """Served shell only — every data call the page makes is authed separately."""
-        return HTMLResponse(_admin_ui())
+        return HTMLResponse(_admin_ui(), headers={"Cache-Control": "no-store"})
 
     @app.get("/msg", include_in_schema=False)
     @app.get("/msg/", include_in_schema=False)

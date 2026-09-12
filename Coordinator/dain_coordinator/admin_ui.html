@@ -225,6 +225,10 @@
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
+const setText = (id, value) => {
+  const element = $(id);
+  if (element) element.textContent = value;
+};
 const keys = {
   get admin(){ return localStorage.getItem("dain_admin") || ""; },
   get api(){ return localStorage.getItem("dain_api") || ""; },
@@ -379,7 +383,7 @@ const fmtBytes = b => b >= 1073741824 ? (b / 1073741824).toFixed(2) + " GiB"
   : (b / 1024).toFixed(0) + " KiB";
 
 function renderJobs(data) {
-  $("jobsCount").textContent = "(" + data.active + " active)";
+  setText("jobsCount", "(" + data.active + " active)");
   const rows = data.jobs || [];
   if (!rows.length) { $("jobs").innerHTML = '<span class="tag">no jobs yet</span>'; return; }
   $("jobs").innerHTML = rows.map(j => `
@@ -400,11 +404,11 @@ function renderJobs(data) {
 async function loadLogs() {
   try {
     const r = await api("/admin/logs?lines=" + ($("logLines").value || 200), "admin");
-    $("logview").textContent = (r.logs || []).join("\n");
+    setText("logview", (r.logs || []).join("\n"));
   } catch (e) {
-    $("logview").textContent = String(e.message || e).startsWith("401")
+    setText("logview", String(e.message || e).startsWith("401")
       ? "(admin key required — keyless access is localhost-only)"
-      : String(e.message || e);
+      : String(e.message || e));
   }
 }
 
@@ -434,16 +438,26 @@ function renderMetrics(m) {
 
 let failTimer = 0;
 function fail(e) {
-  $("status").className = "err";
-  $("status").textContent = String(e.message || e);
-  clearTimeout(failTimer); failTimer = setTimeout(() => $("status").textContent = "", 4000);
+  const status = $("status");
+  if (!status) {
+    console.error("admin refresh failed", e);
+    return;
+  }
+  status.className = "err";
+  status.textContent = String(e.message || e);
+  clearTimeout(failTimer); failTimer = setTimeout(() => setText("status", ""), 4000);
 }
 
 let okTimer = 0;
 function ok(msg) {
-  $("status").className = "ok";
-  $("status").textContent = msg;
-  clearTimeout(okTimer); okTimer = setTimeout(() => $("status").textContent = "", 4000);
+  const status = $("status");
+  if (!status) {
+    console.info(msg);
+    return;
+  }
+  status.className = "ok";
+  status.textContent = msg;
+  clearTimeout(okTimer); okTimer = setTimeout(() => setText("status", ""), 4000);
 }
 
 // -- keys & tokens ---------------------------------------------------------
@@ -457,7 +471,7 @@ function paintKeys(state) {
   notes.push(state.writable ? "persisted to config.json" : "in-memory only (no config file)");
   const over = Object.keys(state.env_overrides || {});
   if (over.length) notes.push("env still wins at restart for: " + over.join(", "));
-  $("keysNote").textContent = notes.join(" · ");
+  setText("keysNote", notes.join(" · "));
   $("keysCard").hidden = false;
 }
 
@@ -470,8 +484,8 @@ async function loadKeys() {
       // Locked (remote host, or wrong key): keep the card visible so the
       // admin key can be entered above.
       $("keysCard").hidden = false;
-      $("keysNote").textContent =
-        "unauthorized — enter the admin key above (keyless access is localhost-only)";
+      setText("keysNote",
+        "unauthorized — enter the admin key above (keyless access is localhost-only)");
       return;
     }
     throw e;
@@ -517,9 +531,9 @@ function paintSettings(state) {
   settingsState = state;
   Object.entries(SETTINGS_FIELDS).forEach(([f, id]) => { $(id).value = state.settings[f] ? state.settings[f].value : ""; });
   const over = Object.entries(state.settings).filter(([, v]) => v.env_overridden).map(([f]) => f);
-  $("settingsNote").textContent = state.writable ? "applied live + persisted to config.json" : "applied live, in-memory only (no config file)";
-  $("settingsWarn").textContent = over.length ? "env still wins at restart for: " + over.join(", ") : "";
-  $("sRestart").textContent = Object.entries(state.restart).map(([k, v]) => k + "=" + v).join("  ·  ");
+  setText("settingsNote", state.writable ? "applied live + persisted to config.json" : "applied live, in-memory only (no config file)");
+  setText("settingsWarn", over.length ? "env still wins at restart for: " + over.join(", ") : "");
+  setText("sRestart", Object.entries(state.restart).map(([k, v]) => k + "=" + v).join("  ·  "));
   $("settingsCard").hidden = false;
 }
 
@@ -673,7 +687,7 @@ $("expStart").onclick = async () => {
 };
 
 async function refresh() {
-  $("status").textContent = "loading…";
+  setText("status", "loading…");
   try {
     const modelsP = api("/admin/models", "admin")
       .then(r => r.models.map(m => Object.assign(m, { can_delete: true })))
@@ -696,8 +710,11 @@ async function refresh() {
       active_jobs: feed.active_jobs,
       credits: (ledger.totals || {}).credits || 0,
     });
-    $("status").className = "ok";
-    $("status").textContent = new Date().toLocaleTimeString();
+    const status = $("status");
+    if (status) {
+      status.className = "ok";
+      status.textContent = new Date().toLocaleTimeString();
+    }
     // Admin-only extras degrade gracefully while unauthorized (401).
     try { renderJobs(await api("/admin/jobs", "admin")); }
     catch (e) { if (!String(e.message || e).startsWith("401")) throw e; }

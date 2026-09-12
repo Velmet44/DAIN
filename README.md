@@ -19,10 +19,18 @@ Run **`Scripts\start-samepc.ps1`**:
 powershell -ExecutionPolicy Bypass -File Scripts\start-samepc.ps1
 ```
 
-It opens the coordinator, N node agents, and the web client (as tabs in the
-same Windows Terminal window if you launch it from there, or in separate windows
-otherwise) and prompts for API keys when asked (Enter accepts the dev defaults).
+It opens the coordinator, N node agents, and the web client in separate PowerShell
+windows and prompts for API keys when asked (Enter accepts the values from
+`Coordinator/config.json`). It validates credentials before reusing an existing
+coordinator and selects a specific free port when one is already occupied.
 Stop everything with **Ctrl+C** in each window.
+
+To start a specific model on the nodes, pass its model ID:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Scripts\start-samepc.ps1 `
+  -ModelId llama-3.2-1b-int4
+```
 
 ### Option B: Manual (3 terminals)
 

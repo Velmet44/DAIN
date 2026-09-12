@@ -1,7 +1,8 @@
 ﻿param(
     [ValidateSet("launcher", "coordinator", "node", "client", IgnoreCase = $true)]
     [string]$Mode = "launcher",
-    [int]$NodeIndex = 1
+    [int]$NodeIndex = 1,
+    [string]$ModelId = ""
 )
 
 # ============================================================================
@@ -28,6 +29,23 @@ $script:ScriptPath = $PSCommandPath
 $script:ScriptsDir = Split-Path -Parent $script:ScriptPath
 $script:Root = Split-Path -Parent $script:ScriptsDir
 $script:ModelStore = Join-Path $script:Root "model_store"
+$script:CoordinatorConfig = Join-Path $script:Root "Coordinator\config.json"
+$script:ConfigDefaults = @{
+    admin_api_key = "2UPZQJln"
+    api_key = "DzOjEXqs"
+    join_token = "Jj3L7ewD"
+}
+if (Test-Path -LiteralPath $script:CoordinatorConfig) {
+    try {
+        $config = Get-Content -LiteralPath $script:CoordinatorConfig -Raw | ConvertFrom-Json
+        foreach ($field in @("admin_api_key", "api_key", "join_token")) {
+            $value = [string]$config.$field
+            if ($value) { $script:ConfigDefaults[$field] = $value }
+        }
+    } catch {
+        Write-Host "[WARN] Could not read coordinator config defaults: $($_.Exception.Message)" -ForegroundColor Yellow
+    }
+}
 
 function Exec-Component {
     param(
@@ -97,15 +115,15 @@ foreach ($tool in @("uv", "node")) {
     }
 }
 
-# Optional keys (Enter = defaults)
-$adminKey = Read-Host "  Admin API key     [2UPZQJln]"
-if (-not $adminKey) { $adminKey = "2UPZQJln" }
+# Optional keys (Enter = config.json values)
+$adminKey = Read-Host "  Admin API key     [$($script:ConfigDefaults.admin_api_key)]"
+if (-not $adminKey) { $adminKey = $script:ConfigDefaults.admin_api_key }
 
-$clientKey = Read-Host "  Client API key    [DzOjEXqs]"
-if (-not $clientKey) { $clientKey = "DzOjEXqs" }
+$clientKey = Read-Host "  Client API key    [$($script:ConfigDefaults.api_key)]"
+if (-not $clientKey) { $clientKey = $script:ConfigDefaults.api_key }
 
-$joinToken = Read-Host "  Join token        [Jj3L7ewD]"
-if (-not $joinToken) { $joinToken = "Jj3L7ewD" }
+$joinToken = Read-Host "  Join token        [$($script:ConfigDefaults.join_token)]"
+if (-not $joinToken) { $joinToken = $script:ConfigDefaults.join_token }
 
 $numNodes = Read-Host "  Number of nodes   [1]"
 if (-not $numNodes) { $numNodes = 1 }
@@ -138,14 +156,7 @@ function Start-Component {
         "-Mode", $Mode,
         "-NodeIndex", "$NodeIndex"
     )
-    $argString = $childArgs -join " "
-    if ($env:WT_SESSION -and (Get-Command wt -ErrorAction SilentlyContinue)) {
-        # Inside Windows Terminal: add a tab to THIS window.
-        $wtLine = "wt -w 0 new-tab --title `"$Title`" powershell $argString"
-        Start-Process cmd -ArgumentList @("/c", $wtLine) -WindowStyle Hidden
-    } else {
-        Start-Process powershell -ArgumentList $childArgs
-    }
+    Start-Process powershell -ArgumentList $childArgs
 }
 
 # Fast TCP probe: coordinator bound yet? (milliseconds, not 1s timeouts)
@@ -164,26 +175,54 @@ function Test-DainPort {
     }
 }
 
-# Check for an already-running coordinator BEFORE spawning a duplicate.
+function Test-CoordinatorCredentials {
+    param(
+        [int]$Port,
+        [string]$AdminKey,
+        [string]$JoinToken
+    )
+    try {
+        $response = Invoke-RestMethod `
+            -Uri "http://127.0.0.1:$Port/admin/settings/keys" `
+            -Headers @{ "X-Admin-Key" = $AdminKey } `
+            -Method Get `
+            -TimeoutSec 2
+        return [bool]($response.join_token -eq $JoinToken)
+    } catch {
+        return $false
+    }
+}
+
 $candidates = @(8000, 8001, 8002, 8080, 8888, 9000)
-$existing = $candidates | Where-Object { Test-DainPort -Port $_ } | Select-Object -First 1
-if ($existing) {
-    Write-Host "An existing coordinator is already answering on port $existing - reusing it." -ForegroundColor Yellow
-    $coordPort = $existing
+$compatible = $null
+foreach ($candidate in $candidates) {
+    if (Test-DainPort -Port $candidate) {
+        if (Test-CoordinatorCredentials -Port $candidate -AdminKey $adminKey -JoinToken $joinToken) {
+            $compatible = $candidate
+            break
+        }
+        Write-Host "Port $candidate has a coordinator with different credentials; not reusing it." -ForegroundColor Yellow
+    }
+}
+if ($compatible) {
+    Write-Host "Reusing compatible coordinator on port $compatible." -ForegroundColor Yellow
+    $coordPort = $compatible
 } else {
-    # 1) Coordinator (auto-picks a free port)
+    $coordPort = $candidates | Where-Object { -not (Test-DainPort -Port $_) } | Select-Object -First 1
+    if (-not $coordPort) {
+        throw "No free coordinator port found in: $($candidates -join ', ')"
+    }
+    $env:DAIN_PORT = [string]$coordPort
     Start-Component -Title "DAIN Coordinator" -Mode "coordinator"
 
-    # 2) Wait for it, discover its port
-    Write-Host "`nWaiting for coordinator and detecting its port..." -ForegroundColor Gray
-    $coordPort = $null
-    for ($try = 0; $try -lt 60 -and -not $coordPort; $try++) {
-        $coordPort = $candidates | Where-Object { Test-DainPort -Port $_ } | Select-Object -First 1
-        if (-not $coordPort) { Start-Sleep -Milliseconds 500 }
+    Write-Host "`nWaiting for coordinator on port $coordPort..." -ForegroundColor Gray
+    $ready = $false
+    for ($try = 0; $try -lt 60 -and -not $ready; $try++) {
+        $ready = Test-CoordinatorCredentials -Port $coordPort -AdminKey $adminKey -JoinToken $joinToken
+        if (-not $ready) { Start-Sleep -Milliseconds 500 }
     }
-    if (-not $coordPort) {
-        Write-Host "[WARN] Coordinator not detected after 30s, assuming port 8000." -ForegroundColor Yellow
-        $coordPort = 8000
+    if (-not $ready) {
+        throw "Coordinator did not become ready with the requested credentials on port $coordPort"
     }
     Write-Host "Coordinator lives on port $coordPort." -ForegroundColor Green
 }
@@ -191,6 +230,11 @@ if ($existing) {
 $env:DAIN_COORD_URL = "ws://localhost:$coordPort"
 $env:VITE_API_URL = "http://localhost:$coordPort"
 $env:VITE_API_KEY = $clientKey
+if ($ModelId) {
+    $env:DAIN_MODEL = $ModelId
+} elseif (-not $env:DAIN_MODEL) {
+    $env:DAIN_MODEL = "dain-tiny-16L"
+}
 
 # 3) Node agents (share the detected port)
 for ($i = 1; $i -le [int]$numNodes; $i++) {
@@ -206,6 +250,7 @@ Start-Component -Title "DAIN Web Client" -Mode "client"
 Write-Host ""
 Write-Host " === All terminals launched! ===" -ForegroundColor Green
 Write-Host "  Coordinator:  http://localhost:$coordPort"
+Write-Host "  Node model:   $env:DAIN_MODEL"
 Write-Host "  Web client:   http://localhost:5173/DAIN/"
 Write-Host "  Admin API:    curl -H `"X-Admin-Key: $adminKey`" http://localhost:$coordPort/admin/nodes"
 Write-Host ""

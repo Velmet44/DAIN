@@ -160,10 +160,12 @@ class NodeAgent:
         response.raise_for_status()
         ack = RegisterAck.model_validate(response.json())
         if not ack.accepted:
-            if ack.reason == "invalid node token" and self.identity.node_token is not None:
-                # Coordinator lost our token (e.g. fresh DB): re-join under the same
-                # node_id — history survives because it is keyed by node_id.
-                log.warning("token_rejected node=%s re-joining", self.identity.node_id)
+            if self.identity.node_token is not None:
+                log.warning(
+                    "node_token_rejected node=%s reason=%s re-joining",
+                    self.identity.node_id,
+                    ack.reason,
+                )
                 self.identity.node_token = None
                 return await self.register(client)
             raise RuntimeError(f"registration rejected: {ack.reason}")
