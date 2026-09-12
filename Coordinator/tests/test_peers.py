@@ -9,12 +9,16 @@ through the hotspot).
 
 from __future__ import annotations
 
+import pathlib
+
 from conftest import make_client, make_settings, register_payload
 from dain_common.schemas import (
     Envelope,
     Heartbeat,
     MessageType,
     MetricsReport,
+    ModelManifest,
+    QuantizationSpec,
     ShardRef,
 )
 from fastapi.testclient import TestClient
@@ -150,6 +154,79 @@ def test_peers_requires_node_auth(client: TestClient) -> None:
         peer_url="http://10.0.0.7:6000",
     )
     assert client.get("/model/peers/model-g/shard-0").status_code == 401
+
+
+# -- .pt (quantized) shard serving -------------------------------------------------
+
+
+def _pt_model_dir(store_dir: pathlib.Path) -> pathlib.Path:
+    """A quantized store entry: manifest.json recording torch_pt shards + .pt files."""
+    model_dir = store_dir / "quant-model"
+    model_dir.mkdir(parents=True)
+    shard = ShardRef(
+        model_id="quant-model",
+        shard_id="layers_00_03",
+        content_hash="a" * 64,
+        size_bytes=10,
+        format="torch_pt",
+    )
+    (model_dir / "manifest.json").write_text(
+        ModelManifest(
+            model_id="quant-model",
+            name="quant",
+            layers=4,
+            hidden=8,
+            heads=2,
+            kv_heads=2,
+            intermediate=16,
+            vocab_size=16,
+            eos_token_id=0,
+            format="torch_pt",
+            quantization=QuantizationSpec(
+                backend="torchao",
+                scheme="int4_weight_only",
+                bits=4,
+                group_size=128,
+                packing_layout="int4_cpu",
+            ),
+            shards=(shard,),
+        ).model_dump_json()
+    )
+    (model_dir / "layers_00_03.pt").write_bytes(b"pt-payload")
+    return model_dir
+
+
+def test_pt_shard_served_by_get(tmp_path) -> None:
+    store_dir = tmp_path / "store"
+    _pt_model_dir(store_dir)
+    settings = make_settings(tmp_path, model_store_dir=str(store_dir))
+    with make_client(settings) as client:
+        ack = register(client, "node-a").json()
+        r = client.get(
+            "/model/shard/quant-model/layers_00_03", headers=auth("node-a", ack["node_token"])
+        )
+        assert r.status_code == 200
+        assert r.content == b"pt-payload"
+        # The safetensors spelling of the same shard must stay a 404.
+        miss = client.get(
+            "/model/shard/quant-model/layers_00_03.safetensors",
+            headers=auth("node-a", ack["node_token"]),
+        )
+        assert miss.status_code == 404
+
+
+def test_pt_shard_head_reports_size(tmp_path) -> None:
+    store_dir = tmp_path / "store"
+    _pt_model_dir(store_dir)
+    settings = make_settings(tmp_path, model_store_dir=str(store_dir))
+    with make_client(settings) as client:
+        ack = register(client, "node-a").json()
+        h = client.head(
+            "/model/shard/quant-model/layers_00_03", headers=auth("node-a", ack["node_token"])
+        )
+        assert h.status_code == 200
+        assert h.headers["content-length"] == "10"
+        assert h.headers["accept-ranges"] == "bytes"
 
 
 # -- size probe (HEAD) ------------------------------------------------------------

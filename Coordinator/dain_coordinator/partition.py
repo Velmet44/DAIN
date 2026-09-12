@@ -26,15 +26,30 @@ def _is_backend_feasible(manifest: ModelManifest, row: NodeRow) -> bool:
 
     Legacy fp16/fp32 models run anywhere.  INT4-quantized models require the
     node to support the torchao backend, the matching quantization scheme, and
-    — critically — the packing layout the model was exported for.
+    — critically — the packing layout the model was exported for (spec §7,
+    session N). On top of the backend gates, the node must also list the
+    exported *adapter* and the model's *activation dtype* in its advertised
+    capabilities, so a llama-only node never lands a foreign-architecture
+    stage and a bf16-exported model never lands on an fp16-only node.
     """
     quant = getattr(manifest, "quantization", None)
+    sw = row.manifest.software
+
+    # Adapter gate: only nodes that can execute the exported family.
+    adapter = getattr(manifest, "adapter_id", None)
+    if adapter is not None and adapter not in sw.supported_adapters:
+        return False
+
     if quant is None or getattr(quant, "backend", "none") == "none":
         return True  # unquantized model — any torch node works
-    sw = row.manifest.software
+
     if "torchao" not in sw.supported_backends:
         return False
     if quant.scheme not in sw.supported_quantization:
+        return False
+    # Activation-dtype gate: an fp16-exported manifest must not run on a node
+    # that only advertises a narrower activation repertoire.
+    if quant.activation_dtype not in sw.supported_activation_dtypes:
         return False
     layout = getattr(quant, "packing_layout", None)
     if layout and layout not in sw.supported_packing_layouts:

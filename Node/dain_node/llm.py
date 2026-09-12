@@ -60,9 +60,36 @@ _ACTIVATION_DTYPES_LABEL = {
     "bf16": torch.bfloat16,
 }
 
+#: Packing layouts recorded in QuantizationSpec (mirrors model_export.LAYOUT_*).
+_LAYOUT_TENSOR_CORE_TILED = "tensor_core_tiled"
+_LAYOUT_INT4_CPU = "int4_cpu"
+
 
 def _activation_dtype(label: str) -> torch.dtype:
     return _ACTIVATION_DTYPES_LABEL.get(label, torch.float32)
+
+
+def select_device(manifest: ModelManifest) -> str:
+    """Choose the execution device for a manifest (CUDA when available).
+
+    The packing layout dictates where a *quantized* model must run: TorchAO's
+    ``TensorCoreTiledLayout`` weights only execute on CUDA (tinygemm), while
+    ``Int4CPULayout`` runs on CPU — silently placing a tensor_core_tiled model
+    on CPU (or int4_cpu on a GPU) is a runtime failure, not an optimization.
+    Legacy fp16/fp32 manifests prefer CUDA when present and fall back to CPU.
+    """
+    quant = getattr(manifest, "quantization", None)
+    if quant is not None and quant.is_quantized:
+        layout = getattr(quant, "packing_layout", None)
+        if layout == _LAYOUT_TENSOR_CORE_TILED:
+            if not torch.cuda.is_available():
+                raise RuntimeError(
+                    f"model {manifest.model_id} requires CUDA "
+                    f"(packing_layout={layout!r}) but this node has no GPU"
+                )
+            return "cuda:0"
+        return "cpu"  # int4_cpu (and legacy/auto layouts) execute on CPU
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
 
 
 # -- inference backend abstraction (S22) --------------------------------------
@@ -839,9 +866,11 @@ class StageModel:
                 if self.backend.is_quantized:
                     # Quantized projections arrive as AffineQuantizedTensor
                     # parameters: assign them in place (copy_ cannot handle the
-                    # packed subclass). Norm weights stay fp16/bf16 and copy.
+                    # packed subclass) and move each AQT to the stage device —
+                    # a tensor_core_tiled model must land on CUDA, int4_cpu on
+                    # CPU; `.to()` on an AQT transfers the packed payload.
                     subset = {
-                        name: state[prefix + name]
+                        name: state[prefix + name].to(device)
                         for name, _param in layer.named_parameters()
                         if prefix + name in state
                     }
@@ -1032,6 +1061,7 @@ async def fetch_stage(
         layer_start,
         layer_end,
         state,
+        device=select_device(manifest),
         tokenizer_path=tokenizer_path,
         backend=backend,
     )

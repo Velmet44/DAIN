@@ -14,6 +14,7 @@ peer + localhost Host (DNS-rebinding) + Origin (drive-by CSRF) checks, see
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import json
 import logging
@@ -871,6 +872,16 @@ class ExportModelRequest(BaseModel):
     trust_remote_code: bool = False
 
 
+class ExportValidateRequest(BaseModel):
+    """`Detect` in the admin UI probes a directory before any export config is
+    filled in, so only *source_dir* is required here — model_id is optional."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_dir: str
+    model_id: str | None = Field(default=None, min_length=1)
+
+
 class ExportJobStatus(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -936,8 +947,31 @@ def admin_export_roots(request: Request) -> dict:
     return {"roots": roots, "busy": _active_export(request) is not None}
 
 
+def _export_source_weights(src: pathlib.Path) -> list[pathlib.Path]:
+    return sorted(src.glob("*.safetensors")) or sorted(src.glob("*.bin"))
+
+
+def _export_source_size(src: pathlib.Path) -> int:
+    return sum(p.stat().st_size for p in _export_source_weights(src))
+
+
+def _reject_if_too_large(settings, src: pathlib.Path) -> int:
+    """Shared size gate for validate + start; returns size_bytes."""
+    size_bytes = _export_source_size(src)
+    limit_gb = getattr(settings, "max_export_size_gb", 100.0)
+    if size_bytes > limit_gb * 1e9:
+        raise HTTPException(
+            status_code=413,
+            detail=(
+                f"source too large: {size_bytes / 1e9:.1f} GB exceeds "
+                f"max_export_size_gb ({limit_gb:.1f} GB)"
+            ),
+        )
+    return size_bytes
+
+
 @admin_router.post("/models/export/validate")
-def admin_export_validate(payload: ExportModelRequest, request: Request) -> dict:
+def admin_export_validate(payload: ExportValidateRequest, request: Request) -> dict:
     settings = request.app.state.settings
     src = _validate_export_source(payload.source_dir, settings.export_roots)
     info: dict = {"source_dir": str(src), "model_id": payload.model_id}
@@ -946,15 +980,23 @@ def admin_export_validate(payload: ExportModelRequest, request: Request) -> dict
         info["error"] = f"source directory {src} not found"
         return info
     config_file = src / "config.json"
-    weights = sorted(src.glob("*.safetensors")) or sorted(src.glob("*.bin"))
+    weights = _export_source_weights(src)
     if not config_file.is_file() or not weights:
         info["valid"] = False
         info["error"] = "missing config.json and/or model weights"
         return info
+    size_bytes = sum(p.stat().st_size for p in weights)
+    if size_bytes > settings.max_export_size_gb * 1e9:
+        info["valid"] = False
+        info["error"] = (
+            f"source too large: {size_bytes / 1e9:.1f} GB exceeds "
+            f"max_export_size_gb ({settings.max_export_size_gb:.1f} GB)"
+        )
+        return info
     info.update({
         "valid": True,
         "weight_count": len(weights),
-        "size_bytes": sum(p.stat().st_size for p in weights),
+        "size_bytes": size_bytes,
         "has_fast_tokenizer": (src / "tokenizer.json").is_file(),
     })
     return info
@@ -1004,6 +1046,7 @@ async def admin_export_model(payload: ExportModelRequest, request: Request) -> d
     src = _validate_export_source(payload.source_dir, settings.export_roots)
     if not src.is_dir():
         raise HTTPException(status_code=404, detail=f"source directory {src} not found")
+    _reject_if_too_large(settings, src)
     node_dir = _resolve_node_project(settings)
     if node_dir is None:
         raise HTTPException(
@@ -1045,9 +1088,14 @@ async def admin_export_model(payload: ExportModelRequest, request: Request) -> d
 
 
 async def _run_model_export(app, argv: list[str]) -> None:
+    settings = getattr(app.state, "settings", None)
+    timeout = getattr(settings, "export_timeout_s", None)
     try:
         runner = getattr(app.state, "model_export_runner", None)
-        rc = await runner(argv) if runner is not None else _subprocess_export(argv)
+        if runner is not None:
+            rc = await asyncio.wait_for(runner(argv), timeout=timeout)
+        else:
+            rc = await _subprocess_export(argv, timeout_s=timeout)
         if rc == 0:
             app.state.model_export_error = None
             app.state.recompute_pool("model_export")
@@ -1055,6 +1103,9 @@ async def _run_model_export(app, argv: list[str]) -> None:
         else:
             app.state.model_export_error = f"exporter exited with code {rc} (see logs)"
             log.error("model_export_failed rc=%d", rc)
+    except TimeoutError:
+        app.state.model_export_error = f"export timed out after {timeout}s"
+        log.error("model_export_timeout timeout=%s", timeout)
     except Exception as exc:  # noqa: BLE001 — background task must never crash the loop
         app.state.model_export_error = str(exc)
         log.exception("model_export_error")
@@ -1062,7 +1113,7 @@ async def _run_model_export(app, argv: list[str]) -> None:
         app.state.model_export = None
 
 
-async def _subprocess_export(argv: list[str]) -> int:
+async def _subprocess_export(argv: list[str], timeout_s: float | None = None) -> int:
     env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
     proc = await asyncio.create_subprocess_exec(
         *argv,
@@ -1071,9 +1122,33 @@ async def _subprocess_export(argv: list[str]) -> int:
         env=env,
     )
     assert proc.stdout is not None
-    async for raw in proc.stdout:
-        log.info("model_export %s", raw.decode("utf-8", "replace").rstrip())
-    return await proc.wait()
+    try:
+        if timeout_s is None:
+            async for raw in proc.stdout:
+                log.info("model_export %s", raw.decode("utf-8", "replace").rstrip())
+            return await proc.wait()
+        # Bound the whole run (including an exporter that stalls without
+        # emitting output) and never leak the child on timeout.
+        async with asyncio.timeout(timeout_s):
+            async for raw in proc.stdout:
+                log.info("model_export %s", raw.decode("utf-8", "replace").rstrip())
+            return await proc.wait()
+    except TimeoutError:
+        log.error("model_export_proc_timeout timeout=%s", timeout_s)
+        proc.terminate()
+        with contextlib.suppress(ProcessLookupError):
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except TimeoutError:
+                proc.kill()
+                await proc.wait()
+        raise
+    except asyncio.CancelledError:
+        # Coordinator shutdown / caller cancelled: take the child with us.
+        proc.terminate()
+        with contextlib.suppress(ProcessLookupError):
+            await proc.wait()
+        raise
 
 
 # -- client API (S4): SSE streaming completions ----------------------------------
@@ -1394,13 +1469,42 @@ def ledger_export(payload: ExportRequest, request: Request) -> Response:
 
 # -- model store (node-facing; spec §8/§11) ----------------------------------------
 
+#: Shard file extensions by ShardRef.format. Quantized shards are `torch_pt`
+#: (TorchAO packing metadata survives only torch.save), fp16/fp32 stay
+#: `safetensors`; None = legacy safetensors (plan §2.1).
+_SHARD_EXTS = {
+    None: ".safetensors",
+    "safetensors": ".safetensors",
+    "torch_pt": ".pt",
+}
+
+
+def _shard_ext(settings, model_id: str, shard_id: str) -> str:
+    """Resolve *shard_id* against the manifest so quantized shards serve as .pt.
+
+    A cold node first downloads from the coordinator: if the manifest records
+    `format="torch_pt"` the bytes live at `layers_XX_YY.pt`, not
+    `layers_XX_YY.safetensors` — guessing the extension always 404s.
+    """
+    manifest = shard_store_load(settings.model_store_dir, model_id)
+    if manifest is not None:
+        for shard in manifest.shards:
+            if shard.shard_id == shard_id:
+                return _SHARD_EXTS.get(shard.format, ".safetensors")
+    # Unknown shard/model → fall back to the legacy extension, matching the
+    # old single-format behavior; the existence check still 404s cleanly.
+    return ".safetensors"
+
 
 def _shard_path(settings, model_id: str, shard_id: str) -> str:
     # Path-traversal guard: mirror the store's own safe-component rule so ids
     # that pass manifest loading (dots, dashes, …) can never escape the store.
     if not shard_store_safe(model_id) or not shard_store_safe(shard_id):
         raise HTTPException(status_code=400, detail="invalid model or shard id")
-    return os.path.join(settings.model_store_dir, model_id, f"{shard_id}.safetensors")
+    # Quantized models live as `.pt` — resolve the manifest's format so a cold
+    # node requesting a quantized shard gets bytes instead of a 404.
+    ext = _shard_ext(settings, model_id, shard_id)
+    return os.path.join(settings.model_store_dir, model_id, f"{shard_id}{ext}")
 
 
 def _model_dir(settings, model_id: str) -> str:

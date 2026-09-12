@@ -8,6 +8,7 @@ project dir, mirroring the GGUF-import tests.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import pathlib
 import time
@@ -94,6 +95,31 @@ def test_export_validate_within_root(tmp_path) -> None:
         assert body["valid"] is True
         assert body["weight_count"] == 1
         assert body["has_fast_tokenizer"] is False
+
+
+def test_export_validate_without_model_id(tmp_path) -> None:
+    """The UI `Detect` button posts only `source_dir` (the export form isn't
+    filled in yet): model_id must be optional on the validate schema."""
+    store = _store(tmp_path)
+    root = tmp_path / "sources"
+    src = root / "tiny-model"
+    src.mkdir(parents=True)
+    (src / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (src / "model.safetensors").write_bytes(b"x")
+    settings = make_settings(
+        tmp_path,
+        model_store_dir=str(store),
+        node_project_dir=str(_fake_node_project(tmp_path)),
+        export_roots=(str(root),),
+    )
+    with make_client(settings) as client:
+        r = client.post(
+            "/admin/models/export/validate",
+            headers=ADMIN_HEADERS,
+            json={"source_dir": str(src)},
+        )
+        assert r.status_code == 200
+        assert r.json()["valid"] is True
 
 
 def test_export_validate_rejects_outside_root(tmp_path) -> None:
@@ -186,6 +212,91 @@ def test_export_rejects_when_busy(tmp_path) -> None:
             json={"source_dir": str(src), "model_id": "tiny-4"},
         )
         assert r.status_code == 409
+
+
+def test_export_validate_rejects_over_size(tmp_path) -> None:
+    store = _store(tmp_path)
+    root = tmp_path / "sources"
+    src = root / "big-model"
+    src.mkdir(parents=True)
+    (src / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (src / "model.safetensors").write_bytes(b"x" * (2 * 1024 * 1024))  # 2 MiB
+    settings = make_settings(
+        tmp_path,
+        model_store_dir=str(store),
+        node_project_dir=str(_fake_node_project(tmp_path)),
+        export_roots=(str(root),),
+        max_export_size_gb=0.001,
+    )
+    with make_client(settings) as client:
+        r = client.post(
+            "/admin/models/export/validate",
+            headers=ADMIN_HEADERS,
+            json={"source_dir": str(src)},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["valid"] is False
+        assert "too large" in body["error"]
+
+
+def test_export_start_rejects_over_size(tmp_path) -> None:
+    store = _store(tmp_path)
+    root = tmp_path / "sources"
+    src = root / "big-model"
+    src.mkdir(parents=True)
+    (src / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (src / "model.safetensors").write_bytes(b"x" * (2 * 1024 * 1024))
+    settings = make_settings(
+        tmp_path,
+        model_store_dir=str(store),
+        node_project_dir=str(_fake_node_project(tmp_path)),
+        export_roots=(str(root),),
+        max_export_size_gb=0.001,
+    )
+    with make_client(settings) as client:
+        r = client.post(
+            "/admin/models/export",
+            headers=ADMIN_HEADERS,
+            json={"source_dir": str(src), "model_id": "big-1"},
+        )
+        assert r.status_code == 413
+
+
+def test_export_times_out(tmp_path) -> None:
+    store = _store(tmp_path)
+    root = tmp_path / "sources"
+    src = root / "tiny-model"
+    src.mkdir(parents=True)
+    (src / "config.json").write_text(json.dumps({"model_type": "llama"}))
+    (src / "model.safetensors").write_bytes(b"x")
+    settings = make_settings(
+        tmp_path,
+        model_store_dir=str(store),
+        node_project_dir=str(_fake_node_project(tmp_path)),
+        export_roots=(str(root),),
+        export_timeout_s=0.05,
+    )
+    with make_client(settings) as client:
+        app = client.app
+
+        async def slow_runner(argv):
+            await asyncio.sleep(5)
+            return 0
+
+        app.state.model_export_runner = slow_runner
+        r = client.post(
+            "/admin/models/export",
+            headers=ADMIN_HEADERS,
+            json={"source_dir": str(src), "model_id": "tiny-timeout"},
+        )
+        assert r.status_code == 200
+        deadline = time.time() + 3.0
+        while time.time() < deadline and app.state.model_export is not None:
+            time.sleep(0.02)
+        assert app.state.model_export is None
+        assert app.state.model_export_error is not None
+        assert "timed out" in app.state.model_export_error
 
 
 def test_export_requires_roots(tmp_path) -> None:

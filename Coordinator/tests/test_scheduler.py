@@ -194,12 +194,15 @@ def _quant_node(
     backends: tuple[str, ...] = ("fp16", "fp32", "torchao"),
     quant: tuple[str, ...] = ("int4_weight_only",),
     layouts: tuple[str, ...] = ("int4_cpu",),
+    activation_dtypes: tuple[str, ...] = ("fp16", "bf16"),
+    adapters: tuple[str, ...] = ("llama",),
 ) -> NodeRow:
     sw = SoftwareInfo(
         supported_backends=backends,
         supported_quantization=quant,
         supported_packing_layouts=layouts,
-        supported_activation_dtypes=("fp16", "bf16"),
+        supported_activation_dtypes=activation_dtypes,
+        supported_adapters=adapters,
     )
     return NodeRow(
         node_id=node_id,
@@ -243,6 +246,37 @@ def test_quantized_model_selects_capable_nodes() -> None:
     capable = [_quant_node(f"cap{i}", score=0.8 - i * 0.01) for i in range(6)]
     plan = plan_placement(QUANT_MANIFEST, capable, layers_per_node_target=4, max_k=4)
     assert plan is not None and len(plan.stages) == 4
+
+
+def test_quantized_model_rejects_missing_adapter_capability() -> None:
+    """A manifest exported for an adapter the node doesn't advertise must not
+    be placed on it (adapters are an execution capability, not metadata)."""
+    adapter_manifest = QUANT_MANIFEST.model_copy(update={"adapter_id": "llama"})
+    pool = [_quant_node(f"n{i:02d}", adapters=()) for i in range(6)]
+    plan = plan_placement(adapter_manifest, pool, layers_per_node_target=4, max_k=4)
+    assert plan is None
+
+
+def test_quantized_model_requires_adapter_capability() -> None:
+    adapter_manifest = QUANT_MANIFEST.model_copy(update={"adapter_id": "llama"})
+    pool = [_quant_node(f"n{i:02d}", adapters=("llama",)) for i in range(6)]
+    plan = plan_placement(adapter_manifest, pool, layers_per_node_target=4, max_k=4)
+    assert plan is not None and len(plan.stages) == 4
+
+
+def test_quantized_model_rejects_unsupported_activation_dtype() -> None:
+    """A bf16-exported manifest must not run on a node advertising fp16 only."""
+    assert QUANT_MANIFEST.quantization is not None
+    bf16 = QUANT_MANIFEST.model_copy(
+        update={
+            "quantization": QUANT_MANIFEST.quantization.model_copy(
+                update={"activation_dtype": "bf16"}
+            )
+        }
+    )
+    pool = [_quant_node(f"n{i:02d}", activation_dtypes=("fp16",)) for i in range(6)]
+    plan = plan_placement(bf16, pool, layers_per_node_target=4, max_k=4)
+    assert plan is None
 
 
 def test_legacy_model_still_places_on_any_node() -> None:

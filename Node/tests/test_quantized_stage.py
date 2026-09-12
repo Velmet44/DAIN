@@ -2,7 +2,7 @@
 
 import pytest
 import torch
-from dain_common.schemas import ModelManifest
+from dain_common.schemas import ModelManifest, QuantizationSpec
 from transformers import LlamaConfig, LlamaForCausalLM
 
 from dain_node.llm import (
@@ -10,6 +10,7 @@ from dain_node.llm import (
     TorchAOInt4Backend,
     TorchFp16Backend,
     select_backend,
+    select_device,
 )
 from dain_node.model_export import ExportConfig, export_model
 
@@ -68,6 +69,70 @@ def _tiny_manifest(tmp_path_factory, *, layers=8, hidden=128, inter=256):
 @pytest.fixture(scope="module")
 def quant_exported(tmp_path_factory):
     return _tiny_manifest(tmp_path_factory)
+
+
+# ---------------------------------------------------------------------------
+# device selection (real CUDA branches)
+# ---------------------------------------------------------------------------
+
+
+class TestSelectDevice:
+    """validate the CUDA/CPU split of select_device.
+
+    A real GPU is not a test dependency: the CUDA branch is exercised by
+    monkeypatching ``torch.cuda.is_available`` — exactly the code path a
+    CUDA-equipped node runs at stage build time.
+    """
+
+    @staticmethod
+    def _manifest(**overrides) -> ModelManifest:
+        base = dict(
+            model_id="m",
+            name="m",
+            layers=4,
+            hidden=8,
+            heads=2,
+            kv_heads=2,
+            intermediate=16,
+            vocab_size=16,
+            eos_token_id=0,
+        )
+        base.update(overrides)
+        return ModelManifest(**base)
+
+    @staticmethod
+    def _quant(layout: str) -> ModelManifest:
+        return TestSelectDevice._manifest(
+            format="torch_pt",
+            quantization=QuantizationSpec(
+                backend="torchao",
+                scheme="int4_weight_only",
+                bits=4,
+                group_size=128,
+                packing_layout=layout,
+            ),
+        )
+
+    def test_legacy_cuda_when_available(self, monkeypatch) -> None:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        assert select_device(self._manifest()) == "cuda:0"
+
+    def test_legacy_cpu_when_without_cuda(self, monkeypatch) -> None:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        assert select_device(self._manifest()) == "cpu"
+
+    def test_tensor_core_tiled_requires_cuda(self, monkeypatch) -> None:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+        with pytest.raises(RuntimeError, match="requires CUDA"):
+            select_device(self._quant("tensor_core_tiled"))
+
+    def test_tensor_core_tiled_lands_on_cuda(self, monkeypatch) -> None:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        assert select_device(self._quant("tensor_core_tiled")) == "cuda:0"
+
+    def test_int4_cpu_stays_on_cpu_even_with_cuda(self, monkeypatch) -> None:
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+        assert select_device(self._quant("int4_cpu")) == "cpu"
 
 
 # ---------------------------------------------------------------------------

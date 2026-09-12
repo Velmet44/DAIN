@@ -377,7 +377,7 @@ def _read_tokenizer(src: Path) -> tuple[bytes | None, str | None]:
         return data, hashlib.sha256(data).hexdigest()
     try:
         tok = AutoTokenizer.from_pretrained(str(src), use_fast=True)
-    except Exception as exc:  # noqa: BLE001 — byte-tokenizer fallback is fine for tiny runs
+    except Exception as exc:  # noqa: BLE001 — surfaced as a hard export failure below
         log.warning("tokenizer_build_failed source=%s err=%s", src, exc)
         return None, None
     if tok is None or tok.backend_tokenizer is None:
@@ -468,6 +468,15 @@ def export_model(cfg) -> ModelManifest:
         )
 
     tokenizer_bytes, tokenizer_hash = _read_tokenizer(Path(cfg.source_dir))
+    if not cfg.dry_run and tokenizer_bytes is None:
+        # A real model without its tokenizer would run under ByteTokenizer and
+        # emit garbage tokens while *looking* healthy — refuse the export.
+        raise ValueError(
+            "no usable tokenizer found — real-model exports require tokenizer.json "
+            "(or tokenizer_config.json + vocab files that HF can build a fast "
+            "tokenizer from); refusing so nodes never silently fall back to a "
+            "byte-level vocabulary"
+        )
     _check_tokenizer_vocab(Path(cfg.source_dir), config)
     config_hash = _sha256_config(cfg.source_dir)
     base_model_id = getattr(config, "_name_or_path", None) or cfg.model_id

@@ -212,6 +212,23 @@ class TestExportModel:
         ))
         assert len(manifest.shards) == 2  # 8 layers, 4 per shard
 
+    def test_export_refuses_real_model_without_tokenizer(self, tmp_path, store):
+        """A real model without any tokenizer must fail, not publish a manifest
+        whose nodes would silently run a byte-level vocabulary."""
+        src = tmp_path / "src-notok"
+        src.mkdir()
+        (src / "config.json").write_text(json.dumps({"model_type": "llama"}))
+        (src / "model.safetensors").write_bytes(b"x" * 8)
+        with pytest.raises(ValueError, match="tokenizer"):
+            export_model(ExportConfig(
+                source_dir=str(src),
+                model_id="t7",
+                output_store=str(store),
+                group_size=128,
+                activation_dtype="fp16",
+            ))
+        assert not (store / "t7").exists()  # nothing partially published
+
 
 # ---------------------------------------------------------------------------
 # _check_tokenizer_vocab
