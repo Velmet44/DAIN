@@ -19,6 +19,7 @@ import contextlib
 import logging
 import signal
 import time
+from dataclasses import replace
 
 import httpx
 import psutil
@@ -52,6 +53,33 @@ log = logging.getLogger("dain.node.agent")
 def next_backoff(current_s: float, min_s: float, max_s: float) -> float:
     """Capped exponential backoff: 0.5 → 1 → 2 → 4 → 8 (max)."""
     return min(max(current_s * 2.0, min_s), max_s)
+
+
+def _meta_coord_url(data: dict) -> str | None:
+    """Extract a node-usable coord_url from a meta document.
+
+    Meta URLs are written for browsers (https://); nodes translate to their
+    WebSocket scheme. Empty/invalid values return None (keep current).
+    """
+    raw = str(data.get("coord_url") or "").strip()
+    if not raw:
+        return None
+    if raw.startswith("https://"):
+        return "wss://" + raw[len("https://"):].rstrip("/")
+    if raw.startswith("http://"):
+        return "ws://" + raw[len("http://"):].rstrip("/")
+    return None
+
+
+async def _fetch_coord_url(meta_url: str) -> str | None:
+    """Fetch the meta document; returns a coord_url or None (never raises)."""
+    try:
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
+            response = await client.get(meta_url)
+            response.raise_for_status()
+            return _meta_coord_url(response.json())
+    except Exception:  # noqa: BLE001 — meta is an optimization, never fatal
+        return None
 
 
 class StopGuard:
@@ -234,10 +262,31 @@ class NodeAgent:
             with contextlib.suppress(asyncio.CancelledError):
                 await provisioner_task
 
+    async def _refresh_meta(self) -> None:
+        """S23: adopt a migrated coordinator's URL from the meta document.
+
+        Runs at startup and on every reconnect attempt, so moving the
+        coordinator between machines only requires re-publishing the meta
+        JSON — running nodes self-migrate on their next reconnect.
+        """
+        meta_url = self.settings.meta_url
+        if not meta_url:
+            return
+        url = await _fetch_coord_url(meta_url)
+        if url and url != self.settings.coord_url:
+            log.info(
+                "meta_coord_url_migrated node=%s %s -> %s",
+                self.identity.node_id,
+                self.settings.coord_url,
+                url,
+            )
+            self.settings = replace(self.settings, coord_url=url)
+
     async def _run_sessions(
         self, stop_event: asyncio.Event, backoff: float, warmed_up: bool
     ) -> None:
         while not stop_event.is_set():
+            await self._refresh_meta()
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
                     await self.register(client)

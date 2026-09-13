@@ -1629,3 +1629,27 @@ both fixed; pytest had never been reached, no test failures existed.
   sessions, direct relay, overcommit, trusted proxies).
 - GitHub Pages deploy requires repo variable DAIN_API_URL + secret
   DAIN_API_KEY (still unset — operator step with the real coordinator origin).
+
+## 2026-09-13 - Meta-bootstrap (S23): coordinator discovery + migration via one JSON
+
+For CGNAT home hosting: the coordinator is exposed with Tailscale Funnel
+(stable ts.net HTTPS URL, no port forwarding, no updater - the tunnel is
+outbound and the DNS name is Tailscale-owned), and a published metadata
+document becomes the single discovery source:
+
+- `Client/public/meta.json` (same-origin, /DAIN/meta.json): coord_url +
+  client api_key + model_id. The client fetches it on every open; fields
+  follow the meta document only while "untouched" (still equal to the last
+  applied snapshot in dain:meta:v1), so operator rotations propagate and
+  user-edited settings still win. VITE_META_URL can point elsewhere.
+- Node `meta_url` (DAIN_META_URL / config.json): resolved at startup and on
+  every reconnect attempt; https:// meta URLs normalize to wss:// for nodes.
+  Running nodes therefore self-migrate when the coordinator moves machines
+  (Debian PC <-> laptop) without config edits. The join token never comes
+  from the (public) meta document.
+- `Scripts/publish-meta.ps1|.sh`: regenerate + optionally commit/push the
+  meta document (one command per coordinator migration).
+- `Deploy/meta-bootstrap.md`: full CGNAT walkthrough (Funnel, secrets,
+  migration runbook, node configs, Pages variables).
+
+CI: two lint leftovers from S22 fixed (schemas line length, unused test var).

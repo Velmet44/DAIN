@@ -9,6 +9,13 @@ import { logInfo, logWarn } from "./logs";
 
 const CHATS_KEY = "dain:chats:v1";
 const SETTINGS_KEY = "dain:settings:v1";
+const META_SNAPSHOT_KEY = "dain:meta:v1";
+
+export interface CoordinatorMeta {
+  url?: string;
+  apiKey?: string;
+  modelId?: string;
+}
 
 const MAX_CHATS = 50;
 const MAX_MESSAGES_PER_CHAT = 200;
@@ -90,6 +97,51 @@ export function loadSettings(
     }
   }
   return settings;
+}
+
+/**
+ * S23 meta-bootstrap: merge the published coordinator metadata (fetched at
+ * app open) into the settings. A field only follows the meta document while
+ * it is "untouched" — i.e. it still equals the last meta value we applied.
+ * Once the user edits it in the Settings modal it diverges from the snapshot
+ * and meta stops overriding it (until they save a value equal to meta again).
+ * This is what lets the operator rotate the client API key or migrate the
+ * coordinator to a new machine by re-publishing one JSON file.
+ */
+export function applyMeta(
+  settings: ClientSettings,
+  meta: CoordinatorMeta | null,
+): ClientSettings {
+  if (!meta) return settings;
+  const snapshot = readJson<Partial<ClientSettings>>(META_SNAPSHOT_KEY) ?? {};
+  const out: ClientSettings = { ...settings };
+  const fields: (keyof ClientSettings)[] = ["url", "apiKey", "modelId"];
+  const metaMap: Record<string, string | undefined> = {
+    url: meta.url,
+    apiKey: meta.apiKey,
+    modelId: meta.modelId,
+  };
+  let touched = false;
+  for (const field of fields) {
+    const metaValue = metaMap[field];
+    if (!metaValue) continue;
+    const untouched =
+      snapshot[field] === undefined || snapshot[field] === null || out[field] === snapshot[field];
+    if (untouched && out[field] !== metaValue) {
+      (out[field] as string) = metaValue;
+      touched = true;
+      logInfo(`meta: ${field} -> ${field === "apiKey" ? "(set)" : metaValue}`);
+    }
+  }
+  try {
+    localStorage.setItem(
+      META_SNAPSHOT_KEY,
+      JSON.stringify({ url: out.url, apiKey: out.apiKey, modelId: out.modelId }),
+    );
+  } catch {
+    /* storage unavailable */
+  }
+  return touched ? out : settings;
 }
 
 export function saveSettings(settings: ClientSettings): void {

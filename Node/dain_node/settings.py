@@ -19,6 +19,12 @@ DEFAULT_JOIN_TOKEN = "Jj3L7ewD"
 @dataclass(frozen=True)
 class NodeSettings:
     coord_url: str = "ws://localhost:8000"
+    # S23 meta-bootstrap: an URL serving small JSON {coord_url, api_key,
+    # model_id}. Consulted at agent startup and on every reconnect so the
+    # coordinator can migrate machines without touching node configs. Only
+    # `coord_url` is read here — the join token NEVER comes from the (public)
+    # meta document. https:// URLs are normalized to wss:// for nodes.
+    meta_url: str | None = None
     join_token: str = DEFAULT_JOIN_TOKEN
     node_id: str | None = None
     heartbeat_interval_s: float = 5.0
@@ -70,6 +76,7 @@ class NodeSettings:
         env = os.environ
         return cls(
             coord_url=env.get("DAIN_COORD_URL", "ws://localhost:8000"),
+            meta_url=env.get("DAIN_META_URL") or None,
             join_token=env.get("DAIN_JOIN_TOKEN", DEFAULT_JOIN_TOKEN),
             node_id=env.get("DAIN_NODE_ID"),
             heartbeat_interval_s=float(env.get("DAIN_HEARTBEAT_S", "5.0")),
@@ -107,6 +114,7 @@ class NodeSettings:
 
         return cls(
             coord_url=config.get("coord_url") or "ws://localhost:8000",
+            meta_url=config.get("meta_url") or None,
             join_token=config.get("join_token", DEFAULT_JOIN_TOKEN),
             node_id=config.get("node_id") or None,
             heartbeat_interval_s=float(config.get("heartbeat_s", 5.0)),

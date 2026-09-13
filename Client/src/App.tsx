@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { defaultApiKey, defaultApiUrl, defaultModel } from "./api";
+import { defaultApiKey, defaultApiUrl, defaultModel, fetchMeta } from "./api";
+import { applyMeta } from "./storage";
 import { ChatView } from "./chat";
 import { DashboardView } from "./dashboard";
 import { Sidebar } from "./sidebar";
@@ -98,6 +99,16 @@ export default function App() {
   const saveSettingsNow = useCallback((next: ClientSettings) => {
     setSettings(next);
     saveSettings(next);
+  }, []);
+
+  // S23: adopt published coordinator metadata (URL/key/model) on every open,
+  // respecting user-edited values (see applyMeta).
+  useEffect(() => {
+    fetchMeta().then((meta) => {
+      if (!meta) return;
+      setSettings((current) => applyMeta(current, meta));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {

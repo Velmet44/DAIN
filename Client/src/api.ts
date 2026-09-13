@@ -108,6 +108,42 @@ export function defaultMaxTokens(): number {
   return Number.parseInt(DEFAULT_MAX_TOKENS, 10) || 64;
 }
 
+/** S23: the published coordinator-metadata document. Defaults to the same-
+ * origin `meta.json` (the Pages deployment itself), overridable at build time
+ * with VITE_META_URL. */
+export const META_URL: string =
+  import.meta.env.VITE_META_URL ||
+  `${import.meta.env.BASE_URL || "/"}meta.json`;
+
+export interface CoordinatorMetaDoc {
+  coord_url?: string;
+  api_key?: string;
+  model_id?: string;
+}
+
+/** Fetch the meta document; null on any failure (offline / not published). */
+export async function fetchMeta(): Promise<{
+  url?: string;
+  apiKey?: string;
+  modelId?: string;
+} | null> {
+  try {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), 5000);
+    const resp = await fetch(META_URL, { signal: controller.signal, cache: "no-store" });
+    window.clearTimeout(timer);
+    if (!resp.ok) return null;
+    const doc = (await resp.json()) as CoordinatorMetaDoc;
+    return {
+      url: doc.coord_url || undefined,
+      apiKey: doc.api_key || undefined,
+      modelId: doc.model_id || undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export async function listModels(
   baseUrl: string,
   apiKey: string,
