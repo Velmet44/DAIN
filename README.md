@@ -96,7 +96,28 @@ which shells out to the Node converter without pulling torch into the
 coordinator. Note that DAIN executes fp16/fp32, not GGUF quants: a Q4 7B
 (~4 GB) becomes ~14 GB of fp16 shards.
 
-### Exporting INT4 models (TorchAO)
+### Storage-INT4 export (recommended): ~4x smaller shards, fp16 runtime
+
+Quantization here shrinks the *transfer and storage* footprint, not the compute
+kernels: the exporter round-to-nearest quantizes the linear projections to 4-bit
+groups (group size 128), packs two nibbles per byte, and writes plain
+`.safetensors` shards. Nodes dequantize back to fp16 once while loading a shard
+and run the normal fp16 kernels — so shards download ~4x faster (and a Q4 GGUF
+import lands at ~1/4 the fp16 size) with **unchanged runtime speed** on any CPU
+or GPU node. No torchao and no special hardware requirements.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File Scripts\export-model.ps1 `
+  -SourceDir C:\models\Llama-3.2-1B -ModelId llama-3.2-1b-int4s -Quantization int4_storage
+```
+
+GGUF imports support the same track (`Scripts/import-gguf.ps1 -Quantize
+int4-storage`, or **Models → GGUF dtype → int4 storage** on the admin page).
+Note the trade-off the other way: int4 storage does not reduce *runtime* RAM
+(weights are materialized fp16) and does not speed up decode — that is what the
+TorchAO track below is for.
+
+### Exporting INT4 models (TorchAO runtime)
 
 Point DAIN at a **local HuggingFace Llama checkpoint** to export TorchAO INT4 shards.
 Quantized shards are `.pt` files with an `int4_cpu` packing layout; the scheduler

@@ -17,6 +17,8 @@ param(
     [string]$ModelId = "",
     [ValidateSet("fp16", "fp32")]
     [string]$Dtype = "fp16",
+    [ValidateSet("", "int4-storage")]
+    [string]$Quantize = "",
     [int]$LayersPerShard = 4,
     [string]$Tokenizer = "",
     [switch]$Force
@@ -46,7 +48,12 @@ if ($GgufFile) {
 if ($ModelId)    { $cliArgs += @("--model-id", $ModelId) }
 if ($Tokenizer)  { $cliArgs += @("--tokenizer", $Tokenizer) }
 if ($Force)      { $cliArgs += "--force" }
-$cliArgs += @("--dtype", $Dtype, "--layers-per-shard", $LayersPerShard)
+if ($Quantize) {
+    $cliArgs += @("--quantize", $Quantize)
+} else {
+    $cliArgs += @("--dtype", $Dtype)
+}
+$cliArgs += @("--layers-per-shard", $LayersPerShard)
 
 Write-Host "DAIN GGUF import: store=$ModelStore dtype=$Dtype"
 & uv @cliArgs

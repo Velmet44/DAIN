@@ -698,7 +698,9 @@ class GgufImportRequest(BaseModel):
     filename: str | None = Field(default=None, min_length=1)
     model_id: str | None = Field(default=None, min_length=1)
     tokenizer: str | None = Field(default=None, min_length=1)
-    dtype: Literal["fp16", "fp32"] = "fp16"
+    # "int4-storage" packs the projections to 4-bit storage shards (fp16
+    # runtime, ~4x smaller transfer) instead of dequantizing to fp16/fp32.
+    dtype: Literal["fp16", "fp32", "int4-storage"] = "fp16"
     layers_per_shard: int = Field(default=4, ge=1, le=64)
     force: bool = False
 
@@ -814,7 +816,11 @@ async def admin_import_gguf(payload: GgufImportRequest, request: Request) -> dic
         argv += ["--tokenizer", payload.tokenizer]
     if payload.force:
         argv.append("--force")
-    argv += ["--dtype", payload.dtype, "--layers-per-shard", str(payload.layers_per_shard)]
+    if payload.dtype == "int4-storage":
+        argv += ["--quantize", "int4-storage"]
+    else:
+        argv += ["--dtype", payload.dtype]
+    argv += ["--layers-per-shard", str(payload.layers_per_shard)]
 
     request.app.state.gguf_import = {"filename": payload.filename, "started_at": time.time()}
     asyncio.create_task(_run_gguf_import(request.app, argv))
@@ -895,7 +901,9 @@ class ExportModelRequest(BaseModel):
 
     source_dir: str
     model_id: str
-    quantization: Literal["int4"] = "int4"
+    # "int4" = TorchAO runtime quantization (.pt shards); "int4_storage" =
+    # packed-int4 safetensors shards the nodes dequantize to fp16 at load.
+    quantization: Literal["int4", "int4_storage"] = "int4"
     group_size: int = Field(default=128, ge=1)
     activation_dtype: Literal["fp16", "bf16"] = "fp16"
     layers_per_shard: int = Field(default=4, ge=1, le=64)

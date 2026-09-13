@@ -283,3 +283,41 @@ def test_legacy_model_still_places_on_any_node() -> None:
     pool = [node(f"n{i:02d}", score=0.5 - i * 0.01) for i in range(6)]
     plan = plan_placement(MANIFEST, pool, layers_per_node_target=4, max_k=4)
     assert plan is not None and len(plan.stages) == 4
+
+
+STORAGE_INT4_MANIFEST = MANIFEST.model_copy(update={
+    "format": "safetensors",
+    "quantization": QuantizationSpec(
+        backend="storage_int4",
+        scheme="rtn_g128",
+        bits=4,
+        group_size=128,
+        coverage="selected",
+        packing_layout="storage",
+    ),
+})
+
+
+def test_storage_int4_places_on_plain_nodes() -> None:
+    """Storage-INT4 shards dequantize to fp16 at load: no torchao requirement,
+    any torch node hosts a stage (unlike the torchao runtime track)."""
+    pool = [node(f"n{i:02d}", score=0.5 - i * 0.01) for i in range(6)]
+    plan = plan_placement(STORAGE_INT4_MANIFEST, pool, layers_per_node_target=4, max_k=4)
+    assert plan is not None and len(plan.stages) == 4
+
+
+def test_storage_int4_capacity_uses_fp16_runtime_size() -> None:
+    """Shards are ~4x smaller on disk than at runtime; the capacity filter must
+    size against the fp16 weights a node materializes, not the packed bytes."""
+    # MANIFEST shards total 16 MB packed; a 20 MB node fits the packed share
+    # but NOT the ~64 MB fp16 footprint. The unquantized manifest fitting proves
+    # the rejection comes from the runtime-size expansion, not the base size.
+    small = node("tiny", score=0.9, vram_free=0.02)
+    assert plan_placement(MANIFEST, [small], layers_per_node_target=4) is not None
+    assert plan_placement(STORAGE_INT4_MANIFEST, [small], layers_per_node_target=4) is None
+
+
+def test_storage_int4_runtime_footprint_still_fits_real_nodes() -> None:
+    pool = [node(f"n{i:02d}", score=0.5) for i in range(4)]
+    plan = plan_placement(STORAGE_INT4_MANIFEST, pool, layers_per_node_target=4, max_k=4)
+    assert plan is not None and len(plan.stages) == 4

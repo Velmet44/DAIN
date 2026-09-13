@@ -41,7 +41,9 @@ from transformers.modeling_gguf_pytorch_utils import load_gguf_checkpoint
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import LlamaForCausalLM
 
+from dain_node.model_export import export_shards_storage_int4
 from dain_node.shard_export import _write_shards
+from dain_node.storage_int4 import quantize_state_dict_storage_int4
 
 log = logging.getLogger("dain.node.import_gguf")
 
@@ -137,11 +139,18 @@ def import_gguf(
     model_id: str | None = None,
     layers_per_shard: int = 4,
     dtype: str = "fp16",
+    quantize: str | None = None,
     tokenizer: object | None = None,
     tokenizer_ref: str | None = None,
     force: bool = False,
 ) -> ModelManifest | None:
-    """Import one GGUF; returns the manifest, or None when already imported."""
+    """Import one GGUF; returns the manifest, or None when already imported.
+
+    ``quantize="int4-storage"`` packs the linear projections to 4-bit storage
+    groups and writes plain safetensors shards that nodes dequantize to fp16 at
+    load: a Q4_K_M 7B (~4 GB) lands as ~0.9 GB of DAIN shards instead of
+    ~14 GB of fp16, at unchanged runtime speed.
+    """
     gguf = Path(gguf_path)
     store = Path(out_dir)
 
@@ -163,11 +172,12 @@ def import_gguf(
         return None
 
     log.info(
-        "gguf_import_start file=%s model=%s bytes=%d dtype=%s",
+        "gguf_import_start file=%s model=%s bytes=%d dtype=%s quantize=%s",
         gguf.name,
         derived,
         gguf.stat().st_size,
         dtype,
+        quantize or "none",
     )
     model = _load_llama_from_gguf(gguf)
     config = model.config
@@ -201,17 +211,25 @@ def import_gguf(
     if "lm_head.weight" not in state:
         raise ValueError("GGUF contains no output weights (lm_head)")
 
-    manifest = _write_shards(
-        str(store),
-        model_id=derived,
-        name=_gguf_str(reader, "general.name") or derived,
-        config=config,
-        state=state,
-        layers_per_shard=layers_per_shard,
-        dtype_label=dtype,
-        tokenizer_bytes=tokenizer_bytes,
-        tokenizer_hash=tokenizer_hash,
-    )
+    common = {
+        "model_id": derived,
+        "name": _gguf_str(reader, "general.name") or derived,
+        "config": config,
+        "layers_per_shard": layers_per_shard,
+        "tokenizer_bytes": tokenizer_bytes,
+        "tokenizer_hash": tokenizer_hash,
+    }
+    if quantize == "int4-storage":
+        # export_shards_storage_int4 treats its target as the model dir itself
+        # (unlike _write_shards, which appends model_id).
+        manifest = export_shards_storage_int4(
+            str(store / derived),
+            state=quantize_state_dict_storage_int4(state),
+            group_size=128,
+            **common,
+        )
+    else:
+        manifest = _write_shards(str(store), state=state, dtype_label=dtype, **common)
 
     marker[gguf.name] = {
         "sha256": sha,
@@ -268,6 +286,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--model-id", help="override the derived model id")
     parser.add_argument("--dtype", choices=["fp16", "fp32"], default="fp16")
+    parser.add_argument(
+        "--quantize",
+        choices=["int4-storage"],
+        default=None,
+        help="pack linear projections to 4-bit storage shards (fp16 runtime); "
+        "overrides --dtype and shrinks shards ~4x",
+    )
     parser.add_argument("--layers-per-shard", type=int, default=4)
     parser.add_argument(
         "--tokenizer",
@@ -296,6 +321,7 @@ def main(argv: list[str] | None = None) -> int:
                 model_id=args.model_id,
                 layers_per_shard=args.layers_per_shard,
                 dtype=args.dtype,
+                quantize=args.quantize,
                 tokenizer_ref=args.tokenizer,
                 force=args.force,
             )

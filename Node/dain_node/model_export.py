@@ -44,10 +44,18 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from dain_common.schemas import ModelManifest, QuantizationSpec, ShardRef
+from safetensors.torch import load_file, save_file
 from tokenizers import Tokenizer
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from dain_node.shard_export import _dtype_for
+from dain_node.storage_int4 import (
+    PACKING_LAYOUT_STORAGE,
+    STORAGE_INT4_BACKEND,
+    STORAGE_INT4_PACKING_VERSION,
+    STORAGE_INT4_SCHEME,
+    quantize_state_dict_storage_int4,
+)
 
 log = logging.getLogger("dain.node.model_export")
 
@@ -381,6 +389,141 @@ def export_shards(
     return manifest
 
 
+# -- storage-INT4 serialization (small transfer files, fp16 runtime) ----------
+
+
+def _load_source_state(source_dir: str) -> dict[str, torch.Tensor]:
+    """Load a HF checkpoint's state dict without instantiating the model.
+
+    Storage-INT4 export only needs the tensors (RTN quantization is a pure
+    weight transform), which keeps peak memory at ~1x checkpoint size instead
+    of the full fp model plus optimizer-free module tree.
+    """
+    src = Path(source_dir)
+    files = sorted(src.glob("*.safetensors")) or sorted(src.glob("*.bin"))
+    state: dict[str, torch.Tensor] = {}
+    for f in files:
+        if f.suffix == ".safetensors":
+            state.update(load_file(str(f)))
+        else:
+            state.update(torch.load(f, map_location="cpu", weights_only=True))
+    return state
+
+
+def export_shards_storage_int4(
+    out_model_dir: str,
+    *,
+    model_id: str,
+    name: str,
+    config,
+    state: dict[str, torch.Tensor],
+    layers_per_shard: int,
+    tokenizer_bytes: bytes | None,
+    tokenizer_hash: str | None,
+    group_size: int = 128,
+    base_model_id: str | None = None,
+    source_config_hash: str = "",
+) -> ModelManifest:
+    """Serialize an already-packed state dict as per-layer ``.safetensors``.
+
+    Shard grouping mirrors ``shard_export._write_shards`` exactly (embed in the
+    first shard, norm + lm_head in the last) so ``ShardRef.layer_start/end``
+    overlap logic is unchanged. Packed/scales tensors are stored verbatim;
+    everything else lands in fp16 — the runtime dtype of this format.
+    """
+    layers = config.num_hidden_layers
+    os.makedirs(out_model_dir, exist_ok=True)
+
+    shards: list[ShardRef] = []
+    starts = list(range(0, layers, layers_per_shard))
+    for shard_idx, start in enumerate(starts):
+        end = min(start + layers_per_shard, layers) - 1
+        shard_id = f"layers_{start:02d}_{end:02d}"
+        tensors: dict[str, torch.Tensor] = {}
+        if shard_idx == 0:
+            tensors["model.embed_tokens.weight"] = (
+                state["model.embed_tokens.weight"].to(torch.float16).contiguous()
+            )
+        prefix_scan = [f"model.layers.{i}." for i in range(start, end + 1)]
+        for key, tensor in state.items():
+            if any(key.startswith(p) for p in prefix_scan):
+                if key.endswith((".q4p", ".q4s")):
+                    tensors[key] = tensor.contiguous()
+                else:
+                    tensors[key] = tensor.to(torch.float16).contiguous()
+        if shard_idx == len(starts) - 1:
+            tensors["model.norm.weight"] = state["model.norm.weight"].to(torch.float16).contiguous()
+            tensors["lm_head.weight"] = state["lm_head.weight"].to(torch.float16).contiguous()
+
+        path = os.path.join(out_model_dir, f"{shard_id}.safetensors")
+        save_file(tensors, path)
+        digest = _sha256_file(Path(path))
+        shards.append(
+            ShardRef(
+                model_id=model_id,
+                shard_id=shard_id,
+                content_hash=digest,
+                layer_start=start,
+                layer_end=end,
+                size_bytes=os.path.getsize(path),
+                format="safetensors",
+            )
+        )
+
+    if tokenizer_bytes is not None:
+        with open(os.path.join(out_model_dir, "tokenizer.json"), "wb") as fh:
+            fh.write(tokenizer_bytes)
+
+    quant_spec = QuantizationSpec(
+        backend=STORAGE_INT4_BACKEND,
+        scheme=STORAGE_INT4_SCHEME,
+        bits=4,
+        group_size=group_size,
+        activation_dtype="fp16",
+        packing_version=STORAGE_INT4_PACKING_VERSION,
+        quantizer_version="dain-storage-int4-1",
+        coverage="selected",
+        packing_layout=PACKING_LAYOUT_STORAGE,
+    )
+    manifest = ModelManifest(
+        model_id=model_id,
+        name=name,
+        layers=layers,
+        hidden=config.hidden_size,
+        heads=config.num_attention_heads,
+        kv_heads=config.num_key_value_heads,
+        intermediate=config.intermediate_size,
+        vocab_size=getattr(config, "vocab_size", 0),
+        eos_token_id=getattr(config, "eos_token_id", 0),
+        rope_theta=getattr(config, "rope_theta", 10000.0),
+        dtype="fp16",
+        tokenizer_file="tokenizer.json" if tokenizer_bytes is not None else None,
+        tokenizer_hash=tokenizer_hash,
+        shards=tuple(shards),
+        format="safetensors",
+        quantization=quant_spec,
+        base_model_id=base_model_id,
+        architecture="llama",
+        adapter_id="llama",
+        architecture_config={
+            "hidden_act": getattr(config, "hidden_act", "silu"),
+            "max_position_embeddings": getattr(config, "max_position_embeddings", 2048),
+            "rms_norm_eps": getattr(config, "rms_norm_eps", 1e-6),
+            "rope_scaling": getattr(config, "rope_scaling", None),
+            "attention_bias": getattr(config, "attention_bias", False),
+            "attention_dropout": getattr(config, "attention_dropout", 0.0),
+            "mlp_bias": getattr(config, "mlp_bias", False),
+            "head_dim": getattr(config, "head_dim", None),
+            "tie_word_embeddings": getattr(config, "tie_word_embeddings", False),
+        },
+        artifact_version=1,
+        source_config_hash=source_config_hash or None,
+    )
+    with open(os.path.join(out_model_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+        fh.write(manifest.model_dump_json(indent=2))
+    return manifest
+
+
 def _read_tokenizer(src: Path) -> tuple[bytes | None, str | None]:
     """Fast tokenizer.json (or build one from tokenizer files) → bytes + sha256."""
     tok_file = src / "tokenizer.json"
@@ -493,6 +636,11 @@ def export_model(cfg) -> ModelManifest:
     config_hash = _sha256_config(cfg.source_dir)
     base_model_id = getattr(config, "_name_or_path", None) or cfg.model_id
 
+    if cfg.quantization == "int4_storage":
+        return _export_model_storage_int4(
+            cfg, config, adapter, tokenizer_bytes, tokenizer_hash, config_hash, base_model_id
+        )
+
     layout = pick_layout()
     quant_spec = QuantizationSpec.model_validate(
         {**quant_spec.model_dump(), "packing_layout": layout}
@@ -587,6 +735,127 @@ def export_model(cfg) -> ModelManifest:
     return manifest
 
 
+def _export_model_storage_int4(
+    cfg,
+    config,
+    adapter: ModelAdapter,
+    tokenizer_bytes: bytes | None,
+    tokenizer_hash: str | None,
+    config_hash: str,
+    base_model_id: str | None,
+) -> ModelManifest:
+    """Storage-INT4 export: RTN-quantize the checkpoint's projections to packed
+    int4 groups, write plain .safetensors shards, run fp16 at the nodes.
+
+    No TorchAO and no model instantiation: the state dict is loaded straight
+    from the checkpoint's weight files and transformed tensor-by-tensor.
+    """
+    store = Path(cfg.output_store)
+    if cfg.dry_run:
+        _emit_json(
+            event="done",
+            model_id=cfg.model_id,
+            dry_run=True,
+            quantization="int4_storage",
+            group_size=cfg.group_size,
+        )
+        log.info(
+            "export_dry_run mode=int4_storage model=%s layers=%s",
+            cfg.model_id,
+            config.num_hidden_layers,
+        )
+        return ModelManifest(
+            model_id=cfg.model_id,
+            name=f"dry-run {cfg.model_id}",
+            layers=config.num_hidden_layers,
+            hidden=config.hidden_size,
+            heads=config.num_attention_heads,
+            kv_heads=config.num_key_value_heads,
+            intermediate=config.intermediate_size,
+            vocab_size=getattr(config, "vocab_size", 0),
+            eos_token_id=getattr(config, "eos_token_id", 0),
+            shards=(),
+            dtype="fp16",
+            quantization=QuantizationSpec(
+                backend=STORAGE_INT4_BACKEND,
+                scheme=STORAGE_INT4_SCHEME,
+                bits=4,
+                group_size=cfg.group_size,
+                coverage="selected",
+                packing_layout=PACKING_LAYOUT_STORAGE,
+            ),
+            base_model_id=base_model_id,
+            architecture=adapter.architecture,
+            adapter_id=adapter.architecture,
+        )
+
+    if tokenizer_bytes is None:
+        raise ValueError(
+            "no usable tokenizer found — storage-INT4 exports require tokenizer.json "
+            "(or tokenizer_config.json + vocab files that HF can build a fast "
+            "tokenizer from); refusing so nodes never silently fall back to a "
+            "byte-level vocabulary"
+        )
+
+    staging = store / f".export-{cfg.model_id}-{secrets.token_hex(4)}"
+    model_dir = staging / cfg.model_id
+    try:
+        state = _load_source_state(cfg.source_dir)
+        if not state:
+            raise ValueError(f"{cfg.source_dir} yielded no model weights")
+        # Tied embeddings: synthesize lm_head so the last shard always carries it.
+        if "lm_head.weight" not in state and "model.embed_tokens.weight" in state:
+            state["lm_head.weight"] = state["model.embed_tokens.weight"].detach().clone()
+        if "lm_head.weight" not in state:
+            raise ValueError("checkpoint has no lm_head.weight")
+
+        state = quantize_state_dict_storage_int4(state, group_size=cfg.group_size)
+        packed = sum(1 for k in state if k.endswith(".q4p"))
+        if cfg.json_progress:
+            _emit_json(event="quantized", layout=PACKING_LAYOUT_STORAGE, packed_tensors=packed)
+
+        manifest = export_shards_storage_int4(
+            str(model_dir),
+            model_id=cfg.model_id,
+            name=f"{adapter.display_name} INT4-storage (fp16 runtime)",
+            config=config,
+            state=state,
+            layers_per_shard=cfg.layers_per_shard,
+            tokenizer_bytes=tokenizer_bytes,
+            tokenizer_hash=tokenizer_hash,
+            group_size=cfg.group_size,
+            base_model_id=base_model_id,
+            source_config_hash=config_hash,
+        )
+        del state
+        if cfg.json_progress:
+            _emit_json(
+                event="written",
+                model_id=cfg.model_id,
+                layout=PACKING_LAYOUT_STORAGE,
+                shards=len(manifest.shards),
+                bytes=sum(s.size_bytes for s in manifest.shards),
+            )
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    final_dir = store / cfg.model_id
+    if cfg.force and final_dir.exists():
+        shutil.rmtree(final_dir, ignore_errors=True)
+    os.replace(model_dir, final_dir)
+    with contextlib.suppress(OSError):
+        shutil.rmtree(staging, ignore_errors=True)
+    _record_export(cfg.source_dir, cfg.model_id, cfg)
+    log.info(
+        "export_done mode=int4_storage model=%s shards=%d bytes=%d",
+        cfg.model_id,
+        len(manifest.shards),
+        sum(s.size_bytes for s in manifest.shards),
+    )
+    return manifest
+
+
 def _record_export(source_dir: str, model_id: str, cfg) -> None:
     marker_path = Path(cfg.output_store) / MARKER_FILE
     marker: dict = {}
@@ -666,7 +935,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-dir", required=True, help="local HF model directory")
     parser.add_argument("--model-id", required=True, help="model id for the model store")
     parser.add_argument("--output-store", required=True, help="model store directory")
-    parser.add_argument("--quantization", choices=["int4"], default="int4")
+    parser.add_argument("--quantization", choices=["int4", "int4_storage"], default="int4",
+                        help="int4: TorchAO runtime quantization (.pt shards); "
+                             "int4_storage: packed-int4 safetensors, fp16 runtime "
+                             "(~4x smaller transfer, CPU-friendly)")
     parser.add_argument("--group-size", type=int, default=128)
     parser.add_argument("--activation-dtype", choices=["fp16", "bf16"], default="fp16")
     parser.add_argument("--layers-per-shard", type=int, default=4)
@@ -701,9 +973,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"detected: {manifest.architecture or '?'} -> would quantize INT4")
         return 0
     size = sum(s.size_bytes for s in manifest.shards)
+    is_storage = (
+        manifest.quantization is not None
+        and manifest.quantization.backend == "storage_int4"
+    )
+    label = "INT4-storage" if is_storage else f"INT4-{manifest.dtype}"
     print(
         f"exported: {manifest.model_id} ({len(manifest.shards)} shards, "
-        f"{size / 1024 / 1024:.1f} MiB, INT4-{manifest.dtype})"
+        f"{size / 1024 / 1024:.1f} MiB, {label})"
     )
     return 0
 

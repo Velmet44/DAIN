@@ -34,6 +34,11 @@ from transformers.models.llama.modeling_llama import (
 
 from dain_node.byte_tokenizer import ByteTokenizer
 from dain_node.hf_tokenizer import HFTokenizer
+from dain_node.storage_int4 import (
+    STORAGE_INT4_BACKEND,
+    dequantize_state_dict,
+    has_packed_tensors,
+)
 
 log = logging.getLogger("dain.node.llm")
 
@@ -79,6 +84,10 @@ def select_device(manifest: ModelManifest) -> str:
     Legacy fp16/fp32 manifests prefer CUDA when present and fall back to CPU.
     """
     quant = getattr(manifest, "quantization", None)
+    # Storage-INT4 shards dequantize to fp16 at load and run the plain fp16
+    # kernels — device selection is the legacy fp16/fp32 decision.
+    if quant is not None and getattr(quant, "backend", "none") == STORAGE_INT4_BACKEND:
+        return "cuda:0" if torch.cuda.is_available() else "cpu"
     if quant is not None and quant.is_quantized:
         layout = getattr(quant, "packing_layout", None)
         if layout == _LAYOUT_TENSOR_CORE_TILED:
@@ -128,9 +137,34 @@ class TorchAOInt4Backend(InferenceBackend):
         return torch.load(path, weights_only=False)
 
 
+class StorageInt4Backend(InferenceBackend):
+    """Storage-INT4 shards (packed safetensors) → fp16 runtime tensors.
+
+    Dequantization happens once, here at shard-load time; the stage then runs
+    the exact fp16 kernels of the un-quantized path. ``is_quantized`` is
+    deliberately False: StageModel must take the plain ``param.copy_`` branch,
+    not the TorchAO packed-parameter assignment. The group size comes from the
+    manifest the backend was selected for.
+    """
+
+    name = "storage_int4"
+    is_quantized = False
+
+    def __init__(self, group_size: int = 128) -> None:
+        self.group_size = group_size
+
+    def deserialize_shard(self, path: str) -> dict[str, torch.Tensor]:
+        raw = load_file(path)
+        if not has_packed_tensors(raw):
+            return raw
+        return dequantize_state_dict(raw, group_size=self.group_size)
+
+
 def select_backend(manifest: ModelManifest) -> InferenceBackend:
     """Choose the execution backend for a manifest (exported vs legacy)."""
     quant = getattr(manifest, "quantization", None)
+    if quant is not None and getattr(quant, "backend", "none") == STORAGE_INT4_BACKEND:
+        return StorageInt4Backend(group_size=getattr(quant, "group_size", 128))
     if manifest.format == "torch_pt" or (
         quant is not None and getattr(quant, "is_quantized", False)
     ):

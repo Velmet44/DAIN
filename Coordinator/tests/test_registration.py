@@ -117,7 +117,7 @@ def test_register_join_token_cannot_displace_live_online_node(client: TestClient
     assert detail["state"] == "online"
 
     # Hold the node's live WS open so the coordinator sees it as connected.
-    with client.websocket_connect(f"/node/ws?node_id=node-a&token={token}") as ws:
+    with client.websocket_connect(f"/node/ws?node_id=node-a&token={token}"):
         hijack = client.post(
             "/node/register", json=register_payload("node-a", auth_token=JOIN)
         ).json()

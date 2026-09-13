@@ -42,6 +42,11 @@ def _is_backend_feasible(manifest: ModelManifest, row: NodeRow) -> bool:
 
     if quant is None or getattr(quant, "backend", "none") == "none":
         return True  # unquantized model — any torch node works
+    # Storage-INT4 shards dequantize to fp16 at node load time and execute the
+    # plain fp16 kernels: placement-wise it is an unquantized model (no torchao
+    # requirement, runs on CPU or CUDA alike).
+    if getattr(quant, "backend", "none") == "storage_int4":
+        return True
 
     if "torchao" not in sw.supported_backends:
         return False
@@ -201,6 +206,12 @@ def plan_placement(
     if not nodes:
         return None
     model_gb = sum(s.size_bytes for s in manifest.shards) / 1e9
+    quant = getattr(manifest, "quantization", None)
+    if quant is not None and getattr(quant, "backend", "none") == "storage_int4":
+        # Shards on disk are packed int4 (~4x smaller), but a node materializes
+        # fp16 weights in RAM at load time — size the capacity filter by what
+        # the stage will actually occupy, not what it costs to transfer.
+        model_gb *= 4.0
 
     feasible = [
         n for n in nodes

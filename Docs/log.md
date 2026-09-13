@@ -1436,3 +1436,49 @@ Housekeeping:
   silently dropping frames; `model_sources/` added to `.gitignore`;
   `Docs/stages.md` status table updated (S8/S9 done, S10 pilot in progress,
   S11 stretch, post-S9 sessions tabulated).
+## 2026-09-13 - Storage-INT4 track: packed-int4 safetensors shards, fp16 runtime
+
+Motivation: benchmarked the existing quantization options on the target
+2-core Ice Lake host. TorchAO runtime int4 decodes at 0.17 tok/s (vs 3.85 tok/s
+fp16) because the int4_cpu kernels are unoptimized for this microarch; torchao
+int8 weight-only is 4.9x slower than fp16 GEMV. Quantization does help the
+actual bottleneck - shard transfer over LAN - so this session adds a *storage*
+quantization track: pack at export, dequantize to fp16 once at node load, run
+the unchanged fp16 kernels.
+
+- `Node/dain_node/storage_int4.py`: RTN g128 symmetric int4 (nibbles store
+  `round(w/scale)+8`), two weights per byte, fp16 per-group scales; tensor
+  contract `<key>.weight.q4p` (packed uint8 [out, in/2]) + `<key>.weight.q4s`
+  (fp16 [out, in/group_size]). Projections only (q/k/v/o/gate/up/down);
+  embed/norm/lm_head stay fp16. Shapes that do not fit the group rule pass
+  through in fp16.
+- `Node/dain_node/model_export.py`: `--quantization int4_storage` loads the
+  checkpoint state dict directly (no model instantiation), packs, and writes
+  plain `.safetensors` shards via `export_shards_storage_int4` (same shard
+  grouping as `_write_shards`). Manifest: `quantization.backend=storage_int4`,
+  `scheme=rtn_g128`, `format=safetensors`, `dtype=fp16`.
+- `Node/dain_node/llm.py`: `StorageInt4Backend` (is_quantized=False on
+  purpose - StageModel takes the fp16 `param.copy_` branch) dequantizes shards
+  at load using the manifest's group size; `select_backend` prefers it for
+  `storage_int4` manifests; `select_device` uses the legacy fp16 decision
+  (CUDA when present) instead of torchao layout pinning.
+- `Coordinator/dain_coordinator/partition.py`: `storage_int4` passes the
+  backend gate on any torch node (runtime is plain fp16), and the placement
+  capacity filter expands packed shard sizes 4x to the fp16 runtime footprint.
+- `Node/dain_node/import_gguf.py` + `Scripts/import-gguf.ps1`:
+  `--quantize int4-storage` imports a Q4 GGUF at ~1/4 the fp16 shard size.
+- `Coordinator/dain_coordinator/api.py` + admin page: export form gains
+  `int4_storage`, GGUF import dtype gains `int4-storage`.
+- README: new "Storage-INT4 export" section documenting the track and its
+  trade-off (smaller files, unchanged runtime speed/RAM).
+- Verified end-to-end on Llama-3.2-1B: HF checkpoint (2.47 GB) exports to
+  1.48 GB of shards (untied 526 MB embed + lm_head stay fp16; a 7B lands
+  closer to 4x), loads through `StorageInt4Backend`, and greedy-decodes
+  coherent text ("The capital of France is" -> " Paris. It is the most
+  populous city") on the 2-core host at 2.7-3.9 tok/s - 20x faster than the
+  torchao int4 runtime on the same hardware.
+
+#### Gates
+Common/Coordinator/Node/Sim pytest green (Sim `test_kill_three_of_eight_
+still_serves` remains environment-flaky on this 2-core host, pre-existing);
+ruff clean in all four projects.
