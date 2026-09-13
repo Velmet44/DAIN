@@ -1,6 +1,5 @@
 {
-  "coord_url": "http://127.0.0.1:8000",
-  "api_key": "",
-  "model_id": "",
-  "_comment": "Published coordinator metadata (S23). coord_url/api_key/model_id are adopted by clients at app open while untouched. Edit + redeploy (or serve this file from anywhere and set VITE_META_URL). NEVER put the node join token here - it is the cluster admission secret."
+  "coord_url": "https://daincoordinator.tailcae708.ts.net",
+  "api_key": "dain-client",
+  "model_id": "llama-3-2-1b-int4s"
 }
