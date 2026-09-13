@@ -1504,3 +1504,12 @@ refused to try.
 
 #### Gates
 Coordinator + Node pytest suites and ruff green.
+
+## 2026-09-13 - Admin page: allow_memory_overcommit toggle
+
+The pagefile-mode placement flag is now a live-editable card field: a checkbox
+in Settings ("Overcommit RAM (pagefile)") that applies immediately and
+persists to config.json like the other LIVE_SETTINGS. The settings JS treats
+bool-typed fields generically (checkbox <-> boolean body), so future flags
+follow the same path. Regression test covers the PUT round-trip and the
+`applied` response.

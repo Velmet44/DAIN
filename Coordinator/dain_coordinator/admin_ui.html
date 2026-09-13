@@ -136,6 +136,11 @@
         <div class="krow"><label>Backup count</label><input id="sBackups" type="number" min="0" max="16"></div>
         <div class="krow"><label>Min score</label><input id="sMinScore" type="number" min="0" max="1" step="0.01"></div>
         <div class="krow"><label>Job timeout (s)</label><input id="sJobTimeout" type="number" min="1" max="3600"></div>
+        <div class="krow">
+          <label>Overcommit RAM (pagefile)</label>
+          <input id="sOvercommit" type="checkbox" style="width:auto" title="Admit nodes whose free RAM cannot fit their stage share; the OS pages the excess weights to disk (slow but functional). Off = placement refused with 429.">
+          <span class="tag" style="flex:1">pagefile mode for RAM-short hosts</span>
+        </div>
         <div class="kactions">
           <button id="applySettings">Apply settings</button>
           <span id="settingsWarn" class="tag"></span>
@@ -532,12 +537,18 @@ const SETTINGS_FIELDS = {
   backup_count: "sBackups",
   min_score: "sMinScore",
   job_timeout_s: "sJobTimeout",
+  allow_memory_overcommit: "sOvercommit",
 };
 let settingsState = null;
 
 function paintSettings(state) {
   settingsState = state;
-  Object.entries(SETTINGS_FIELDS).forEach(([f, id]) => { $(id).value = state.settings[f] ? state.settings[f].value : ""; });
+  Object.entries(SETTINGS_FIELDS).forEach(([f, id]) => {
+    const value = state.settings[f] ? state.settings[f].value : "";
+    const el = $(id);
+    if (el.type === "checkbox") el.checked = value === true || value === "true";
+    else el.value = value;
+  });
   const over = Object.entries(state.settings).filter(([, v]) => v.env_overridden).map(([f]) => f);
   setText("settingsNote", state.writable ? "applied live + persisted to config.json" : "applied live, in-memory only (no config file)");
   setText("settingsWarn", over.length ? "env still wins at restart for: " + over.join(", ") : "");
@@ -557,8 +568,16 @@ $("applySettings").onclick = async () => {
   if (!settingsState) return;
   const body = {};
   Object.entries(SETTINGS_FIELDS).forEach(([f, id]) => {
-    const raw = $(id).value.trim();
-    if (String(settingsState.settings[f]?.value ?? "") === raw) return;
+    const el = $(id);
+    const current = settingsState.settings[f]?.value;
+    if (el.type === "checkbox") {
+      const next = el.checked;
+      if (current === next || current === (next ? "true" : "false")) return;
+      body[f] = next;
+      return;
+    }
+    const raw = el.value.trim();
+    if (String(current ?? "") === raw) return;
     body[f] = f === "model_store_dir" || f === "node_project_dir" || isNaN(Number(raw)) ? raw : Number(raw);
   });
   if (!Object.keys(body).length) { ok("no setting changes"); return; }

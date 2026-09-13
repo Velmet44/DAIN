@@ -174,3 +174,21 @@ def test_logs_tail(tmp_path) -> None:
         body = resp.json()
         assert isinstance(body["logs"], list)
         assert len(body["logs"]) <= 5
+
+
+def test_settings_allow_memory_overcommit_round_trip(tmp_path) -> None:
+    with TestClient(create_app(_settings(tmp_path))) as client:
+        _admin(client)
+        state = client.get("/admin/settings").json()
+        assert state["settings"]["allow_memory_overcommit"]["value"] is False
+        assert state["settings"]["allow_memory_overcommit"]["type"] == "bool"
+
+        resp = client.put("/admin/settings", json={"allow_memory_overcommit": True})
+        assert resp.status_code == 200
+        assert resp.json()["settings"]["allow_memory_overcommit"]["value"] is True
+        assert resp.json()["applied"] == ["allow_memory_overcommit"]
+
+        # The live settings object the scheduler reads reflects the toggle.
+        assert client.get("/admin/settings").json()["settings"]["allow_memory_overcommit"][
+            "value"
+        ] is True

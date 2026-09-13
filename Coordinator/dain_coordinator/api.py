@@ -460,6 +460,7 @@ LIVE_SETTINGS: dict[str, str] = {
     "backup_count": "int",
     "min_score": "float",
     "job_timeout_s": "float",
+    "allow_memory_overcommit": "bool",
 }
 RESTART_FIELDS = (
     "host",
@@ -495,6 +496,7 @@ class SettingsUpdate(BaseModel):
     backup_count: int | None = Field(default=None, ge=0, le=16)
     min_score: float | None = Field(default=None, ge=0.0, le=1.0)
     job_timeout_s: float | None = Field(default=None, ge=1.0, le=3600.0)
+    allow_memory_overcommit: bool | None = None
 
 
 def _settings_state(request: Request) -> dict:
