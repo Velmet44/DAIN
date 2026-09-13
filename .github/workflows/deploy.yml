@@ -45,17 +45,22 @@ jobs:
       - name: Guard missing deployment variables
         # Fail before the build instead of baking a localhost URL + empty key
         # into the Pages bundle (Client/src/api.ts would silently fall back to
-        # http://127.0.0.1:8000). Secrets are referenced via the `if` expression
-        # only, never interpolated into a shell line.
-        if: ${{ ! vars.DAIN_API_URL || ! secrets.DAIN_API_KEY }}
+        # http://127.0.0.1:8000). The `secrets` context is not readable in
+        # `if:` conditionals (startup failure), so both values are passed to
+        # the step env and checked in the shell.
+        env:
+          HAS_URL: ${{ vars.DAIN_API_URL }}
+          HAS_KEY: ${{ secrets.DAIN_API_KEY }}
         run: |
-          echo "::error::DAIN_API_URL and DAIN_API_KEY must be configured before deploying to GitHub Pages."
-          echo "  Settings -> Secrets and variables -> Actions -> Variables:"
-          echo "    DAIN_API_URL  public coordinator origin, e.g. https://coord.example.com (must be https://)"
-          echo "    DAIN_MODEL_ID (optional) model id the coordinator store serves"
-          echo "  Settings -> Secrets and variables -> Actions -> Secrets:"
-          echo "    DAIN_API_KEY  the DAIN_API_KEY the coordinator is running with"
-          exit 1
+          if [ -z "$HAS_URL" ] || [ -z "$HAS_KEY" ]; then
+            echo "::error::DAIN_API_URL and DAIN_API_KEY must be configured before deploying to GitHub Pages."
+            echo "  Settings -> Secrets and variables -> Actions -> Variables:"
+            echo "    DAIN_API_URL  public coordinator origin, e.g. https://coord.example.com (must be https://)"
+            echo "    DAIN_MODEL_ID (optional) model id the coordinator store serves"
+            echo "  Settings -> Secrets and variables -> Actions -> Secrets:"
+            echo "    DAIN_API_KEY  the DAIN_API_KEY the coordinator is running with"
+            exit 1
+          fi
       - run: npm ci
       - run: npm run build
       - uses: actions/configure-pages@v5
