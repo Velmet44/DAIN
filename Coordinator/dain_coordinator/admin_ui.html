@@ -137,6 +137,11 @@
         <div class="krow"><label>Min score</label><input id="sMinScore" type="number" min="0" max="1" step="0.01"></div>
         <div class="krow"><label>Job timeout (s)</label><input id="sJobTimeout" type="number" min="1" max="3600"></div>
         <div class="krow">
+          <label>Keyless admin via Tailscale</label>
+          <input id="sKeylessTailnet" type="checkbox" style="width:auto" title="Allow /admin without a key from devices inside your Tailscale network (100.64.0.0/10). Funnel/public visitors always need the admin key.">
+          <span class="tag" style="flex:1">your devices only</span>
+        </div>
+        <div class="krow">
           <label>Overcommit RAM (pagefile)</label>
           <input id="sOvercommit" type="checkbox" style="width:auto" title="Admit nodes whose free RAM cannot fit their stage share; the OS pages the excess weights to disk (slow but functional). Off = placement refused with 429.">
           <span class="tag" style="flex:1">pagefile mode for RAM-short hosts</span>
@@ -538,6 +543,7 @@ const SETTINGS_FIELDS = {
   min_score: "sMinScore",
   job_timeout_s: "sJobTimeout",
   allow_memory_overcommit: "sOvercommit",
+  admin_keyless_tailnet: "sKeylessTailnet",
 };
 let settingsState = null;
 

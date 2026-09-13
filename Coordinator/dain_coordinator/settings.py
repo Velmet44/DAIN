@@ -72,6 +72,7 @@ COORDINATOR_ENV: dict[str, str] = {
     "export_timeout_s": "DAIN_EXPORT_TIMEOUT_S",
     "gguf_timeout_s": "DAIN_GGUF_TIMEOUT_S",
     "allow_memory_overcommit": "DAIN_ALLOW_OVERCOMMIT",
+    "admin_keyless_tailnet": "DAIN_ADMIN_KEYLESS_TAILNET",
     "assignment_tick_s": "DAIN_ASSIGNMENT_TICK_S",
     "replicas_per_model": "DAIN_REPLICAS_PER_MODEL",
     "max_replicas_per_model": "DAIN_MAX_REPLICAS",
@@ -238,6 +239,11 @@ class CoordinatorSettings:
     # RAM-short hosts that could never fit the model). Default off: refuse
     # placement instead (HTTP 429).
     allow_memory_overcommit: bool = False
+    # Keyless /admin access from devices inside the operator's Tailscale
+    # network (peer IP in 100.64.0.0/10). Those peers authenticate via
+    # WireGuard identity; funnel/public visitors never qualify (they arrive
+    # from the local proxy) and still need the admin key.
+    admin_keyless_tailnet: bool = False
     # S22 instant-serving: assignment controller + replica scheduling.
     assignment_tick_s: float = 10.0
     replicas_per_model: int = 1
@@ -317,6 +323,8 @@ class CoordinatorSettings:
             export_timeout_s=float(env.get("DAIN_EXPORT_TIMEOUT_S", "3600")),
             gguf_timeout_s=float(env.get("DAIN_GGUF_TIMEOUT_S", "3600")),
             allow_memory_overcommit=env.get("DAIN_ALLOW_OVERCOMMIT", "").lower()
+            in ("1", "true", "yes"),
+            admin_keyless_tailnet=env.get("DAIN_ADMIN_KEYLESS_TAILNET", "").lower()
             in ("1", "true", "yes"),
             assignment_tick_s=float(env.get("DAIN_ASSIGNMENT_TICK_S", "10")),
             replicas_per_model=int(env.get("DAIN_REPLICAS_PER_MODEL", "1")),
@@ -405,6 +413,7 @@ class CoordinatorSettings:
             export_timeout_s=float(data.get("export_timeout_s", 3600.0)),
             gguf_timeout_s=float(data.get("gguf_timeout_s", 3600.0)),
             allow_memory_overcommit=_truthy(data.get("allow_memory_overcommit", False)),
+            admin_keyless_tailnet=_truthy(data.get("admin_keyless_tailnet", False)),
             assignment_tick_s=float(data.get("assignment_tick_s", 10.0)),
             replicas_per_model=int(data.get("replicas_per_model", 1)),
             max_replicas_per_model=int(data.get("max_replicas_per_model", 2)),

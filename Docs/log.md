@@ -1653,3 +1653,15 @@ document becomes the single discovery source:
   migration runbook, node configs, Pages variables).
 
 CI: two lint leftovers from S22 fixed (schemas line length, unused test var).
+
+## 2026-09-13 - Remote admin access: password + optional Tailscale keyless
+
+- The admin page already authenticates every data call with the admin API key
+  (persisted per browser), so the public funnel URL /admin works from anywhere
+  with the key as the password.
+- New opt-in `admin_keyless_tailnet` (DAIN_ADMIN_KEYLESS_TAILNET, live-togglable
+  from the Settings card): keyless /admin for peers inside the operator's
+  Tailscale network (100.64.0.0/10, WireGuard-authenticated). Funnel visitors
+  arrive via the local proxy (127.0.0.1) and can never qualify; the Origin
+  guard blocks drive-by pages on tailnet devices. Guard unit tests cover
+  localhost, opt-in, funnel-impersonation, and foreign-origin cases.

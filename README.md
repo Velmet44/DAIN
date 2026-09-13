@@ -178,6 +178,22 @@ automatic coordinator-relay fallback). Coordinator knobs: `DAIN_ASSIGNMENT_TICK_
 `DAIN_REPLICAS_PER_MODEL`, `DAIN_MAX_REPLICAS`, `DAIN_MAX_SESSIONS`,
 `DAIN_QUEUE_WAIT_S`, `DAIN_DEMAND_SCALE_THRESHOLD`.
 
+## Admin access from anywhere
+
+The admin page (`/admin`) is served by the coordinator and authenticates every
+data call with the **admin API key** — type it once in the page's "Admin key"
+field (persisted in that browser). Two paths:
+
+- **Public (password required):** the funnel/proxy URL
+  (`https://<machine>.ts.net/admin`) from any browser. Visitors without the
+  key see only the shell; every data call 401s.
+- **Passwordless via Tailscale** (opt-in): devices inside your tailnet
+  authenticate by WireGuard identity — enable `admin_keyless_tailnet`
+  (`DAIN_ADMIN_KEYLESS_TAILNET=1`, or the Settings card toggle) and open the
+  coordinator's ts.net address from any Tailscale-logged-in device. Funnel
+  visitors can never qualify (they arrive via the local proxy), so the public
+  path keeps requiring the key.
+
 ## Repository layout
 
 The **root holds no buildable code** — only shared docs, config, and the project

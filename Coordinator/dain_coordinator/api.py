@@ -108,6 +108,54 @@ def _local_trusted(request: Request) -> bool:
     return True
 
 
+#: Tailscale CGNAT range — peers here authenticated via the tailnet's WireGuard.
+_TAILNET_NET = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _tailnet_trusted(request: Request) -> bool:
+    """True for requests arriving from inside the operator's Tailscale network.
+
+    Only meaningful when `admin_keyless_tailnet` is enabled. The public funnel
+    path can never impersonate this: funnel visitors arrive from the local
+    proxy (127.0.0.1), outside the tailnet range. The Origin guard mirrors
+    `_local_trusted`: drive-by cross-site requests always carry an Origin and
+    are rejected unless it is a loopback/100.x/`*.ts.net` origin.
+    """
+    client = request.client
+    if client is None:
+        return False
+    try:
+        peer = ipaddress.ip_address(client.host)
+    except ValueError:
+        return False
+    if peer not in _TAILNET_NET:
+        return False
+    origin = request.headers.get("origin")
+    if origin:
+        o = urlparse(origin)
+        hostname = o.hostname or ""
+        try:
+            origin_ip = ipaddress.ip_address(hostname)
+            origin_ok = origin_ip in _TAILNET_NET or origin_ip.is_loopback
+        except ValueError:
+            origin_ok = hostname.endswith(".ts.net") or hostname in (
+                "127.0.0.1",
+                "localhost",
+                "::1",
+            )
+        if not origin_ok:
+            return False
+    return True
+
+
+def _admin_keyless_ok(request: Request, settings) -> bool:
+    if _local_trusted(request):
+        return True
+    return bool(getattr(settings, "admin_keyless_tailnet", False)) and _tailnet_trusted(
+        request
+    )
+
+
 def _provided_key(request: Request, header: str) -> str | None:
     provided = request.headers.get(header)
     if provided is None:
@@ -137,10 +185,11 @@ def require_node(request: Request) -> None:
 
 
 def require_admin(request: Request) -> None:
-    """Admin API auth: admin key, or keyless from a trusted localhost request."""
+    """Admin API auth: admin key, keyless from localhost, or (opt-in)
+    keyless from inside the operator's Tailscale network."""
     settings = request.app.state.settings
     provided = _provided_key(request, "x-admin-key")
-    if provided is None and _local_trusted(request):
+    if provided is None and _admin_keyless_ok(request, settings):
         return
     if provided is None or not secrets.compare_digest(
         provided.encode("utf-8"), settings.admin_api_key.encode("utf-8")
@@ -475,6 +524,7 @@ LIVE_SETTINGS: dict[str, str] = {
     "min_score": "float",
     "job_timeout_s": "float",
     "allow_memory_overcommit": "bool",
+    "admin_keyless_tailnet": "bool",
 }
 RESTART_FIELDS = (
     "host",
@@ -511,6 +561,7 @@ class SettingsUpdate(BaseModel):
     min_score: float | None = Field(default=None, ge=0.0, le=1.0)
     job_timeout_s: float | None = Field(default=None, ge=1.0, le=3600.0)
     allow_memory_overcommit: bool | None = None
+    admin_keyless_tailnet: bool | None = None
 
 
 def _settings_state(request: Request) -> dict:
