@@ -78,6 +78,7 @@ COORDINATOR_ENV: dict[str, str] = {
     "max_sessions_per_node": "DAIN_MAX_SESSIONS",
     "queue_wait_s": "DAIN_QUEUE_WAIT_S",
     "demand_scale_threshold": "DAIN_DEMAND_SCALE_THRESHOLD",
+    "trusted_proxies": "DAIN_TRUSTED_PROXIES",
 }
 
 # Default config.json written next to the coordinator on first run.  Key names
@@ -248,6 +249,11 @@ class CoordinatorSettings:
     # Recent arrivals (demand window) at/above which a model gets a 2nd replica.
     demand_scale_threshold: int = 8
     demand_window_s: float = 600.0
+    # Reverse-proxy deployments (Caddy/nginx on the same host): the proxy's
+    # peer IPs whose X-Forwarded-For header is trusted for rate limiting and
+    # per-client accounting. uvicorn rewrites request.client.host from it.
+    # Comma-separated IPs or '*' (never '*' on a host directly exposed).
+    trusted_proxies: str = "127.0.0.1"
     # Completed-job retention: terminal jobs are evicted once the history grows
     # past `job_history_max` (oldest first) or a job has been terminal for
     # longer than `job_ttl_s` — the tracker must not grow forever on long runs.
@@ -319,6 +325,7 @@ class CoordinatorSettings:
             queue_wait_s=float(env.get("DAIN_QUEUE_WAIT_S", "30")),
             demand_scale_threshold=int(env.get("DAIN_DEMAND_SCALE_THRESHOLD", "8")),
             demand_window_s=float(env.get("DAIN_DEMAND_WINDOW_S", "600")),
+            trusted_proxies=env.get("DAIN_TRUSTED_PROXIES", "127.0.0.1"),
         )
 
     @classmethod
@@ -405,4 +412,5 @@ class CoordinatorSettings:
             queue_wait_s=float(data.get("queue_wait_s", 30.0)),
             demand_scale_threshold=int(data.get("demand_scale_threshold", 8)),
             demand_window_s=float(data.get("demand_window_s", 600.0)),
+            trusted_proxies=str(data.get("trusted_proxies", "127.0.0.1") or "127.0.0.1"),
         )

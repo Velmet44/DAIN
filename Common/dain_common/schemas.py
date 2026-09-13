@@ -349,7 +349,11 @@ class ModelAssignment(_Model):
     @model_validator(mode="after")
     def _pipeline_range(self) -> ModelAssignment:
         if self.mode == "pipeline":
-            if self.layer_start is None or self.layer_end is None or self.layer_end < self.layer_start:
+            if (
+                self.layer_start is None
+                or self.layer_end is None
+                or self.layer_end < self.layer_start
+            ):
                 raise ValueError("pipeline assignment needs a valid layer range")
         return self
 

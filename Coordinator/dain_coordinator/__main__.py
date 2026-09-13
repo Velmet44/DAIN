@@ -44,7 +44,14 @@ def main() -> None:
         # settings consumers advertise the port uvicorn actually binds.
         settings = replace(settings, port=port)
     uvicorn.run(
-        create_app(settings, settings_path=str(path)), host=settings.host, port=port
+        create_app(settings, settings_path=str(path)),
+        host=settings.host,
+        port=port,
+        # Behind Caddy/nginx the per-client rate limiter must see the real
+        # client IP, not the proxy's 127.0.0.1 (which would bucket the whole
+        # internet into one client).
+        proxy_headers=True,
+        forwarded_allow_ips=settings.trusted_proxies,
     )
 
 

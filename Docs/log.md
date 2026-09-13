@@ -1610,3 +1610,22 @@ error + revocation, warm budget, concurrent replica sessions on a shared
 stage, direct-relay round trip + auth rejection). Chaos reject scenario keeps
 its clean fast 429/503 (fail-fast on an empty pool). All four pytest suites
 plus ruff green; client build green.
+
+## 2026-09-13 - WAN-readiness fixes + CI lint repair
+
+CI: the S22 push failed on two lint leftovers (long line in
+schemas.ModelAssignment validator; unused variable in the serving test) —
+both fixed; pytest had never been reached, no test failures existed.
+
+- Rate limiting behind a reverse proxy: new `trusted_proxies` setting
+  (DAIN_TRUSTED_PROXIES, default 127.0.0.1) wired into uvicorn
+  `proxy_headers`/`forwarded_allow_ips`, so Caddy/nginx-fronted deployments
+  rate-limit on the real client IP instead of bucketing everyone under the
+  proxy's 127.0.0.1.
+- Direct node-to-node activation relay timeout dropped 10 s -> 2 s on both
+  the forward path and retry replay: a NAT'd WAN peer's unreachable LAN
+  `peer_url` now costs 2 s before the coordinator-relay fallback, not 10.
+- Deploy/.env.example documents every S22 knob (serving pool, warm tiers,
+  sessions, direct relay, overcommit, trusted proxies).
+- GitHub Pages deploy requires repo variable DAIN_API_URL + secret
+  DAIN_API_KEY (still unset — operator step with the real coordinator origin).

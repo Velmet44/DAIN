@@ -171,7 +171,6 @@ def test_assignment_diff_emits_revoke() -> None:
             ModelAssignment(model_id="m-b", action="ensure", mode="replica"),
         ]
     }
-    plan = compute_assignments.__wrapped__ if hasattr(compute_assignments, "__wrapped__") else None
     # Build a plan containing only m-a on n1 via the service-level diff:
     from dain_coordinator.assignments import AssignmentPlan
 

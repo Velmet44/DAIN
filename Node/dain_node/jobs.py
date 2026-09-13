@@ -398,6 +398,9 @@ class JobHandler:
                 "Content-Type": "application/octet-stream",
             },
             content=payload,
+            # WAN peers behind NAT advertise LAN IPs that cannot be reached:
+            # a short timeout keeps the coordinator-relay fallback snappy.
+            timeout_s=2.0,
         )
         if status == 200:
             return True
@@ -604,6 +607,7 @@ class JobHandler:
                     "Content-Type": "application/octet-stream",
                 },
                 content=payload,
+                timeout_s=2.0,
             )
             if status == 200:
                 return
