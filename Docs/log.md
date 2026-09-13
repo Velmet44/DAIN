@@ -1536,3 +1536,27 @@ Complete client rework (React SPA, same deps):
 - Welcome screen with example prompts; sanitized markdown rendering unchanged
   (DOMPurify), user messages rendered as plain text.
 - Build: tsc + vite production build green.
+
+## 2026-09-13 - Instant-serving architecture plan (S22, design only)
+
+Benchmarked the real node paths on the 2-core reference host before designing:
+cold (packed shards -> dequant -> build) ~50 s to first token; derived-fp16
+cache rebuild ~29 s; mmap-assign lukewarm tier 18 s build / 1.6 GB evictable
+RSS (greedy parity confirmed) but disk-bound decode when RAM-short; warm
+resident stage 1.8 s first token at ~3.4 GB RSS; paging (3.4 GB RSS on
+2.6 GB free) doubles decode step time. Conclusion: file prefetch alone is not
+enough - instant requires warm-stage retention with a warm probe, and capacity
+must use measured RSS/tok-s.
+
+Plan written to Docs/plan-instant-serving-architecture.md (no code changes):
+node Provisioner with per-model lifecycle (assigned -> downloading ->
+files_ready -> warm -> serving, warm probe feeds measured capacity to the
+scheduler; restarts never re-download, derived-fp16 cache persists keyed to
+manifest hash), replica-first fewest-nodes scheduling (k=1 preferred,
+pipeline fallback for models too big for any node), stateless chat (full
+transcript in prompt - no session affinity), SessionManager continuous
+batching (replaces one-generation-per-node), adaptive controller (desired
+replicas from arrivals, hysteresis, LRU eviction with warm floors), staged
+rollout S22a-S22f with spec amendments (section 8) recorded per stage.
+
+No code changed; tests not run (docs-only commit).

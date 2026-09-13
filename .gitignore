@@ -34,3 +34,6 @@ Deploy/caddy.exe
 .DS_Store
 .idea/
 .vscode/
+
+# scratch benchmarks / experiments
+TEMP/
