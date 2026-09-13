@@ -42,12 +42,8 @@ export function DashboardView({ baseUrl, apiKey }: Props) {
   }, [baseUrl, apiKey, tick]);
 
   return (
-    <div className="view">
-      <div className="toolbar">
-        <span className="status">
-          {error ? `error: ${error}` : status ? `active jobs: ${status.active_jobs}` : "loading…"}
-        </span>
-      </div>
+    <div className="dash">
+      <h2>Cluster {error ? <span style={{ color: "#ef4444" }}>— {error}</span> : `— ${status ? `${status.nodes.filter((n) => n.connected).length}/${status.nodes.length} nodes connected · ${status.active_jobs} active jobs` : "loading…"}`}</h2>
       {status && (
         <>
           <table>
@@ -82,7 +78,7 @@ export function DashboardView({ baseUrl, apiKey }: Props) {
               ))}
             </tbody>
           </table>
-          <h3>Placements</h3>
+          <h2>Placements</h2>
           <table>
             <thead>
               <tr>

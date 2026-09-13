@@ -1,191 +1,265 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  defaultMaxTokens,
-  defaultModel,
-  listModels,
-  streamCompletion,
-  type ChatMessage,
-  type SseFrame,
-} from "./api";
-import { MessageBubble, useLocalStorage } from "./components";
+import { listModels, streamCompletion } from "./api";
+import { MessageBubble } from "./components";
+import type { ChatMessage, ClientSettings, Conversation, MsgStats } from "./types";
+import { titleFromMessage } from "./storage";
 import { logDebug, logError, logInfo, logOk, logWarn } from "./logs";
 
 interface Props {
-  baseUrl: string;
-  apiKey: string;
-  setBaseUrl: (v: string) => void;
-  setApiKey: (v: string) => void;
+  conv: Conversation;
+  settings: ClientSettings;
+  onModelPicked: (modelId: string) => void;
+  onPatch: (patch: {
+    title?: string;
+    appendMessage?: ChatMessage;
+    replaceMessage?: ChatMessage;
+  }) => void;
+  onConnected: (ok: boolean) => void;
 }
 
-/** Streaming flushes are coalesced to this cadence so the growing transcript is
- * not re-rendered (and re-marked-down) on every token. */
+const EXAMPLES = [
+  "Explain pipeline-parallel inference like I'm five",
+  "Write a Python function that merges overlapping intervals",
+  "What are the trade-offs of int4 quantization?",
+  "Summarize how a raft consensus cluster handles a node failure",
+];
+
+/** Streaming flushes are coalesced so the growing transcript is not re-rendered
+ * (and re-marked-down) on every token. */
 const STREAM_FLUSH_MS = 60;
 
-export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [input, setInput] = useState("");
-  const [modelId, setModelId] = useLocalStorage("dain:model", defaultModel());
-  const [maxTokens, setMaxTokens] = useState<number>(defaultMaxTokens());
+/**
+ * Compose the raw-completion prompt the coordinator expects: optional system
+ * preamble + a User/Assistant transcript. With history off, only the latest
+ * user message is included.
+ */
+export function buildPrompt(
+  messages: ChatMessage[],
+  systemPrompt: string,
+  sendHistory: boolean,
+): string {
+  const usable = messages.filter((m) => m.content && !m.stats?.error);
+  const turns = sendHistory ? usable : usable.slice(-1);
+  const lines: string[] = [];
+  if (systemPrompt.trim()) lines.push(systemPrompt.trim());
+  for (const m of turns) {
+    lines.push(m.role === "user" ? `User: ${m.content}` : `Assistant: ${m.content}`);
+  }
+  lines.push("Assistant:");
+  return lines.join("\n\n");
+}
+
+export function ChatView({ conv, settings, onModelPicked, onPatch, onConnected }: Props) {
   const [models, setModels] = useState<string[]>([]);
-  const [status, setStatus] = useState("");
+  const [modelError, setModelError] = useState("");
+  const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const controllerRef = useRef<AbortController | null>(null);
-  // Mirror modelId into a ref so the model-list refetch below never depends on
-  // it (changing the picker must not re-poll the coordinator on every switch).
-  const modelIdRef = useRef(modelId);
-  useEffect(() => {
-    modelIdRef.current = modelId;
-  }, [modelId]);
+  const bottomRef = useRef<HTMLDivElement | null>(null);
+  const threadRef = useRef<HTMLDivElement | null>(null);
 
-  // Abort any in-flight completion when the view unmounts — the coordinator's
-  // SSE generator would otherwise keep pumping frames into a dead component.
-  useEffect(() => {
-    return () => controllerRef.current?.abort();
-  }, []);
+  const modelId = settings.modelId;
 
+  // Model picker + connection indicator refresh when the endpoint changes.
   useEffect(() => {
     const controller = new AbortController();
-    listModels(baseUrl, apiKey, controller.signal)
-      .then((models) => {
-        logOk(`model picker: ${models.join(", ") || "(none)"}`);
-        setModels(models);
-        if (models.length > 0 && !modelIdRef.current) {
-          logInfo(`auto-selecting first model: ${models[0]}`);
-          setModelId(models[0]);
+    listModels(settings.url, settings.apiKey, controller.signal)
+      .then((list) => {
+        logOk(`model picker: ${list.join(", ") || "(none)"}`);
+        setModels(list);
+        setModelError("");
+        onConnected(true);
+        if (list.length > 0 && !list.includes(modelId)) {
+          logInfo(`auto-selecting first model: ${list[0]}`);
+          onModelPicked(list[0]);
         }
       })
       .catch((err: Error) => {
-        if (controller.signal.aborted) return; // unmounted / superseded
+        if (controller.signal.aborted) return;
         logError(`models unavailable: ${err.message}`);
-        setStatus(`models: ${err.message}`);
+        setModelError(err.message);
+        onConnected(false);
       });
     return () => controller.abort();
-  }, [baseUrl, apiKey]);
+    // Model changes must not refetch; only endpoint changes do.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings.url, settings.apiKey]);
 
-  const send = async (prompt?: string) => {
-    const text = (prompt ?? input).trim();
-    if (!text || streaming || !modelId) return;
-    // Prompt content is debug-only: it must never reach the console in a
-    // production build.
-    logInfo(`send model=${modelId} promptChars=${text.length} maxTokens=${maxTokens}`);
-    logDebug(`prompt: ${text}`);
-    setInput("");
-    setMessages((m) => [
-      ...m,
-      { role: "user", content: text },
-      { role: "assistant", content: "", streaming: true },
-    ]);
-    setStreaming(true);
-    setStatus("");
-    const controller = new AbortController();
-    controllerRef.current = controller;
-    let acc = "";
-    let committed = "";
-    const flush = () => {
-      if (acc === committed) return;
-      committed = acc;
-      setMessages((m) => {
-        const tail = [...m];
-        tail[tail.length - 1] = { role: "assistant", content: acc, streaming: true };
-        return tail;
-      });
-    };
-    const flusher = window.setInterval(flush, STREAM_FLUSH_MS);
-    try {
-      await streamCompletion(
-        baseUrl,
-        apiKey,
-        { modelId, prompt: text, maxTokens, signal: controller.signal },
-        (frame: SseFrame) => {
-          if (frame.token) {
-            acc += frame.token;
-            logDebug(
-              `token frame: "${frame.token.length > 40 ? `${frame.token.slice(0, 40)}…` : frame.token}" (total ${acc.length} chars)`,
-            );
-          }
-          if (frame.type === "error") {
-            logError(`stream error frame: ${frame.detail}`);
-            setStatus(`error: ${frame.detail || "completion failed"}`);
-          } else if (frame.type === "final") {
-            setStatus(`done (${frame.usage?.tokens ?? acc.length} tokens)`);
-          }
-        },
-      );
-      flush();
-      setMessages((m) => {
-        const tail = [...m];
-        tail[tail.length - 1] = { role: "assistant", content: acc, streaming: false };
-        return tail;
-      });
-    } catch (err) {
-      const aborted = controller.signal.aborted;
-      if (aborted) logWarn(`completion aborted, ${acc.length} chars received`);
-      else logError(`completion failed: ${(err as Error).message}`);
-      setStatus(aborted ? "stopped" : `error: ${(err as Error).message}`);
-      setMessages((m) => {
-        const tail = [...m];
-        tail[tail.length - 1] = {
-          role: "assistant",
-          content: aborted ? acc || "⚠ stopped" : `⚠ ${(err as Error).message}`,
-          streaming: false,
-        };
-        return tail;
-      });
-    } finally {
-      window.clearInterval(flusher);
-      setStreaming(false);
-      controllerRef.current = null;
-    }
-  };
+  // Keep the newest message in view while it streams.
+  useEffect(() => {
+    const thread = threadRef.current;
+    if (!thread) return;
+    const nearBottom = thread.scrollHeight - thread.scrollTop - thread.clientHeight < 160;
+    if (nearBottom) bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [conv.messages]);
+
+  // Abort any in-flight completion when the view unmounts or the chat switches.
+  useEffect(() => () => controllerRef.current?.abort(), [conv.id]);
 
   const stop = useCallback(() => {
     logInfo("stop requested");
     controllerRef.current?.abort();
   }, []);
 
+  const send = async (text?: string) => {
+    const prompt = (text ?? input).trim();
+    if (!prompt || streaming) return;
+    if (!modelId) {
+      setModelError("no model selected — check Settings → connection");
+      return;
+    }
+    logInfo(`send model=${modelId} promptChars=${prompt.length} maxTokens=${settings.maxTokens}`);
+    logDebug(`prompt: ${prompt}`);
+    setInput("");
+
+    const stamp = Date.now().toString(36);
+    const userMsg: ChatMessage = {
+      id: `m-${stamp}-u`,
+      role: "user",
+      content: prompt,
+      ts: Date.now(),
+    };
+    const assistantMsg: ChatMessage = {
+      id: `m-${stamp}-a`,
+      role: "assistant",
+      content: "",
+      streaming: true,
+      ts: Date.now(),
+    };
+    onPatch({ appendMessage: userMsg });
+    if (conv.title === "New chat" || !conv.title) {
+      onPatch({ title: titleFromMessage(prompt) });
+    }
+    onPatch({ appendMessage: assistantMsg });
+
+    // Prompt composition uses the transcript *including* the new user message.
+    const composed = buildPrompt(
+      [...conv.messages, userMsg],
+      settings.systemPrompt,
+      settings.sendHistory,
+    );
+
+    const controller = new AbortController();
+    controllerRef.current = controller;
+    const startedAt = performance.now();
+    let firstTokenAt: number | null = null;
+    let acc = "";
+    let committed = "";
+    let tokens = 0;
+    const flush = () => {
+      if (acc === committed) return;
+      committed = acc;
+      onPatch({
+        replaceMessage: { ...assistantMsg, content: acc, streaming: true },
+      });
+    };
+    const flusher = window.setInterval(flush, STREAM_FLUSH_MS);
+    setStreaming(true);
+    try {
+      await streamCompletion(
+        settings.url,
+        settings.apiKey,
+        { modelId, prompt: composed, maxTokens: settings.maxTokens, signal: controller.signal },
+        (frame) => {
+          if (frame.token) {
+            if (firstTokenAt === null) firstTokenAt = performance.now();
+            tokens += 1;
+            acc += frame.token;
+          }
+          if (frame.usage?.tokens != null) tokens = frame.usage.tokens;
+        },
+      );
+      const totalMs = performance.now() - startedAt;
+      const stats: MsgStats = {
+        model: modelId,
+        ttftMs: firstTokenAt === null ? null : Math.round(firstTokenAt - startedAt),
+        totalMs: Math.round(totalMs),
+        tokens,
+      };
+      logOk(
+        `reply done: ${tokens} tok, ttft ${stats.ttftMs ?? "?"}ms, total ${Math.round(totalMs)}ms`,
+      );
+      onPatch({
+        replaceMessage: { ...assistantMsg, content: acc, streaming: false, stats },
+      });
+    } catch (err) {
+      const aborted = controller.signal.aborted;
+      const message = (err as Error).message;
+      if (aborted) logWarn(`completion aborted, ${acc.length} chars received`);
+      else logError(`completion failed: ${message}`);
+      const stats: MsgStats = {
+        model: modelId,
+        ttftMs: firstTokenAt === null ? null : Math.round(firstTokenAt - startedAt),
+        totalMs: Math.round(performance.now() - startedAt),
+        tokens,
+        stopped: aborted,
+        ...(aborted ? {} : { error: message }),
+      };
+      onPatch({
+        replaceMessage: {
+          ...assistantMsg,
+          content: aborted ? acc : `⚠ ${message}`,
+          streaming: false,
+          stats,
+        },
+      });
+    } finally {
+      window.clearInterval(flusher);
+      flush();
+      setStreaming(false);
+      controllerRef.current = null;
+    }
+  };
+
+  const empty = conv.messages.length === 0;
+
   return (
-    <div className="view">
-      <div className="toolbar">
-        <input
-          placeholder="coordinator URL"
-          value={baseUrl}
-          onChange={(e) => setBaseUrl(e.target.value)}
-        />
-        <input
-          placeholder="API key"
-          type="password"
-          value={apiKey}
-          onChange={(e) => setApiKey(e.target.value)}
-        />
-        <select value={modelId} onChange={(e) => setModelId(e.target.value)}>
-          {models.length === 0 && <option value="">no models (check URL/key)</option>}
+    <div className="chat-view">
+      <header className="chat-head">
+        <select
+          className="model-select"
+          value={modelId}
+          onChange={(e) => onModelPicked(e.target.value)}
+          title="Model served by the coordinator"
+        >
+          {models.length === 0 && (
+            <option value="">
+              {modelError ? "unreachable — see Settings" : modelId || "no models"}
+            </option>
+          )}
           {models.map((m) => (
             <option key={m} value={m}>
               {m}
             </option>
           ))}
         </select>
-        <input
-          className="narrow"
-          type="number"
-          min={1}
-          max={512}
-          value={maxTokens}
-          onChange={(e) => setMaxTokens(Number(e.target.value))}
-          title="max tokens"
-        />
-        <span className="status">{status}</span>
-      </div>
-      <div className="thread">
-        {messages.length === 0 && (
-          <p className="hint">
-            Prototype model {modelId || "?"} — output is seeded proto-text, not language. Say hi.
-          </p>
+        <span className="chat-status">
+          {streaming ? "generating…" : modelError ? `⚠ ${modelError}` : ""}
+        </span>
+      </header>
+
+      <div className="thread" ref={threadRef}>
+        {empty ? (
+          <div className="welcome">
+            <h1>DAIN</h1>
+            <p>
+              Distributed inference client{modelId ? ` — running ${modelId}` : ""}. Conversations
+              are saved in this browser.
+            </p>
+            <div className="examples">
+              {EXAMPLES.map((ex) => (
+                <button key={ex} type="button" onClick={() => void send(ex)}>
+                  {ex}
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : (
+          conv.messages.map((m) => <MessageBubble key={m.id} message={m} onStop={stop} />)
         )}
-        {messages.map((m, i) => (
-          <MessageBubble key={i} message={m} onStop={stop} />
-        ))}
+        <div ref={bottomRef} />
       </div>
+
       <form
         className="composer"
         onSubmit={(e) => {
@@ -194,17 +268,21 @@ export function ChatView({ baseUrl, apiKey, setBaseUrl, setApiKey }: Props) {
         }}
       >
         <input
-          placeholder="Type a prompt and press Enter"
+          placeholder={
+            modelId ? "Message the cluster…" : "Connect a coordinator in Settings first"
+          }
           value={input}
           onChange={(e) => setInput(e.target.value)}
           disabled={streaming}
+          autoFocus
         />
-        <button type="submit" disabled={streaming || !input.trim()}>
-          {streaming ? "streaming…" : "Send"}
-        </button>
-        {streaming && (
-          <button type="button" onClick={stop}>
-            Stop
+        {streaming ? (
+          <button type="button" className="stop-btn" onClick={stop}>
+            ■
+          </button>
+        ) : (
+          <button type="submit" className="send-btn" disabled={!input.trim()}>
+            ↑
           </button>
         )}
       </form>

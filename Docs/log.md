@@ -1513,3 +1513,26 @@ persists to config.json like the other LIVE_SETTINGS. The settings JS treats
 bool-typed fields generically (checkbox <-> boolean body), so future flags
 follow the same path. Regression test covers the PUT round-trip and the
 `applied` response.
+
+## 2026-09-13 - Client redesign: ChatGPT-style shell, saved conversations, system prompt
+
+Complete client rework (React SPA, same deps):
+
+- Layout: fixed sidebar (new chat, conversation list with two-step delete,
+  connection dot, cluster-nodes + settings entries) + centered chat column
+  with sticky model-selector header and pill composer.
+- Conversations persist to localStorage (`dain:chats:v1`, capped at 50 chats /
+  200 messages, quota-exceeded pruning keeps the newest half; legacy
+  `dain:base_url/api_key/model` values migrate into the v1 settings blob).
+- Settings moved out of the toolbar into a modal: coordinator URL, API key,
+  max tokens, system prompt (with a carefully written default), and a
+  "send conversation history" toggle. History ON composes
+  `system + User/Assistant turns + Assistant:` for follow-ups; OFF sends each
+  message standalone.
+- Every assistant reply gets a stats footer: model id, decode tok/s (over the
+  post-first-token window), time to first token, total time, token count,
+  stopped/error flags; per-message copy button; blinking stream cursor;
+  auto-scroll only when already near the bottom; abort on chat switch/unmount.
+- Welcome screen with example prompts; sanitized markdown rendering unchanged
+  (DOMPurify), user messages rendered as plain text.
+- Build: tsc + vite production build green.
