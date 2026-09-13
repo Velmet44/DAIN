@@ -22,6 +22,11 @@ from dain_coordinator.api import (
     node_router,
     v1_router,
 )
+from dain_coordinator.assignments import (
+    AssignmentService,
+    DemandTracker,
+    ReadinessMap,
+)
 from dain_coordinator.connections import NodeConnections
 from dain_coordinator.discovery import DiscoveryResponder
 from dain_coordinator.faults import FaultManager
@@ -70,6 +75,17 @@ async def _watchdog_loop(faults, settings_getter) -> None:
         except Exception:
             # The watchdog must survive any transient error.
             log.exception("watchdog_tick_failed")
+
+
+async def _assignment_loop(service, settings_getter) -> None:
+    """S22a controller: reconcile node model portfolios periodically."""
+    while True:
+        await asyncio.sleep(settings_getter().assignment_tick_s)
+        try:
+            await service.recompute("tick")
+        except Exception:
+            # The controller must survive transient registry/transport errors.
+            log.exception("assignment_tick_failed")
 
 
 def create_app(
@@ -131,10 +147,28 @@ def create_app(
                     recorder=placements,
                 )
 
-        connections.on_disconnect = lambda node_id: (
-            faults.handle_node_lost(node_id),
-            recompute_pool_events("leave"),
+        readiness = ReadinessMap()
+        demand = DemandTracker(window_s=app.state.settings.demand_window_s)
+        assignments_service = AssignmentService(
+            registry=registry,
+            connections=connections,
+            readiness=readiness,
+            demand=demand,
+            manifests_fn=lambda: _store_manifests(),
         )
+
+        def _store_manifests() -> list[ModelManifest]:
+            try:
+                return list(shard_store_list(app.state.settings.model_store_dir))
+            except OSError:
+                return []
+
+        def _on_disconnect(node_id: str) -> None:
+            readiness.drop_node(node_id)
+            faults.handle_node_lost(node_id)
+            recompute_pool_events("leave")
+
+        connections.on_disconnect = _on_disconnect
         service.on_pool_change = lambda node_id, to_state: recompute_pool_events(
             "degraded" if to_state == NodeState.DEGRADED else "recovered"
         )
@@ -145,6 +179,9 @@ def create_app(
         )
         app.state.registry = registry
         app.state.service = service
+        app.state.readiness = readiness
+        app.state.demand = demand
+        app.state.assignments = assignments_service
         app.state.connections = connections
         app.state.jobs = jobs
         app.state.relay = relay
@@ -157,6 +194,11 @@ def create_app(
         task = asyncio.create_task(monitor.run(), name="heartbeat-monitor")
         watchdog = asyncio.create_task(
             _watchdog_loop(faults, lambda: app.state.settings), name="stage-watchdog"
+        )
+
+        controller = asyncio.create_task(
+            _assignment_loop(assignments_service, lambda: app.state.settings),
+            name="assignment-controller",
         )
         discovery: DiscoveryResponder | None
         if settings.discovery_enabled:
@@ -180,6 +222,7 @@ def create_app(
         yield
         task.cancel()
         watchdog.cancel()
+        controller.cancel()
         if discovery_task is not None:
             discovery_task.cancel()
         if discovery is not None:
@@ -188,6 +231,8 @@ def create_app(
             await task
         with contextlib.suppress(asyncio.CancelledError):
             await watchdog
+        with contextlib.suppress(asyncio.CancelledError):
+            await controller
         if discovery_task is not None:
             with contextlib.suppress(asyncio.CancelledError):
                 await discovery_task

@@ -59,6 +59,10 @@ class JobRecord:
     # `attempt_nodes` records which node actually served each `(stage_idx,
     # attempt)` so a retried stage logs against the node that ran the work.
     ledger_emitted: bool = False
+    # S22: "replica" jobs run on one node alongside other sessions (the node
+    # stays ONLINE; its load is a metric, not a state). "pipeline" jobs keep
+    # the exclusive BUSY semantics.
+    serving_mode: str = "pipeline"
     attempt_nodes: dict[tuple[int, int], str] = field(default_factory=dict)
 
 
@@ -112,6 +116,7 @@ class JobTracker:
         *,
         api_key: str | None = None,
         backups: tuple[str, ...] = (),
+        serving_mode: str = "pipeline",
     ) -> JobRecord:
         job_id = uuid.uuid4().hex[:12]
         record = JobRecord(
@@ -122,6 +127,7 @@ class JobTracker:
             manifest=manifest,
             api_key=api_key,
             backups=backups,
+            serving_mode=serving_mode,
         )
         self.jobs[job_id] = record
         self._order.append(job_id)

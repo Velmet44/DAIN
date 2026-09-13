@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hmac
+import json
 import logging
 import os
 import socket
@@ -89,6 +90,8 @@ class PeerShardServer:
         advertise_host: str | None = None,
         join_token: str = "",
     ) -> None:
+        # S22e: async callback(dict_header, bytes) for direct activations.
+        self.activation_receiver = None
         self.cache_dir = os.path.abspath(cache_dir)
         self._bind_host = bind_host
         self.port = port
@@ -161,12 +164,18 @@ class PeerShardServer:
             await self._respond(writer, b"403 Forbidden", "text/plain", b"forbidden")
             return
 
+        parsed = urlparse(target)
+        path = parsed.path
+        if method == "POST" and path == "/peer/activation":
+            if not self.activation_receiver:
+                await self._respond(writer, b"503 Service Unavailable", "text/plain", b"")
+                return
+            await self._receive_activation(reader, writer, headers)
+            return
+
         if method not in ("GET", "HEAD"):
             await self._respond(writer, b"405 Method Not Allowed", "text/plain", b"")
             return
-
-        parsed = urlparse(target)
-        path = parsed.path
         if not path.startswith("/peer/shard/"):
             await self._respond(writer, b"404 Not Found", "text/plain", b"")
             return
@@ -197,6 +206,40 @@ class PeerShardServer:
         if method == "HEAD":
             return await self._respond_sized(writer, start, end, size)
         await self._stream(writer, path, start, end, size)
+
+    async def _receive_activation(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        headers: dict[str, str],
+    ) -> None:
+        """Direct activation POST (S22e): raw bytes in the body, the relay
+        header as JSON in `X-Activation`. Auth identical to shard serving."""
+        if not self._client_ok(headers):
+            await self._respond(writer, b"403 Forbidden", "text/plain", b"forbidden")
+            return
+        header_json = headers.get("x-activation", "")
+        length = headers.get("content-length", "")
+        try:
+            n_bytes = int(length)
+            if not 0 < n_bytes <= 64 << 20:
+                raise ValueError
+        except ValueError:
+            await self._respond(writer, b"400 Bad Request", "text/plain", b"bad length")
+            return
+        try:
+            body = await asyncio.wait_for(reader.readexactly(n_bytes), timeout=30.0)
+        except (asyncio.IncompleteReadError, ConnectionError):
+            return
+        try:
+            header_data = json.loads(header_json)
+        except ValueError:
+            await self._respond(writer, b"400 Bad Request", "text/plain", b"bad header")
+            return
+        await self._respond(writer, b"200 OK", "text/plain", b"")
+        receiver = self.activation_receiver
+        if receiver is not None:
+            await receiver(header_data, body)
 
     def _client_ok(self, headers: dict[str, str]) -> bool:
         provided = headers.get("x-peer-token", "")

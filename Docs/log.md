@@ -1560,3 +1560,53 @@ replicas from arrivals, hysteresis, LRU eviction with warm floors), staged
 rollout S22a-S22f with spec amendments (section 8) recorded per stage.
 
 No code changed; tests not run (docs-only commit).
+
+## 2026-09-13 - S22 instant-serving: provisioned pool, replica-first scheduling, sessions
+
+Implements the full instant-serving architecture (the plan doc this replaces):
+prompts now hit warm pre-provisioned replicas (measured ~1.8 s first token on
+the reference host) instead of paying download+dequant+build inside the
+request (measured 29-50 s).
+
+Coordinator:
+- `assignments.py`: desired-model-portfolio computation (replica-first,
+  demand-bumped, pipeline-only fallback for models too big for any node),
+  `ReadinessMap`, `DemandTracker`, stateful `AssignmentService` (diff ->
+  ASSIGNMENT envelopes -> persisted `assignments` table so restarts keep
+  node portfolios).
+- `app.py`: controller task ticks `assignment_tick_s`; node WS connect
+  replays the node's portfolio; MODEL_STATUS updates readiness.
+- `partition.py`: `plan_serving` (replica attempt -> pipeline fallback with
+  provisioned nodes ranked first), `runtime_size_gb`, `serving_mode` on plans.
+- `api.py`: per-request replica routing honors per-node session caps
+  (`active_sessions` load vector); queue-with-status-frames (`queued` /
+  `provisioning` progress) while the live pool catches up; sync 503 when the
+  pool is empty; pipeline jobs keep BUSY exclusivity, replica jobs share
+  nodes; stage peer URLs ride JOB_ASSIGN for direct relay.
+- `schemas.py`: ASSIGNMENT/MODEL_STATUS envelopes, StageAssignment.peer_url,
+  MetricsReport.active_sessions, ModelManifest.mirror_urls.
+- `faults.py`: replica reassignment skips BUSY marking.
+
+Node:
+- `provisioner.py`: background reconcile (download -> files_ready ->
+  warm build -> 2-token warm probe reporting measured tok/s + RSS; revocation;
+  periodic re-report self-heals lost frames).
+- `llm.py`: persistent derived-fp16 cache (sidecar-keyed to shard hash +
+  group size; a restart never re-dequantizes), fetch_stage prefers it,
+  mirror_urls byte sources (mirrors -> peers -> coordinator), per-session KV
+  cache params on every StageModel entry point, post_bytes helper.
+- `jobs.py`: per-key stage-build locks, warm-stage LRU within
+  `warm_budget_gb`/`warm_models`, replica sessions run lock-free with
+  per-session DynamicCache (concurrent chats interleave in the executor),
+  pipeline paths keep node_lock semantics, direct activation relay with
+  automatic coordinator fallback (send + StageRetry replay).
+- `peer_server.py`: POST /peer/activation receiver (join-token auth, size
+  cap) feeding handler.on_direct_activation.
+
+Tests: `Coordinator/tests/test_serving.py` (replica plan, readiness gate,
+session cap, overcommit flag, assignments + revocation diff, demand scaling,
+persistence/replay) and `Node/tests/test_serving.py` (provisioner flows incl.
+error + revocation, warm budget, concurrent replica sessions on a shared
+stage, direct-relay round trip + auth rejection). Chaos reject scenario keeps
+its clean fast 429/503 (fail-fast on an empty pool). All four pytest suites
+plus ruff green; client build green.

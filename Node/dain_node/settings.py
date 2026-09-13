@@ -42,6 +42,20 @@ class NodeSettings:
     # Staging dir for model exports (plan §3). Used only by the exporter
     # subprocess, not the agent runtime; must stay under the node's writable area.
     export_work_dir: str = "export_work"
+    # S22 instant-serving: warm-tier policy. `warm_budget_gb` caps resident
+    # stage memory (the node clamps it against actual RAM at startup);
+    # `warm_mode` picks how far provisioning goes: "resident" keeps built
+    # stages in RAM, "mmap" builds against file-backed weights (evictable,
+    # slower when RAM-starved), "files" only verifies + caches shard bytes.
+    warm_budget_gb: float = 3.0
+    warm_models: int = 2
+    warm_mode: str = "resident"
+    # Concurrent replica sessions this node accepts (round-robin interleaved;
+    # per-session KV caches). Coordinator also routes by this.
+    max_sessions: int = 4
+    # Direct node-to-node activation relay via the peer server (S22e); the
+    # coordinator relay stays as automatic fallback.
+    direct_relay: bool = True
 
     @property
     def http_base_url(self) -> str:
@@ -70,6 +84,11 @@ class NodeSettings:
             net_lat_ms_p95=float(env.get("DAIN_NET_LAT_MS", "50")),
             log_json=env.get("DAIN_LOG_JSON", "").lower() in ("1", "true", "yes"),
             export_work_dir=env.get("DAIN_EXPORT_WORK_DIR", "export_work"),
+            warm_budget_gb=float(env.get("DAIN_WARM_BUDGET_GB", "3")),
+            warm_models=int(env.get("DAIN_WARM_MODELS", "2")),
+            warm_mode=env.get("DAIN_WARM_MODE", "resident").lower(),
+            max_sessions=int(env.get("DAIN_MAX_SESSIONS", "4")),
+            direct_relay=env.get("DAIN_DIRECT_RELAY", "").lower() not in ("0", "false", "no"),
         )
 
     @classmethod
@@ -104,4 +123,9 @@ class NodeSettings:
             reconnect_max_s=float(config.get("reconnect_max_s", 8.0)),
             log_json=bool(config.get("log_json", False)),
             export_work_dir=config.get("export_work_dir") or "export_work",
+            warm_budget_gb=float(config.get("warm_budget_gb", 3.0)),
+            warm_models=int(config.get("warm_models", 2)),
+            warm_mode=str(config.get("warm_mode", "resident")).lower(),
+            max_sessions=int(config.get("max_sessions", 4)),
+            direct_relay=bool(config.get("direct_relay", True)),
         )

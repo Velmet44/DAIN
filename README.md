@@ -149,6 +149,35 @@ CUDA (device selection falls back to CPU for un-quantized models). Exports are
 guarded by `max_export_size_gb` (rejected with HTTP 413 when the source is too
 large) and `export_timeout_s` (the subprocess is terminated when it overruns).
 
+## Serving architecture (S22)
+
+DAIN provisions a **model portfolio** on every node ahead of requests. The
+coordinator's controller assigns each connected node the models it should hold
+(`replicas_per_model`, bumped adaptively with demand); the node downloads and
+verifies shards in the background, materializes a local dequantized-fp16 cache
+for storage-INT4 models, builds a **warm in-RAM stage** when it fits the node's
+warm budget, and runs a tiny **warm probe** whose measured tok/s + RSS are
+reported back. A node is only scheduled for a model once it reports
+`files_ready`/`warm` — and a node restart never re-downloads or re-dequantizes
+what it already verified.
+
+Requests are **replica-first**: a prompt goes to one node holding the whole
+model whenever an unsaturated one exists (fewest nodes); classic pipeline
+placement remains the fallback for models too big for any single node. One warm
+node serves multiple concurrent chats (per-session KV caches, round-robin
+execution); when every replica is saturated a request queues with honest
+status frames (`queued` / `provisioning` progress) instead of failing.
+Chat is stateless: the client sends the transcript, so any replica can serve
+any turn and nodes can come and go freely.
+
+Node knobs: `DAIN_WARM_BUDGET_GB` (resident stage memory cap, default 3),
+`DAIN_WARM_MODELS` (max warm stages, default 2), `DAIN_WARM_MODE`
+(`resident` | `mmap` | `files`), `DAIN_MAX_SESSIONS` (default 4),
+`DAIN_DIRECT_RELAY` (node-to-node activation transfer, on by default with
+automatic coordinator-relay fallback). Coordinator knobs: `DAIN_ASSIGNMENT_TICK_S`,
+`DAIN_REPLICAS_PER_MODEL`, `DAIN_MAX_REPLICAS`, `DAIN_MAX_SESSIONS`,
+`DAIN_QUEUE_WAIT_S`, `DAIN_DEMAND_SCALE_THRESHOLD`.
+
 ## Repository layout
 
 The **root holds no buildable code** — only shared docs, config, and the project

@@ -23,7 +23,7 @@ import httpx
 import torch
 from dain_common.model_store import is_safe_model_id
 from dain_common.schemas import ModelManifest, ShardRef
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from transformers.cache_utils import DynamicCache
 from transformers.models.llama.configuration_llama import LlamaConfig
 from transformers.models.llama.modeling_llama import (
@@ -39,6 +39,10 @@ from dain_node.storage_int4 import (
     dequantize_state_dict,
     has_packed_tensors,
 )
+
+#: Bump when the derived-fp16 layout changes so stale caches invalidate.
+_DERIVED_VERSION = "1"
+_DERIVED_DIRNAME = "derived"
 
 log = logging.getLogger("dain.node.llm")
 
@@ -279,6 +283,20 @@ class ModelStoreClient:
             )
         return self._client
 
+    async def post_bytes(
+        self, url: str, *, headers: dict[str, str], content: bytes, timeout_s: float = 10.0
+    ) -> int:
+        """One-shot POST over the shared connection pool; returns the status
+        code (0 on transport failure). Used for direct node-to-node relay."""
+        client = await self._http()
+        try:
+            response = await client.post(
+                url, headers=headers, content=content, timeout=timeout_s
+            )
+            return response.status_code
+        except Exception:  # noqa: BLE001 — direct relay is best-effort by design
+            return 0
+
     async def close(self) -> None:
         if self._client is not None and self._client.is_closed:
             return
@@ -456,6 +474,7 @@ class ModelStoreClient:
         shard_id: str,
         content_hash: str,
         format: str | None = None,
+        mirror_urls: tuple[str, ...] = (),
     ) -> str:
         """Download + verify one shard; returns the cached file path.
 
@@ -491,7 +510,9 @@ class ModelStoreClient:
             chunk_dir = path + _CHUNKS_DIR
             tmp = f"{path}.{secrets.token_hex(4)}.tmp"
             try:
-                await self._download_shard(tmp, chunk_dir, model_id, shard_id, content_hash)
+                await self._download_shard(
+                    tmp, chunk_dir, model_id, shard_id, content_hash, mirror_urls
+                )
                 if not await self._verify(tmp, content_hash):
                     raise RuntimeError(f"shard {shard_id} failed hash verification")
                 os.replace(tmp, path)
@@ -521,7 +542,13 @@ class ModelStoreClient:
         return path
 
     async def _download_shard(
-        self, dst: str, chunk_dir: str, model_id: str, shard_id: str, content_hash: str
+        self,
+        dst: str,
+        chunk_dir: str,
+        model_id: str,
+        shard_id: str,
+        content_hash: str,
+        mirror_urls: tuple[str, ...] = (),
     ) -> None:
         """Fill `dst` with the complete, verified shard bytes.
 
@@ -536,9 +563,10 @@ class ModelStoreClient:
         peers = await self._query_peers(model_id, shard_id)
         chunk_size = _read_chunk_size()
         parallel = _read_parallel_chunks() if total is not None and total > (8 << 20) else 1
-        sources: list[tuple[str, bool]] = [(p, False) for p in peers] + [
-            (self.base_url, True)
-        ]
+        # S22e: content-addressed mirrors are the cheapest WAN source; the
+        # sha256 check makes every source equally trustworthy.
+        sources: list[tuple[str, bool]] = [(m, False) for m in mirror_urls]
+        sources += [(p, False) for p in peers] + [(self.base_url, True)]
 
         if total is None:
             # No size probe (coordinator too old / error): plain linear GET.
@@ -798,6 +826,74 @@ class ModelStoreClient:
         )
         return path
 
+    def derived_dir(self, model_id: str) -> str:
+        return os.path.join(self.cache_dir, model_id, _DERIVED_DIRNAME)
+
+    async def ensure_derived_fp16(
+        self, manifest: ModelManifest, shard_ids: set[str] | None = None
+    ) -> dict[str, str] | None:
+        """Materialize (once) dequantized fp16 copies of packed storage-INT4
+        shards; returns shard_id -> path, or None when not applicable.
+
+        Keyed to (shard content hash, group size, code version) via a sidecar:
+        re-exports and packer upgrades invalidate it; node restarts never
+        re-dequantize. Runs the dequant+write off the event loop.
+        """
+        quant = getattr(manifest, "quantization", None)
+        if quant is None or getattr(quant, "backend", "none") != STORAGE_INT4_BACKEND:
+            return None
+        group_size = int(getattr(quant, "group_size", 128))
+        loop = asyncio.get_running_loop()
+        out: dict[str, str] = {}
+        for shard in manifest.shards:
+            if shard_ids is not None and shard.shard_id not in shard_ids:
+                continue
+            if shard.format != "safetensors":
+                continue
+            src = os.path.join(
+                self.cache_dir, manifest.model_id, f"{shard.shard_id}.safetensors"
+            )
+            if not os.path.exists(src):
+                return None  # packed source missing: cold fallback handles it
+            key = hashlib.sha256(
+                f"{shard.content_hash}:{group_size}:{_DERIVED_VERSION}".encode("ascii")
+            ).hexdigest()
+            dst = os.path.join(
+                self.derived_dir(manifest.model_id), f"{shard.shard_id}.safetensors"
+            )
+            if self._cached_hash_ok(dst, key):
+                out[shard.shard_id] = dst
+                continue
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+
+            def _build(
+                src_path: str = src,
+                dst_path: str = dst,
+                gsize: int = group_size,
+                key: str = key,
+            ) -> None:
+                raw = load_file(src_path)
+                if has_packed_tensors(raw):
+                    fp16 = dequantize_state_dict(raw, group_size=gsize)
+                else:
+                    fp16 = {k: v.to(torch.float16).contiguous() for k, v in raw.items()}
+                tmp = f"{dst_path}.{secrets.token_hex(4)}.tmp"
+                save_file({k: v.contiguous() for k, v in fp16.items()}, tmp)
+                os.replace(tmp, dst_path)
+                self._write_hash_sidecar(dst_path, key)
+
+            try:
+                await loop.run_in_executor(None, _build)
+            except OSError:
+                log.warning(
+                    "derived_cache_write_failed model=%s shard=%s",
+                    manifest.model_id,
+                    shard.shard_id,
+                )
+                return None
+            out[shard.shard_id] = dst
+        return out or None
+
     @staticmethod
     def _hash_file(path: str) -> str:
         hasher = hashlib.sha256()
@@ -995,13 +1091,20 @@ class StageModel:
     def end_job(self) -> None:
         self.cache = None
 
-    def _past_len(self) -> int:
-        return self.cache.get_seq_length() if self.cache is not None else 0
+    def _past_len(self, cache: DynamicCache | None = None) -> int:
+        cache = cache if cache is not None else self.cache
+        return cache.get_seq_length() if cache is not None else 0
 
     # -- forward paths -------------------------------------------------------------
+    #
+    # S22d: `cache` is explicit on every entry point. Concurrent replica
+    # sessions each pass their own DynamicCache (the weights are read-only);
+    # `None` falls back to `self.cache` for the legacy begin_job()/end_job()
+    # pipeline path, which stays exclusive under JobHandler.node_lock.
 
-    def _run_layers(self, hidden: torch.Tensor) -> torch.Tensor:
-        past = self._past_len()
+    def _run_layers(self, hidden: torch.Tensor, cache: DynamicCache | None = None) -> torch.Tensor:
+        cache = cache if cache is not None else self.cache
+        past = self._past_len(cache)
         batch, seq, _ = hidden.shape
         cache_position = torch.arange(past, past + seq, device=hidden.device)
         position_ids = cache_position.unsqueeze(0)
@@ -1012,25 +1115,27 @@ class StageModel:
                 hidden,
                 attention_mask=mask,
                 position_ids=position_ids,
-                past_key_value=self.cache,
-                use_cache=self.cache is not None,
+                past_key_value=cache,
+                use_cache=cache is not None,
                 cache_position=cache_position,
                 position_embeddings=position_embeddings,
             )[0]
         return hidden
 
     @torch.inference_mode()
-    def forward_ids(self, input_ids: list[int]) -> torch.Tensor:
+    def forward_ids(self, input_ids: list[int], cache: DynamicCache | None = None) -> torch.Tensor:
         """Entry stage: embed token ids → run layers → hidden [1, T, H]."""
         if not self.first:
             raise RuntimeError("forward_ids requires the first stage")
         hidden = self.embed(torch.tensor([input_ids], device=self.device, dtype=torch.long))
-        return self._run_layers(hidden)
+        return self._run_layers(hidden, cache)
 
     @torch.inference_mode()
-    def forward_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
+    def forward_hidden(
+        self, hidden: torch.Tensor, cache: DynamicCache | None = None
+    ) -> torch.Tensor:
         """Middle/last stage: run layers on inbound activations."""
-        return self._run_layers(hidden)
+        return self._run_layers(hidden, cache)
 
     @torch.inference_mode()
     def logits_from(self, hidden: torch.Tensor) -> torch.Tensor:
@@ -1040,23 +1145,27 @@ class StageModel:
         return self.lm_head(self.norm(hidden))
 
     @torch.inference_mode()
-    def next_token_logits(self, token_id: int) -> torch.Tensor:
+    def next_token_logits(
+        self, token_id: int, cache: DynamicCache | None = None
+    ) -> torch.Tensor:
         """Entry stage decode step: embed one token → logits for that position."""
         hidden = self.embed(torch.tensor([[token_id]], device=self.device, dtype=torch.long))
-        hidden = self._run_layers(hidden)
+        hidden = self._run_layers(hidden, cache)
         return self.lm_head(self.norm(hidden))[:, -1, :]
 
     @torch.inference_mode()
-    def embed_one(self, token_id: int) -> torch.Tensor:
+    def embed_one(self, token_id: int, cache: DynamicCache | None = None) -> torch.Tensor:
         """Distributed entry decode step: embed one token → hidden after layers."""
         hidden = self.embed(torch.tensor([[token_id]], device=self.device, dtype=torch.long))
-        return self._run_layers(hidden)
+        return self._run_layers(hidden, cache)
 
     @torch.inference_mode()
-    def next_token_logits_full(self, input_ids: list[int]) -> torch.Tensor:
+    def next_token_logits_full(
+        self, input_ids: list[int], cache: DynamicCache | None = None
+    ) -> torch.Tensor:
         """Full-model step (single-stage): embed → layers → logits of last position."""
         hidden = self.embed(torch.tensor([input_ids], device=self.device, dtype=torch.long))
-        hidden = self._run_layers(hidden)
+        hidden = self._run_layers(hidden, cache)
         return self.lm_head(self.norm(hidden))[:, -1, :]
 
 
@@ -1099,14 +1208,29 @@ async def fetch_stage(
         log.info("fetch_stage sequential model=%s shards=%d", manifest.model_id, len(needed))
         paths = []
         for shard_id, content_hash, fmt in needed:
-            paths.append(await store.ensure_shard(manifest.model_id, shard_id, content_hash, fmt))
+            paths.append(
+                await store.ensure_shard(
+                    manifest.model_id,
+                    shard_id,
+                    content_hash,
+                    fmt,
+                    mirror_urls=getattr(manifest, "mirror_urls", ()) or (),
+                )
+            )
     else:
         # Parallel downloads: each stage pulls several ~0.5–1 GB shards over LAN,
         # so serializing them would lock the stage behind ~N× the link time.
+        mirrors = getattr(manifest, "mirror_urls", ()) or ()
         paths = (
             await asyncio.gather(
                 *(
-                    store.ensure_shard(manifest.model_id, shard_id, content_hash, fmt)
+                    store.ensure_shard(
+                        manifest.model_id,
+                        shard_id,
+                        content_hash,
+                        fmt,
+                        mirror_urls=mirrors,
+                    )
                     for shard_id, content_hash, fmt in needed
                 )
             )
@@ -1118,9 +1242,24 @@ async def fetch_stage(
     # bound: run it off the event loop so heartbeats/streams never stall while
     # a stage is being fetched (same class of fix as inference runs).
     loop = asyncio.get_running_loop()
-    states = await asyncio.gather(
-        *(loop.run_in_executor(None, backend.deserialize_shard, path) for path in paths)
-    )
+
+    # S22a: a provisioned derived-fp16 cache turns per-job dequant into a plain
+    # safetensors load (and is what the warm tiers build from). Lazy on miss.
+    derived: dict[str, str] | None = None
+    if isinstance(backend, StorageInt4Backend):
+        derived = await store.ensure_derived_fp16(manifest)
+    if derived is not None and len(derived) == len(needed):
+        states = await asyncio.gather(
+            *(
+                loop.run_in_executor(None, load_file, derived[sid])
+                for sid, _, _ in needed
+            )
+        )
+        backend = TorchFp16Backend()
+    else:
+        states = await asyncio.gather(
+            *(loop.run_in_executor(None, backend.deserialize_shard, path) for path in paths)
+        )
     state: dict[str, torch.Tensor] = {}
     for tensors in states:
         state.update(tensors)

@@ -164,6 +164,7 @@ async def run_chaos(
         api_key=API_KEY,
         admin_api_key=ADMIN_KEY,
         job_timeout_s=90.0,
+        queue_wait_s=3.0,
         min_nodes=min_nodes,
         layers_per_node_target=layers_per_node_target,
         max_stage_attempts=3,

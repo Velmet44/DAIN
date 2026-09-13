@@ -77,6 +77,15 @@ CREATE TABLE IF NOT EXISTS ledger (
 );
 CREATE INDEX IF NOT EXISTS idx_ledger_node ON ledger (node_id, ts);
 CREATE INDEX IF NOT EXISTS idx_ledger_job ON ledger (job_id);
+CREATE TABLE IF NOT EXISTS assignments (
+    node_id     TEXT NOT NULL,
+    model_id    TEXT NOT NULL,
+    mode        TEXT NOT NULL,
+    layer_start INTEGER,
+    layer_end   INTEGER,
+    updated_at  REAL NOT NULL,
+    PRIMARY KEY (node_id, model_id)
+);
 """
 
 
@@ -226,6 +235,38 @@ class SQLiteRegistry:
                 ),
             )
             self._require().commit()
+
+    # -- model portfolio assignments (S22a) --------------------------------------
+
+    def replace_assignments(
+        self, assignments: list[tuple[str, str, str, int | None, int | None]]
+    ) -> None:
+        """Persist the full desired portfolio: (node_id, model_id, mode, layer_start, layer_end)."""
+        now = time.time()
+        with self._lock:
+            self._require().execute("DELETE FROM assignments")
+            self._require().executemany(
+                "INSERT OR REPLACE INTO assignments "
+                "(node_id, model_id, mode, layer_start, layer_end, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    (node_id, model_id, mode, layer_start, layer_end, now)
+                    for node_id, model_id, mode, layer_start, layer_end in assignments
+                ],
+            )
+            self._require().commit()
+
+    def load_assignments(self) -> dict[str, list[tuple[str, str, int | None, int | None]]]:
+        """node_id -> [(model_id, mode, layer_start, layer_end)] from the last persisted plan."""
+        with self._lock:
+            cur = self._require().execute(
+                "SELECT node_id, model_id, mode, layer_start, layer_end FROM assignments"
+            )
+            rows = cur.fetchall()
+        out: dict[str, list[tuple[str, str, int | None, int | None]]] = {}
+        for node_id, model_id, mode, layer_start, layer_end in rows:
+            out.setdefault(node_id, []).append((model_id, mode, layer_start, layer_end))
+        return out
 
     # -- state history ------------------------------------------------------------
 

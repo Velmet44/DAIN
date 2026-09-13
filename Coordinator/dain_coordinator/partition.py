@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
 from dain_common.schemas import ModelManifest, NodeState, StageAssignment
@@ -62,6 +63,19 @@ def _is_backend_feasible(manifest: ModelManifest, row: NodeRow) -> bool:
     return True
 
 
+def runtime_size_gb(manifest: ModelManifest) -> float:
+    """Memory the whole model occupies once materialized on a node.
+
+    Packed storage-INT4 shards expand ~4x to fp16 at load time; fp16/fp32
+    shards load as-is.
+    """
+    packed_gb = sum(s.size_bytes for s in manifest.shards) / 1e9
+    quant = getattr(manifest, "quantization", None)
+    if quant is not None and getattr(quant, "backend", "none") == "storage_int4":
+        return packed_gb * 4.0
+    return packed_gb
+
+
 def throughput_proxy(row: NodeRow) -> float:
     if row.manifest.gpu is not None:
         return max(row.manifest.gpu.tflops_claimed, 0.001)
@@ -84,6 +98,9 @@ class PlacementPlan:
     # not cover its stage share (the OS pages the excess to disk — slower,
     # but the job runs instead of being refused with 429).
     overcommitted: bool = False
+    # S22: "replica" = one node hosts the whole model (k=1, no relay);
+    # "pipeline" = the classic multi-stage placement.
+    serving_mode: str = "pipeline"
 
 
 @dataclass(frozen=True)
@@ -202,6 +219,7 @@ def plan_placement(
     backup_count: int = 2,
     min_nodes: int = 1,
     allow_overcommit: bool = False,
+    prefer_ready: Callable[[str], bool] | None = None,
 ) -> PlacementPlan | None:
     """Spec §12: feasible → score-ranked top-K → sized placement → warm backups.
 
@@ -231,14 +249,21 @@ def plan_placement(
         if n.state == NodeState.ONLINE and _is_backend_feasible(manifest, n)
     ]
     # Spec §12: ranked = sort_by_score_desc(feasible); deterministic tie-breaks.
-    ranked = sorted(
-        feasible,
-        key=lambda n: (
+    # S22: when a readiness preference is supplied, provisioned (files_ready /
+    # warm) nodes rank ahead of unprovisioned ones so pipeline fallbacks reuse
+    # nodes that already hold the bytes.
+    def _rank_key(n: NodeRow):
+        ready_rank = 0
+        if prefer_ready is not None:
+            ready_rank = 0 if prefer_ready(n.node_id) else 1
+        return (
+            ready_rank,
             -(n.score if n.score is not None else -1.0),
             -throughput_proxy(n),
             n.node_id,
-        ),
-    )
+        )
+
+    ranked = sorted(feasible, key=_rank_key)
     if len(ranked) < min_nodes:
         return None
     if not ranked:
@@ -287,4 +312,99 @@ def plan_placement(
     backups = tuple(row.node_id for row in rest[:backup_count])
     return PlacementPlan(
         stages=tuple(stages), backups=backups, degraded=degraded, overcommitted=overcommitted
+    )
+
+
+def _rank_replicas(rows: list[NodeRow], readiness, model_id: str) -> list[NodeRow]:
+    """Warm nodes first, then measured throughput, then score, then id.
+
+    `readiness` is duck-typed (`.get(node, model)` -> status with `.toks_s`,
+    `.warm(node, model)` -> bool) — the coordinator's ReadinessMap.
+    """
+
+    def key(row: NodeRow):
+        status = readiness.get(row.node_id, model_id)
+        toks = status.toks_s if status is not None and status.toks_s else 0.0
+        return (
+            0 if readiness.warm(row.node_id, model_id) else 1,
+            -toks,
+            -(row.score if row.score is not None else 0.0),
+            row.node_id,
+        )
+
+    return sorted(rows, key=key)
+
+
+def plan_serving(
+    manifest: ModelManifest,
+    nodes: list[NodeRow],
+    *,
+    readiness,
+    active_sessions: dict[str, int],
+    layers_per_node_target: int = 4,
+    min_k: int = 1,
+    max_k: int = 16,
+    backup_count: int = 2,
+    min_nodes: int = 1,
+    max_sessions_per_node: int = 4,
+    allow_overcommit: bool = False,
+) -> PlacementPlan | None:
+    """S22 replica-first serving placement.
+
+    1. Replica attempt: one node that (a) is schedulable for this model per
+       `readiness` (files_ready/warm), (b) has a free session slot, (c) fits
+       the runtime footprint. Ranked warm-first, then measured tok/s, then
+       score. Backups = the next ranked ready nodes (failover targets).
+    2. Pipeline fallback: classic `plan_placement`, with provisioned nodes
+       ranked ahead so bytes are reused. Runs for models no single node can
+       host, or when every replica candidate is saturated.
+
+    Returns None when neither tier can place the model (caller queues/fails).
+    """
+    if not nodes:
+        return None
+    model_id = manifest.model_id
+    runtime_gb = runtime_size_gb(manifest)
+
+    replica_rows = [
+        n
+        for n in nodes
+        if n.state == NodeState.ONLINE
+        and _is_backend_feasible(manifest, n)
+        and readiness.schedulable(n.node_id, model_id)
+        and active_sessions.get(n.node_id, 0) < max_sessions_per_node
+    ]
+    fitting = [n for n in replica_rows if capacity_gb(n) >= runtime_gb]
+    overcommit_pool = [n for n in replica_rows if allow_overcommit]
+    pool = fitting or overcommit_pool
+    if pool:
+        ordered = _rank_replicas(pool, readiness, model_id)
+        primary = ordered[0]
+        stage = StageAssignment(
+            stage_idx=0,
+            node_id=primary.node_id,
+            shard_id=f"layers_00_{manifest.layers - 1:02d}",
+            layer_start=0,
+            layer_end=manifest.layers - 1,
+        )
+        backups = tuple(n.node_id for n in ordered[1 : backup_count + 1])
+        return PlacementPlan(
+            stages=(stage,),
+            backups=backups,
+            degraded=False,
+            overcommitted=not bool(fitting),
+            serving_mode="replica",
+        )
+
+    # Pipeline fallback (models too big for any one node, or all replicas busy).
+    return plan_placement(
+        manifest,
+        nodes,
+        layers_per_node_target=layers_per_node_target,
+        min_k=min_k,
+        max_k=max_k,
+        backup_count=backup_count,
+        min_nodes=min_nodes,
+        allow_overcommit=allow_overcommit,
+        prefer_ready=lambda node_id: readiness.schedulable(node_id, model_id),
     )

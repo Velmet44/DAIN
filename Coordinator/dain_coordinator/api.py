@@ -24,6 +24,7 @@ import random
 import secrets
 import shutil
 import time
+from collections import Counter
 from dataclasses import replace as dataclass_replace
 from typing import Literal
 from urllib.parse import urlparse
@@ -37,6 +38,7 @@ from dain_common.schemas import (
     JobStatus,
     MessageType,
     ModelManifest,
+    ModelStatus,
     NodeState,
     Register,
     RegisterAck,
@@ -59,7 +61,7 @@ from dain_coordinator.config import find_base_dir, persist_config
 from dain_coordinator.jobs import ActivationRelay, JobTracker
 from dain_coordinator.logs import snapshot as log_snapshot
 from dain_coordinator.nodes import MessageOutcome, NodeService
-from dain_coordinator.partition import event_view, plan_placement
+from dain_coordinator.partition import event_view, plan_serving
 from dain_coordinator.ratelimit import RateLimiter
 from dain_coordinator.settings import (
     COORDINATOR_ENV,
@@ -255,6 +257,11 @@ async def node_ws(websocket: WebSocket) -> None:
     await websocket.accept()
     connections.register(node_id, websocket)
     log.info("ws_connected node=%s", node_id)
+    # S22a: replay the node's desired model portfolio immediately so a freshly
+    # connected node starts provisioning without waiting for the next tick.
+    assignment_service = getattr(websocket.app.state, "assignments", None)
+    if assignment_service is not None:
+        await assignment_service.send_portfolio(node_id, websocket)
     pending_activation: ActivationRelayHeader | None = None
     try:
         while True:
@@ -284,7 +291,14 @@ async def node_ws(websocket: WebSocket) -> None:
                     envelope = Envelope.model_validate_json(raw)
                 except Exception:
                     continue
-                if envelope.type == MessageType.ACTIVATION_RELAY:
+                if envelope.type == MessageType.MODEL_STATUS:
+                    try:
+                        status = ModelStatus.model_validate(envelope.payload)
+                    except Exception:
+                        log.warning("bad_model_status node=%s", node_id)
+                    else:
+                        websocket.app.state.readiness.update(status)
+                elif envelope.type == MessageType.ACTIVATION_RELAY:
                     pending_activation = ActivationRelayHeader.model_validate(envelope.payload)
                 elif envelope.type == MessageType.TOKEN_BATCH:
                     jobs.on_token_batch(TokenBatch.model_validate(envelope.payload))
@@ -1278,84 +1292,163 @@ async def completions(payload: CompletionRequest, request: Request):
         if j.api_key == api_key and j.state not in (JobState.COMPLETED, JobState.FAILED)
     )
     service = _service(request)
-    rows = [
-        r
-        for r in service.registry.list_nodes(NodeState.ONLINE)
-        if request.app.state.connections.is_connected(r.node_id)
-    ]
-    plan = plan_placement(
-        manifest,
-        rows,
-        layers_per_node_target=settings.layers_per_node_target,
-        min_k=settings.min_stages,
-        max_k=settings.max_stages,
-        backup_count=settings.backup_count,
-        min_nodes=settings.min_nodes,
-        allow_overcommit=settings.allow_memory_overcommit,
-    )
-    if plan is None:
-        raise HTTPException(
-            status_code=429,
-            detail="no connected node pool can host this model; retry later",
-            headers={"Retry-After": "5"},
+    readiness = request.app.state.readiness
+    demand = request.app.state.demand
+    demand.record(payload.model_id)
+
+    def _active_sessions() -> dict[str, int]:
+        counts: Counter[str] = Counter()
+        for j in jobs.active_jobs():
+            if j.node_id:
+                counts[j.node_id] += 1
+        return dict(counts)
+
+    def _rows() -> list:
+        return [
+            r
+            for r in service.registry.list_nodes(NodeState.ONLINE)
+            if connections.is_connected(r.node_id)
+        ]
+
+    def try_plan():
+        return plan_serving(
+            manifest,
+            _rows(),
+            readiness=readiness,
+            active_sessions=_active_sessions(),
+            layers_per_node_target=settings.layers_per_node_target,
+            min_k=settings.min_stages,
+            max_k=settings.max_stages,
+            backup_count=settings.backup_count,
+            min_nodes=settings.min_nodes,
+            max_sessions_per_node=settings.max_sessions_per_node,
+            allow_overcommit=settings.allow_memory_overcommit,
         )
+
     if active >= settings.queue_limit or per_key >= settings.max_concurrent_per_key:
         raise HTTPException(
             status_code=429,
             detail="server busy: queue limit reached; retry later",
             headers={"Retry-After": "5"},
         )
-    stages = plan.stages
-    # Exclusive execution per stage node (MVP has no intra-node batching): a node
-    # marked BUSY is excluded from new placements until the job finishes.
-    busy_nodes = [s.node_id for s in stages]
-    for node_id in busy_nodes:
-        service.mark_busy(node_id)
 
-    record = jobs.create(
-        payload.model_id,
-        payload.prompt,
-        {
-            "max_tokens": payload.max_tokens,
-            "temperature": payload.temperature,
-            "seed": payload.seed,
-        },
-        manifest,
-        api_key=api_key,
-        backups=plan.backups,
-    )
-    params = GenerationParams(
-        max_tokens=payload.max_tokens,
-        temperature=payload.temperature,
-        top_p=1.0,
-        seed=payload.seed,
-    )
-    queue = jobs.attach(record.job_id)
-    dispatched = True
-    for stage in stages:
-        assign = JobAssign(
-            job_id=record.job_id,
-            model_id=payload.model_id,
-            my_stage_idx=stage.stage_idx,
-            stages=stages,
-            prompt=payload.prompt if stage.stage_idx == 0 else None,
-            params=params,
+    plan = try_plan()
+    if plan is None and not _rows():
+        # Nothing is connected: waiting cannot help, fail fast (old §12/§13
+        # reject semantics; the queued path below only applies to a live pool).
+        raise HTTPException(
+            status_code=503,
+            detail="no connected node pool can host this model; retry later",
+            headers={"Retry-After": "5"},
         )
-        sent = await connections.send_envelope(
-            stage.node_id, Envelope.wrap(MessageType.JOB_ASSIGN, assign, ts=time.time())
+
+    class _DispatchError(Exception):
+        pass
+
+    async def _dispatch(found_plan):
+        """Create the job record and dispatch JOB_ASSIGN to every stage.
+
+        Returns (record, queue, busy_nodes); raises _DispatchError on send
+        failure (busy nodes released, job failed)."""
+        stages = found_plan.stages
+        busy_nodes: list[str] = []
+        if found_plan.serving_mode == "pipeline":
+            # Exclusive execution for pipeline stages (multi-node chaining);
+            # replica jobs share their node with other sessions (S22d).
+            busy_nodes = [s.node_id for s in stages]
+            for node_id in busy_nodes:
+                service.mark_busy(node_id)
+
+        record = jobs.create(
+            payload.model_id,
+            payload.prompt,
+            {
+                "max_tokens": payload.max_tokens,
+                "temperature": payload.temperature,
+                "seed": payload.seed,
+            },
+            manifest,
+            api_key=api_key,
+            backups=found_plan.backups,
+            serving_mode=found_plan.serving_mode,
         )
-        if not sent:
-            dispatched = False
-            break
-    if not dispatched:
-        for node_id in busy_nodes:
-            service.release_node(node_id)
-        jobs.fail_job(record.job_id, "stage node connection lost before dispatch")
-        raise HTTPException(status_code=503, detail="stage node connection lost")
-    jobs.mark_dispatched(record.job_id, stages[0].node_id, stages)
+        params = GenerationParams(
+            max_tokens=payload.max_tokens,
+            temperature=payload.temperature,
+            top_p=1.0,
+            seed=payload.seed,
+        )
+        queue = jobs.attach(record.job_id)
+        # Fill each stage's peer URL so nodes can relay activations directly
+        # (S22e); the coordinator relay remains the fallback.
+        peer_urls = {r.node_id: r.peer_url for r in service.registry.list_nodes()}
+        routed = tuple(
+            s.model_copy(update={"peer_url": peer_urls.get(s.node_id)}) for s in stages
+        )
+        for stage in routed:
+            assign = JobAssign(
+                job_id=record.job_id,
+                model_id=payload.model_id,
+                my_stage_idx=stage.stage_idx,
+                stages=routed,
+                prompt=payload.prompt if stage.stage_idx == 0 else None,
+                params=params,
+            )
+            sent = await connections.send_envelope(
+                stage.node_id, Envelope.wrap(MessageType.JOB_ASSIGN, assign, ts=time.time())
+            )
+            if not sent:
+                for node_id in busy_nodes:
+                    service.release_node(node_id)
+                jobs.fail_job(record.job_id, "stage node connection lost before dispatch")
+                raise _DispatchError("stage node connection lost")
+        jobs.mark_dispatched(record.job_id, stages[0].node_id, routed)
+        return record, queue, busy_nodes
+
+
+    record = None
+    queue = None
+    busy_nodes: list[str] = []
 
     async def event_stream():
+        nonlocal plan, record, queue, busy_nodes
         try:
+            loop = asyncio.get_running_loop()
+            if plan is None:
+                # S22c: hold the request open with honest status frames while
+                # nodes provision / free up, instead of failing immediately.
+                wait_until = loop.time() + settings.queue_wait_s
+                while plan is None and loop.time() < wait_until:
+                    if not _rows():
+                        break  # nobody connected: nothing can become ready
+                    yield _sse({"type": "status", "stage": "queued"})
+                    await asyncio.sleep(1.0)
+                    plan = try_plan()
+                    if plan is None:
+                        downloading = readiness.any_downloading(payload.model_id)
+                        if downloading is not None and downloading.progress is not None:
+                            yield _sse(
+                                {
+                                    "type": "status",
+                                    "stage": "provisioning",
+                                    "progress": round(downloading.progress, 3),
+                                }
+                            )
+                if plan is None:
+                    yield _sse(
+                        {
+                            "type": "error",
+                            "detail": "no node could serve this model in time",
+                        }
+                    )
+                    yield "data: [DONE]\n\n"
+                    return
+            try:
+                record, queue, busy_nodes = await _dispatch(plan)
+            except _DispatchError as exc:
+                yield _sse({"type": "error", "detail": str(exc)})
+                yield "data: [DONE]\n\n"
+                return
             yield _sse({"job_id": record.job_id, "status": "dispatched"})
             deadline = asyncio.get_running_loop().time() + settings.job_timeout_s
             while True:
@@ -1389,7 +1482,25 @@ async def completions(payload: CompletionRequest, request: Request):
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    # Non-streaming: drain to the final frame.
+    # Non-streaming: wait for placement (no frames), dispatch, drain to final.
+    if plan is None:
+        wait_until = asyncio.get_running_loop().time() + settings.queue_wait_s
+        while plan is None and asyncio.get_running_loop().time() < wait_until:
+            if not _rows():
+                break  # nobody connected: nothing can become ready
+            await asyncio.sleep(0.5)
+            plan = try_plan()
+        if plan is None:
+            raise HTTPException(
+                status_code=503,
+                detail="no node could serve this model in time",
+                headers={"Retry-After": "5"},
+            )
+    try:
+        record, queue, busy_nodes = await _dispatch(plan)
+    except _DispatchError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
     text_parts: list[str] = []
     final: dict = {}
     deadline = asyncio.get_running_loop().time() + settings.job_timeout_s

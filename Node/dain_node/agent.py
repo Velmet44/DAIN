@@ -30,6 +30,7 @@ from dain_common.schemas import (
     JobAssign,
     MessageType,
     MetricsReport,
+    ModelAssignment,
     Register,
     RegisterAck,
     ShardRef,
@@ -42,6 +43,7 @@ from dain_node import __version__
 from dain_node.capabilities import probe
 from dain_node.identity import IdentityState
 from dain_node.jobs import JobHandler
+from dain_node.provisioner import Provisioner
 from dain_node.settings import NodeSettings
 
 log = logging.getLogger("dain.node.agent")
@@ -89,6 +91,10 @@ class NodeAgent:
         self.identity: IdentityState = IdentityState.load(
             settings.state_path
         ) or IdentityState.create(settings.state_path, settings.node_id)
+        # S22a: background portfolio provisioning (download/derive/warm/probe).
+        self.provisioner = Provisioner(
+            settings, handler.store, handler, node_id_fn=lambda: self.identity.node_id
+        )
         self.heartbeat_interval_s = settings.heartbeat_interval_s
         self._seq = 0
         self._ws = None
@@ -204,6 +210,7 @@ class NodeAgent:
         return MetricsReport(
             gpu_util_pct=None,
             vram_free_gb=vram_free,
+            active_sessions=self.handler.active_sessions,
             # Same psutil "available" figure the registration probe reports —
             # the coordinator refreshes placement capacity from it.
             ram_free_gb=psutil.virtual_memory().available / 1e9,
@@ -217,6 +224,19 @@ class NodeAgent:
         """Reconnect loop: each session = register + WS heartbeat exchange."""
         backoff = self.settings.reconnect_min_s
         warmed_up = False
+        provisioner_task = asyncio.create_task(
+            self.provisioner.run(), name="provisioner"
+        )
+        try:
+            await self._run_sessions(stop_event, backoff, warmed_up)
+        finally:
+            provisioner_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await provisioner_task
+
+    async def _run_sessions(
+        self, stop_event: asyncio.Event, backoff: float, warmed_up: bool
+    ) -> None:
         while not stop_event.is_set():
             try:
                 async with httpx.AsyncClient(timeout=5.0) as client:
@@ -332,7 +352,19 @@ class NodeAgent:
         except Exception:
             log.warning("malformed_server_message node=%s", self.identity.node_id)
             return
-        if envelope.type == MessageType.JOB_ASSIGN:
+        if envelope.type == MessageType.ASSIGNMENT:
+            if isinstance(payload, ModelAssignment):
+                log.info(
+                    "assignment node=%s model=%s action=%s mode=%s",
+                    self.identity.node_id,
+                    payload.model_id,
+                    payload.action,
+                    payload.mode,
+                )
+                self.provisioner.set_desired(payload)
+            else:
+                log.warning("unexpected_assignment_payload type=%s", type(payload).__name__)
+        elif envelope.type == MessageType.JOB_ASSIGN:
             if isinstance(payload, JobAssign):
                 log.info("job_assign node=%s job=%s", self.identity.node_id, payload.job_id)
                 self._spawn(

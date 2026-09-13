@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import codecs
 import contextlib
+import json
 import logging
 import struct
 import time
@@ -27,9 +28,11 @@ from dain_common.schemas import (
     JobStatus,
     MessageType,
     ModelManifest,
+    StageAssignment,
     StageRetry,
     TokenBatch,
 )
+from transformers.cache_utils import DynamicCache
 
 from dain_node.llm import ModelStoreClient, StageModel, fetch_stage, sample_token
 from dain_node.settings import NodeSettings
@@ -87,6 +90,10 @@ class JobRuntime:
     started_at: float = 0.0
     buffered: tuple[ActivationRelayHeader, bytes] | None = None
     sampler_rng: torch.Generator | None = None
+    # S22d: replica sessions own their KV cache (weights stay shared/read-only);
+    # pipeline jobs keep the legacy shared StageModel.cache under node_lock.
+    session_cache: DynamicCache | None = None
+    stage_key: tuple[str, int, int] | None = None
 
 
 class JobHandler:
@@ -118,6 +125,125 @@ class JobHandler:
         # Activations arriving before the stage runtime is built (entry may prefill
         # immediately) are buffered here and drained in on_job_assign.
         self._early: dict[str, list[tuple[ActivationRelayHeader, bytes]]] = {}
+        # S22 warm tiers: per-key build locks (concurrent jobs may build the
+        # same stage), warm-RSS accounting + LRU eviction, and live session load.
+        self._stage_build_locks: dict[tuple[str, int, int], asyncio.Lock] = {}
+        self._stage_last_use: dict[tuple[str, int, int], float] = {}
+        self._warm_budget_gb = max(0.0, settings.warm_budget_gb)
+        self._warm_models = max(1, settings.warm_models)
+        self._warm_mode = settings.warm_mode
+        self._max_sessions = max(1, settings.max_sessions)
+        self.active_sessions = 0
+
+    # -- warm stage management (S22a/b) ---------------------------------------------
+
+    @staticmethod
+    def _stage_rss_gb(stage: StageModel) -> float:
+        params = [q for layer in stage.layers for q in layer.parameters()]
+        for extra in (stage.embed, stage.norm, stage.lm_head):
+            if extra is not None:
+                params.extend(extra.parameters())
+        return sum(p.numel() * p.element_size() for p in params) / 1e9
+
+    def _warm_rss_gb(self) -> float:
+        return sum(
+            self._stage_rss_gb(stage) for stage in self._stages.values()
+        )
+
+    def _in_use_keys(self) -> set[tuple[str, int, int]]:
+        return {rt.stage_key for rt in self.jobs.values() if rt.stage_key is not None}
+
+    def _touch_stage(self, key: tuple[str, int, int]) -> None:
+        self._stage_last_use[key] = time.time()
+
+    def _evict_warm_stages(self, need_gb: float = 0.0) -> None:
+        """LRU-evict unused warm stages until (rss + need) fits the budget."""
+        in_use = self._in_use_keys()
+        while True:
+            candidates = [
+                (k, self._stage_last_use.get(k, 0.0))
+                for k in self._stages
+                if k not in in_use
+            ]
+            if not candidates:
+                return
+            if (
+                self._warm_rss_gb() + need_gb <= self._warm_budget_gb
+                and len(self._stages) <= self._warm_models
+            ):
+                return
+            key, _ = min(candidates, key=lambda item: item[1])
+            log.info("warm_stage_evicted model=%s layers=[%d,%d]", key[0], key[1], key[2])
+            stage = self._stages.pop(key)
+            self._stage_last_use.pop(key, None)
+            stage.end_job()
+            del stage
+
+    async def ensure_warm_stage(
+        self, manifest: ModelManifest, layer_start: int, layer_end: int
+    ) -> StageModel | None:
+        """Build (or fetch) a warm stage for the provisioner; None when the
+        warm policy says no (files mode / budget exhausted)."""
+        if self._warm_mode == "files":
+            return None
+        key = (manifest.model_id, layer_start, layer_end)
+        existing = self._stages.get(key)
+        if existing is not None:
+            self._touch_stage(key)
+            return existing
+        need = 0.0  # actual RSS checked after build
+        self._evict_warm_stages(need)
+        try:
+            async with self.node_lock:
+                stage, _paths = await fetch_stage(
+                    self.store, manifest, layer_start, layer_end
+                )
+        except Exception:  # noqa: BLE001 — provisioning reports the failure
+            raise
+        rss = self._stage_rss_gb(stage)
+        over_budget = rss + self._warm_rss_gb() > self._warm_budget_gb
+        if over_budget or len(self._stages) >= self._warm_models + 1:
+            log.info(
+                "warm_budget_exceeded model=%s rss=%.2fGB budget=%.2fGB",
+                manifest.model_id,
+                rss,
+                self._warm_budget_gb,
+            )
+            stage.end_job()
+            del stage
+            return None
+        self._stages[key] = stage
+        self._touch_stage(key)
+        if self.on_inventory_change is not None:
+            with contextlib.suppress(Exception):
+                self.on_inventory_change()
+        return stage
+
+    @property
+    def session_slots_free(self) -> int:
+        return max(0, self._max_sessions - self.active_sessions)
+
+    def drop_warm_stages(self, model_id: str) -> None:
+        """Provisioner revoke: drop this model's warm stages from the cache."""
+        for key in [k for k in self._stages if k[0] == model_id]:
+            stage = self._stages.pop(key)
+            self._stage_last_use.pop(key, None)
+            stage.end_job()
+            del stage
+        log.info("warm_stages_dropped model=%s", model_id)
+
+    def _spawn_report(self, envelope: Envelope) -> None:
+        """Fire-and-forget MODEL_STATUS send; silently dropped while the WS is
+        down (the provisioner re-reports all statuses periodically)."""
+        task = asyncio.create_task(self._safe_send(envelope), name="model-status")
+        self._background.add(task)
+        task.add_done_callback(self._on_task_done)
+
+    async def _safe_send(self, envelope: Envelope) -> None:
+        try:
+            await self._emit(envelope)
+        except Exception:  # noqa: BLE001 — transport down; statuses self-heal
+            pass
 
     # -- wiring ------------------------------------------------------------------
 
@@ -237,8 +363,51 @@ class JobHandler:
         # was last asked to process, never a token flowing back toward entry.
         if role == "hidden":
             rt.buffered = (header, tensor_bytes)  # held until acked (S7 replay)
+        # S22e: prefer direct node-to-node transfer when the next hop
+        # advertises a peer URL; the coordinator relay stays the fallback.
+        if self._direct_target(rt, header.role) is not None:
+            if await self._direct_send_activation(rt, header, tensor_bytes):
+                return
         await self._emit(Envelope.wrap(MessageType.ACTIVATION_RELAY, header, ts=time.time()))
         await self._emit_bytes(tensor_bytes)
+
+    def _direct_target(self, rt: JobRuntime, role: str) -> StageAssignment | None:
+        """The next hop's StageAssignment when direct relay can apply."""
+        if not self.settings.direct_relay:
+            return None
+        if role == "sampled_token":
+            return rt.job.stages[0] if rt.job.stages else None
+        nxt = rt.job.my_stage_idx + 1
+        if nxt < len(rt.job.stages):
+            target = rt.job.stages[nxt]
+            return target if target.node_id != rt.job.stages[rt.job.my_stage_idx].node_id else None
+        return None
+
+    async def _direct_send_activation(
+        self, rt: JobRuntime, header: ActivationRelayHeader, payload: bytes
+    ) -> bool:
+        target = self._direct_target(rt, header.role)
+        if target is None or not target.peer_url:
+            return False
+        header_json = json.dumps(header.model_dump(mode="json"), separators=(",", ":"))
+        status = await self.store.post_bytes(
+            f"{target.peer_url.rstrip('/')}/peer/activation",
+            headers={
+                "X-Peer-Token": self.store.peer_token or "",
+                "X-Activation": header_json,
+                "Content-Type": "application/octet-stream",
+            },
+            content=payload,
+        )
+        if status == 200:
+            return True
+        log.debug(
+            "direct_relay_fallback job=%s target=%s status=%d",
+            header.job_id,
+            target.node_id,
+            status,
+        )
+        return False
 
     # -- entry points (called by the agent's receive loop) -----------------------------
 
@@ -339,6 +508,18 @@ class JobHandler:
         if header is None:
             log.warning("payload_without_header bytes=%d", len(payload))
             return
+        await self._route_activation(header, payload)
+
+    async def on_direct_activation(self, header_data: dict, payload: bytes) -> None:
+        """Direct node-to-node activation arrival (S22e, via the peer server)."""
+        try:
+            header = ActivationRelayHeader.model_validate(header_data)
+        except Exception:
+            log.warning("direct_activation_bad_header bytes=%d", len(payload))
+            return
+        await self._route_activation(header, payload)
+
+    async def _route_activation(self, header: ActivationRelayHeader, payload: bytes) -> None:
         if len(payload) != header.n_bytes:
             log.warning(
                 "payload_size_mismatch job=%s got=%d want=%d",
@@ -402,6 +583,30 @@ class JobHandler:
             retry.attempt,
             len(payload),
         )
+        # Prefer direct replay to the replacement (S22e); fall back to the
+        # coordinator relay, which also refreshes the coordinator's placement.
+        replacement = (
+            rt.job.stages[retry.stage_idx]
+            if retry.stage_idx < len(rt.job.stages)
+            else None
+        )
+        if (
+            self.settings.direct_relay
+            and replacement is not None
+            and replacement.peer_url
+        ):
+            header_json = json.dumps(replayed.model_dump(mode="json"), separators=(",", ":"))
+            status = await self.store.post_bytes(
+                f"{replacement.peer_url.rstrip('/')}/peer/activation",
+                headers={
+                    "X-Peer-Token": self.store.peer_token or "",
+                    "X-Activation": header_json,
+                    "Content-Type": "application/octet-stream",
+                },
+                content=payload,
+            )
+            if status == 200:
+                return
         await self._emit(Envelope.wrap(MessageType.ACTIVATION_RELAY, replayed, ts=time.time()))
         await self._emit_bytes(payload)
 
@@ -409,18 +614,34 @@ class JobHandler:
 
     async def _build_stage(self, rt: JobRuntime) -> StageModel:
         key = (rt.job.model_id, rt.layer_start, rt.layer_end)
+        rt.stage_key = key
         stage = self._stages.get(key)
         if stage is None:
-            stage, _paths = await fetch_stage(self.store, rt.manifest, rt.layer_start, rt.layer_end)
-            if self.on_inventory_change is not None:
-                with contextlib.suppress(Exception):
-                    self.on_inventory_change()
-            self._stages[key] = stage
+            # Per-key lock: two concurrent jobs may race the same stage build
+            # (the global node_lock only guards pipeline cache mutation now).
+            lock = self._stage_build_locks.setdefault(key, asyncio.Lock())
+            async with lock:
+                stage = self._stages.get(key)
+                if stage is None:
+                    stage, _paths = await fetch_stage(
+                        self.store, rt.manifest, rt.layer_start, rt.layer_end
+                    )
+                    if self.on_inventory_change is not None:
+                        with contextlib.suppress(Exception):
+                            self.on_inventory_change()
+                    self._stages[key] = stage
+        self._touch_stage(key)
         rt.stage = stage
         if rt.manifest.tokenizer_file is not None and not isinstance(rt.streamer, TokenStreamer):
             # Real model: stream token-granular fragments instead of UTF-8 bytes.
             rt.streamer = TokenStreamer(stage.tokenizer)
-        stage.begin_job()
+        if rt.first and rt.last:
+            # Replica session: per-session KV cache, no shared mutation, no
+            # global lock — concurrent sessions interleave in the executor.
+            rt.session_cache = DynamicCache()
+        else:
+            # Pipeline path keeps the shared-cache semantics under node_lock.
+            stage.begin_job()
         return stage
 
     async def _bootstrap_stage(self, rt: JobRuntime, buffered: list) -> None:
@@ -443,26 +664,19 @@ class JobHandler:
         """Entry stage: owns the generation loop for the whole job."""
         job = rt.job
         try:
-            async with self.node_lock:  # exclusive: one generation per node
-                stage = await self._build_stage(rt)
-                try:
-                    await self._status(rt, JobState.RUNNING, detail="entry_ready")
-                    ids = stage.tokenizer.encode(job.prompt or "")
-                    generator = (
-                        torch.Generator().manual_seed(job.params.seed)
-                        if job.params.seed is not None
-                        else None
-                    )
-                    if rt.first and rt.last:
-                        await self._run_single_stage(rt, stage, ids, generator)
-                    else:
-                        await self._run_distributed_entry(rt, stage, ids, generator)
-                    await self._status(rt, JobState.COMPLETED, detail=f"generated={rt.generated}")
-                finally:
-                    # end_job() (cache teardown) must stay under the lock too; a
-                    # concurrent step on the shared stage would otherwise read a
-                    # half-freed DynamicCache.
-                    rt.stage.end_job()
+            replica = rt.first and rt.last
+            if replica:
+                self.active_sessions += 1
+            try:
+                if not replica:
+                    async with self.node_lock:  # pipeline: shared cache, exclusive
+                        await self._run_entry_locked(rt)
+                else:
+                    await self._run_entry_locked(rt)
+            finally:
+                if replica:
+                    self.active_sessions = max(0, self.active_sessions - 1)
+                    rt.session_cache = None
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 — every failure must reach the client
@@ -471,6 +685,28 @@ class JobHandler:
             with contextlib.suppress(Exception):
                 await self._send_tokens(rt, [], is_final=True, finish_reason="error")
                 await self._status(rt, JobState.FAILED, detail=str(exc)[:200])
+
+    async def _run_entry_locked(self, rt: JobRuntime) -> None:
+        job = rt.job
+        stage = await self._build_stage(rt)
+        try:
+            await self._status(rt, JobState.RUNNING, detail="entry_ready")
+            ids = stage.tokenizer.encode(job.prompt or "")
+            generator = (
+                torch.Generator().manual_seed(job.params.seed)
+                if job.params.seed is not None
+                else None
+            )
+            if rt.first and rt.last:
+                await self._run_single_stage(rt, stage, ids, generator)
+            else:
+                await self._run_distributed_entry(rt, stage, ids, generator)
+            await self._status(rt, JobState.COMPLETED, detail=f"generated={rt.generated}")
+        finally:
+            # Pipeline cache teardown must stay under the caller's node_lock; a
+            # concurrent step on the shared stage would read a half-freed cache.
+            if not (rt.first and rt.last):
+                rt.stage.end_job()
 
     async def _run_single_stage(
         self, rt: JobRuntime, stage: StageModel, ids: list[int], generator
@@ -484,7 +720,9 @@ class JobHandler:
             rt.job.params.temperature,
         )
         while True:
-            logits = await asyncio.to_thread(stage.next_token_logits_full, current)
+            logits = await asyncio.to_thread(
+                stage.next_token_logits_full, current, rt.session_cache
+            )
             token_id = sample_token(logits, rt.job.params.temperature, generator)
             current = [token_id]
             if token_id == stage.manifest.eos_token_id:

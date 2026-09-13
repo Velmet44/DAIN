@@ -72,6 +72,12 @@ COORDINATOR_ENV: dict[str, str] = {
     "export_timeout_s": "DAIN_EXPORT_TIMEOUT_S",
     "gguf_timeout_s": "DAIN_GGUF_TIMEOUT_S",
     "allow_memory_overcommit": "DAIN_ALLOW_OVERCOMMIT",
+    "assignment_tick_s": "DAIN_ASSIGNMENT_TICK_S",
+    "replicas_per_model": "DAIN_REPLICAS_PER_MODEL",
+    "max_replicas_per_model": "DAIN_MAX_REPLICAS",
+    "max_sessions_per_node": "DAIN_MAX_SESSIONS",
+    "queue_wait_s": "DAIN_QUEUE_WAIT_S",
+    "demand_scale_threshold": "DAIN_DEMAND_SCALE_THRESHOLD",
 }
 
 # Default config.json written next to the coordinator on first run.  Key names
@@ -231,6 +237,17 @@ class CoordinatorSettings:
     # RAM-short hosts that could never fit the model). Default off: refuse
     # placement instead (HTTP 429).
     allow_memory_overcommit: bool = False
+    # S22 instant-serving: assignment controller + replica scheduling.
+    assignment_tick_s: float = 10.0
+    replicas_per_model: int = 1
+    max_replicas_per_model: int = 2
+    max_sessions_per_node: int = 4
+    # How long /v1/completions waits for a node to become ready (or a session
+    # slot to free up) before failing the request.
+    queue_wait_s: float = 30.0
+    # Recent arrivals (demand window) at/above which a model gets a 2nd replica.
+    demand_scale_threshold: int = 8
+    demand_window_s: float = 600.0
     # Completed-job retention: terminal jobs are evicted once the history grows
     # past `job_history_max` (oldest first) or a job has been terminal for
     # longer than `job_ttl_s` — the tracker must not grow forever on long runs.
@@ -295,6 +312,13 @@ class CoordinatorSettings:
             gguf_timeout_s=float(env.get("DAIN_GGUF_TIMEOUT_S", "3600")),
             allow_memory_overcommit=env.get("DAIN_ALLOW_OVERCOMMIT", "").lower()
             in ("1", "true", "yes"),
+            assignment_tick_s=float(env.get("DAIN_ASSIGNMENT_TICK_S", "10")),
+            replicas_per_model=int(env.get("DAIN_REPLICAS_PER_MODEL", "1")),
+            max_replicas_per_model=int(env.get("DAIN_MAX_REPLICAS", "2")),
+            max_sessions_per_node=int(env.get("DAIN_MAX_SESSIONS", "4")),
+            queue_wait_s=float(env.get("DAIN_QUEUE_WAIT_S", "30")),
+            demand_scale_threshold=int(env.get("DAIN_DEMAND_SCALE_THRESHOLD", "8")),
+            demand_window_s=float(env.get("DAIN_DEMAND_WINDOW_S", "600")),
         )
 
     @classmethod
@@ -374,4 +398,11 @@ class CoordinatorSettings:
             export_timeout_s=float(data.get("export_timeout_s", 3600.0)),
             gguf_timeout_s=float(data.get("gguf_timeout_s", 3600.0)),
             allow_memory_overcommit=_truthy(data.get("allow_memory_overcommit", False)),
+            assignment_tick_s=float(data.get("assignment_tick_s", 10.0)),
+            replicas_per_model=int(data.get("replicas_per_model", 1)),
+            max_replicas_per_model=int(data.get("max_replicas_per_model", 2)),
+            max_sessions_per_node=int(data.get("max_sessions_per_node", 4)),
+            queue_wait_s=float(data.get("queue_wait_s", 30.0)),
+            demand_scale_threshold=int(data.get("demand_scale_threshold", 8)),
+            demand_window_s=float(data.get("demand_window_s", 600.0)),
         )

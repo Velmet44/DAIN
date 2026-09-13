@@ -34,6 +34,10 @@ class MessageType(StrEnum):
     STAGE_RETRY = "stage_retry"
     LEDGER_EVENT = "ledger_event"
     SHARD_MANIFEST = "shard_manifest"
+    # S22 instant-serving: coordinator -> node desired model portfolio,
+    # node -> coordinator per-model provisioning/readiness reports.
+    ASSIGNMENT = "assignment"
+    MODEL_STATUS = "model_status"
 
 
 class NodeState(StrEnum):
@@ -255,6 +259,10 @@ class ModelManifest(_Model):
     # Monotonic artifact-format version; bump when shard layout changes shape.
     artifact_version: int = Field(default=1, ge=1)
     source_config_hash: str | None = Field(default=None, min_length=8)
+    # Alternate byte sources for shards (S22e): object storage / CDN mirrors
+    # serving the same content-addressed files. Nodes try mirrors, then LAN
+    # peers, then the coordinator; sha256 verification covers every source.
+    mirror_urls: tuple[str, ...] = Field(default=())
 
     @model_validator(mode="after")
     def _tokenizer_consistent(self) -> ModelManifest:
@@ -298,6 +306,10 @@ class MetricsReport(_Model):
     # snapshot (session 17).
     ram_free_gb: float | None = Field(default=None, ge=0)
     cpu_util_pct: float | None = Field(default=None, ge=0, le=100)
+    # S22d: live session occupancy — the scheduler routes new requests to the
+    # replica with the most headroom instead of treating a serving node as
+    # exclusively BUSY. None on nodes that predate session reporting.
+    active_sessions: int | None = Field(default=None, ge=0)
     net_bw_mbps: float | None = Field(default=None, ge=0)
     temp_c: float | None = Field(default=None, ge=-50, le=200)
     power_w: float | None = Field(default=None, ge=0)
@@ -313,11 +325,60 @@ class Heartbeat(_Model):
     cached_shards: tuple[ShardRef, ...] | None = None
 
 
+# ---------------------------------------------------------------------------
+# S22 instant-serving: model portfolio assignment + provisioning status
+# ---------------------------------------------------------------------------
+
+
+class ModelAssignment(_Model):
+    """One entry of a node's desired model portfolio (coordinator -> node).
+
+    `action="ensure"` provisions the model on the node: `mode="replica"` wants
+    the whole model (every shard); `mode="pipeline"` wants only the
+    `[layer_start, layer_end]` shard range of a pipeline placement. Nodes hold
+    files (verified shards + derived cache) regardless, and keep a warm in-RAM
+    stage for replicas when the warm budget allows. `action="revoke"` drops it.
+    """
+
+    model_id: str = Field(min_length=1)
+    action: Literal["ensure", "revoke"]
+    mode: Literal["replica", "pipeline"] = "replica"
+    layer_start: int | None = Field(default=None, ge=0)
+    layer_end: int | None = Field(default=None, ge=0)
+
+    @model_validator(mode="after")
+    def _pipeline_range(self) -> ModelAssignment:
+        if self.mode == "pipeline":
+            if self.layer_start is None or self.layer_end is None or self.layer_end < self.layer_start:
+                raise ValueError("pipeline assignment needs a valid layer range")
+        return self
+
+
+class ModelStatus(_Model):
+    """Provisioning/readiness report for one (node, model) (node -> coordinator).
+
+    `warm`/`files_ready` are the schedulable states; `warm` carries the warm
+    probe's measured decode throughput and resident RSS so placement uses real
+    numbers instead of claimed tflops (plan §3.1).
+    """
+
+    node_id: str = Field(min_length=3, max_length=64)
+    model_id: str = Field(min_length=1)
+    state: Literal["downloading", "files_ready", "warm", "serving", "error", "revoked"]
+    progress: float | None = Field(default=None, ge=0.0, le=1.0)
+    toks_s: float | None = Field(default=None, gt=0)
+    rss_gb: float | None = Field(default=None, ge=0)
+    detail: str | None = Field(default=None, max_length=256)
+
+
 class StageAssignment(_Model):
     stage_idx: int = Field(ge=0)
     node_id: str = Field(min_length=3)
     shard_id: str = Field(min_length=1)
     layer_start: int = Field(ge=0)
+    # S22e: the node's LAN peer URL for direct node-to-node activation relay.
+    # Optional; nodes fall back to coordinator relay when absent/unreachable.
+    peer_url: str | None = Field(default=None, max_length=256)
     layer_end: int = Field(ge=0, description="Inclusive upper bound")
     # S11 (MoE) skeleton: an expert-set stage hosts these expert indices for the
     # layers in [layer_start, layer_end] instead of all layers in the range.
@@ -458,6 +519,8 @@ PAYLOAD_TYPES: dict[MessageType, type[BaseModel]] = {
     MessageType.STAGE_RETRY: StageRetry,
     MessageType.LEDGER_EVENT: LedgerEvent,
     MessageType.SHARD_MANIFEST: ShardManifest,
+    MessageType.ASSIGNMENT: ModelAssignment,
+    MessageType.MODEL_STATUS: ModelStatus,
 }
 
 

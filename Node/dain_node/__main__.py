@@ -103,6 +103,8 @@ def main() -> int:
                 advertise_host=advertise,
                 join_token=settings.join_token,
             )
+            # S22e: the peer server also receives direct relayed activations.
+            peer_server.activation_receiver = handler.on_direct_activation
 
         async def _run(
             _peer_server=peer_server, _settings=settings, _handler=handler, _log=log

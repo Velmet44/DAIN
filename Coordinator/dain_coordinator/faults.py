@@ -244,7 +244,10 @@ class FaultManager:
             attempts,
             reason,
         )
-        self.service.mark_busy(replacement)
+        if job.serving_mode != "replica":
+            # Pipeline jobs keep exclusive BUSY semantics; replica jobs share
+            # the node with other sessions (load is a metric, S22d).
+            self.service.mark_busy(replacement)
 
         assign = JobAssign(
             job_id=job.job_id,
