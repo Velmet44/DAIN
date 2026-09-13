@@ -80,6 +80,10 @@ class PlacementPlan:
     stages: tuple[StageAssignment, ...]
     backups: tuple[str, ...] = ()
     degraded: bool = False
+    # True when overcommit placement admitted a node whose free memory does
+    # not cover its stage share (the OS pages the excess to disk — slower,
+    # but the job runs instead of being refused with 429).
+    overcommitted: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +141,7 @@ def recompute_pool(
     min_nodes: int,
     trigger: str,
     recorder: PlacementRecorder,
+    allow_overcommit: bool = False,
 ) -> PlacementPlan | None:
     """Recompute the placement for `manifest` and record the event (spec §12)."""
     plan = plan_placement(
@@ -147,6 +152,7 @@ def recompute_pool(
         max_k=max_k,
         backup_count=backup_count,
         min_nodes=min_nodes,
+        allow_overcommit=allow_overcommit,
     )
     recorder.record(
         PlacementEvent(
@@ -195,6 +201,7 @@ def plan_placement(
     max_k: int = 16,
     backup_count: int = 2,
     min_nodes: int = 1,
+    allow_overcommit: bool = False,
 ) -> PlacementPlan | None:
     """Spec §12: feasible → score-ranked top-K → sized placement → warm backups.
 
@@ -202,6 +209,12 @@ def plan_placement(
     degraded mode). Below `min_nodes` the pool is considered unable to serve at
     all (spec §13 degraded-mode floor). When fewer than the desired K stages fit,
     the plan is served with fewer, larger stages and flagged `degraded`.
+
+    With `allow_overcommit` the capacity filter no longer rejects: nodes are
+    taken in ranked order regardless of free memory and the plan is flagged
+    `overcommitted` when any stage's share exceeds its node's capacity. The
+    node then runs with the OS paging cold weight pages to disk — slow but
+    functional, for hosts (or test pools) that could never fit the model in RAM.
     """
     if not nodes:
         return None
@@ -239,12 +252,17 @@ def plan_placement(
     share_gb = model_gb / k
 
     # Capacity filter applied to the ranked order: take the first k nodes whose
-    # free memory covers the per-stage share.
+    # free memory covers the per-stage share. Overcommit mode admits ranked
+    # nodes regardless and just records which stages exceed their node's
+    # memory, so a RAM-short host pages instead of being refused outright.
     selected: list[NodeRow] = []
     rest: list[NodeRow] = []
+    overcommitted = False
     for row in ranked:
-        if len(selected) < k and capacity_gb(row) >= share_gb:
+        fits = capacity_gb(row) >= share_gb
+        if len(selected) < k and (fits or allow_overcommit):
             selected.append(row)
+            overcommitted = overcommitted or not fits
         else:
             rest.append(row)
     if len(selected) < k:
@@ -267,4 +285,6 @@ def plan_placement(
         layer = stage_end + 1
 
     backups = tuple(row.node_id for row in rest[:backup_count])
-    return PlacementPlan(stages=tuple(stages), backups=backups, degraded=degraded)
+    return PlacementPlan(
+        stages=tuple(stages), backups=backups, degraded=degraded, overcommitted=overcommitted
+    )

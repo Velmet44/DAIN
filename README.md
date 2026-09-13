@@ -117,6 +117,14 @@ Note the trade-off the other way: int4 storage does not reduce *runtime* RAM
 (weights are materialized fp16) and does not speed up decode — that is what the
 TorchAO track below is for.
 
+**RAM-short hosts (pagefile mode):** by default the scheduler refuses placement
+when no node's free memory covers its stage share (HTTP 429). Set
+`DAIN_ALLOW_OVERCOMMIT=true` (or `"allow_memory_overcommit": true` in
+`Coordinator/config.json`) to admit such nodes anyway — the OS pages the
+excess weight pages to disk, so a 1B model runs on ~2.5 GB free RAM at roughly
+disk-bound speed instead of being refused. Overcommitted placements are flagged
+in the placement plan/events.
+
 ### Exporting INT4 models (TorchAO runtime)
 
 Point DAIN at a **local HuggingFace Llama checkpoint** to export TorchAO INT4 shards.

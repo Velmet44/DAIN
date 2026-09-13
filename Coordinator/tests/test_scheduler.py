@@ -321,3 +321,23 @@ def test_storage_int4_runtime_footprint_still_fits_real_nodes() -> None:
     pool = [node(f"n{i:02d}", score=0.5) for i in range(4)]
     plan = plan_placement(STORAGE_INT4_MANIFEST, pool, layers_per_node_target=4, max_k=4)
     assert plan is not None and len(plan.stages) == 4
+
+
+def test_overcommit_admits_ram_short_nodes() -> None:
+    """allow_overcommit places a node whose memory cannot fit the share, and
+    flags the plan overcommitted; without the flag the same pool is refused."""
+    small = node("tiny", score=0.9, vram_free=0.02)
+    assert plan_placement(STORAGE_INT4_MANIFEST, [small], layers_per_node_target=4) is None
+    plan = plan_placement(
+        STORAGE_INT4_MANIFEST, [small], layers_per_node_target=4, allow_overcommit=True
+    )
+    assert plan is not None and plan.overcommitted is True
+    assert [s.node_id for s in plan.stages] == ["tiny"]
+
+
+def test_overcommit_does_not_flag_fitting_nodes() -> None:
+    pool = [node(f"n{i:02d}", score=0.5) for i in range(4)]
+    plan = plan_placement(
+        STORAGE_INT4_MANIFEST, pool, layers_per_node_target=4, max_k=4, allow_overcommit=True
+    )
+    assert plan is not None and plan.overcommitted is False

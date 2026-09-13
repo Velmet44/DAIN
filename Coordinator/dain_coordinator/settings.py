@@ -71,6 +71,7 @@ COORDINATOR_ENV: dict[str, str] = {
     "max_export_size_gb": "DAIN_MAX_EXPORT_SIZE_GB",
     "export_timeout_s": "DAIN_EXPORT_TIMEOUT_S",
     "gguf_timeout_s": "DAIN_GGUF_TIMEOUT_S",
+    "allow_memory_overcommit": "DAIN_ALLOW_OVERCOMMIT",
 }
 
 # Default config.json written next to the coordinator on first run.  Key names
@@ -225,6 +226,11 @@ class CoordinatorSettings:
     # subprocess as model export; bound it so a hung converter never wedges the
     # admin "import busy" flag until the coordinator restarts.
     gguf_timeout_s: float = 3600.0
+    # Placement overcommit: admit nodes whose free RAM does not cover their
+    # stage share (the OS pages the excess to disk — slow but functional for
+    # RAM-short hosts that could never fit the model). Default off: refuse
+    # placement instead (HTTP 429).
+    allow_memory_overcommit: bool = False
     # Completed-job retention: terminal jobs are evicted once the history grows
     # past `job_history_max` (oldest first) or a job has been terminal for
     # longer than `job_ttl_s` — the tracker must not grow forever on long runs.
@@ -287,6 +293,8 @@ class CoordinatorSettings:
             max_export_size_gb=float(env.get("DAIN_MAX_EXPORT_SIZE_GB", "100")),
             export_timeout_s=float(env.get("DAIN_EXPORT_TIMEOUT_S", "3600")),
             gguf_timeout_s=float(env.get("DAIN_GGUF_TIMEOUT_S", "3600")),
+            allow_memory_overcommit=env.get("DAIN_ALLOW_OVERCOMMIT", "").lower()
+            in ("1", "true", "yes"),
         )
 
     @classmethod
@@ -365,4 +373,5 @@ class CoordinatorSettings:
             max_export_size_gb=float(data.get("max_export_size_gb", 100.0)),
             export_timeout_s=float(data.get("export_timeout_s", 3600.0)),
             gguf_timeout_s=float(data.get("gguf_timeout_s", 3600.0)),
+            allow_memory_overcommit=_truthy(data.get("allow_memory_overcommit", False)),
         )

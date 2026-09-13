@@ -126,6 +126,7 @@ def create_app(
                     max_k=live.max_stages,
                     backup_count=live.backup_count,
                     min_nodes=live.min_nodes,
+                    allow_overcommit=live.allow_memory_overcommit,
                     trigger=trigger,
                     recorder=placements,
                 )

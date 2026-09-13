@@ -1482,3 +1482,25 @@ the unchanged fp16 kernels.
 Common/Coordinator/Node/Sim pytest green (Sim `test_kill_three_of_eight_
 still_serves` remains environment-flaky on this 2-core host, pre-existing);
 ruff clean in all four projects.
+
+## 2026-09-13 - Placement overcommit: run the model on RAM-short nodes (pagefile mode)
+
+The scheduler refused placement whenever no node's free memory covered its
+stage share (HTTP 429), which locked RAM-short hosts (e.g. ~2.5 GB free) out
+of even 1B models whose fp16 weights + interpreter overhead exceed free RAM.
+Windows pages cold weight pages to disk transparently - the cluster just
+refused to try.
+
+- `CoordinatorSettings.allow_memory_overcommit` (env `DAIN_ALLOW_OVERCOMMIT`,
+  config key `allow_memory_overcommit`, default false).
+- `plan_placement(..., allow_overcommit=True)` admits ranked nodes regardless
+  of the capacity filter and flags the plan `overcommitted` when any stage's
+  share exceeds its node's memory; `recompute_pool` and `/v1/completions`
+  thread the flag from live settings. Default behavior is unchanged.
+- Deploy/.env.example + README document the mode and its trade-off (disk-bound
+  decode while paging; fine for functional testing, not for speed).
+- Scheduler tests: overcommit admits a 20 MB node for a 64 MB share and flags
+  it; fitting pools stay unflagged.
+
+#### Gates
+Coordinator + Node pytest suites and ruff green.

@@ -1289,6 +1289,7 @@ async def completions(payload: CompletionRequest, request: Request):
         max_k=settings.max_stages,
         backup_count=settings.backup_count,
         min_nodes=settings.min_nodes,
+        allow_overcommit=settings.allow_memory_overcommit,
     )
     if plan is None:
         raise HTTPException(
