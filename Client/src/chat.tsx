@@ -166,6 +166,15 @@ export function ChatView({ conv, settings, onModelPicked, onPatch, onConnected }
             tokens += 1;
             acc += frame.token;
           }
+          if (frame.type === "reset") {
+            // Watchdog re-dispatched a replica pipeline: the transcript starts
+            // over from the prompt, so drop everything accumulated so far.
+            acc = "";
+            committed = "";
+            tokens = 0;
+            flush();
+            logWarn("watchdog reset: transcript regenerated from prompt");
+          }
           if (frame.usage?.tokens != null) tokens = frame.usage.tokens;
         },
       );

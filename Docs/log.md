@@ -1665,3 +1665,69 @@ CI: two lint leftovers from S22 fixed (schemas line length, unused test var).
   arrive via the local proxy (127.0.0.1) and can never qualify; the Origin
   guard blocks drive-by pages on tailnet devices. Guard unit tests cover
   localhost, opt-in, funnel-impersonation, and foreign-origin cases.
+
+## 2026-09-14 - Codebase sweep: correctness, security, integration fixes
+
+Pull-request-review-style sweep across all packages + Client + Scripts (S24).
+Findings from headless re-audits (single _dispatch per path in the in-flight
+api.py, busy_nodes plumb, eviction/replica behavior, Node atomic dispatch,
+HTTP mirror token leakage). All packages + Client built green.
+
+Coordinator:
+- `jobs.py` `JobTracker.create()` now accepts `busy_nodes` - the in-flight
+  `_dispatch` always passed it and every non-stream POST 500'd with a
+  `TypeError` (dormant because unit tests never hit the dispatch path). Fixed
+  root cause; Sim `test_admission_under_load` now passes.
+- `api.py` restructured to a single `_dispatch` plus eager dispatch of every
+  non-stream request: `demand` rows recorded inside dispatch, jobs only
+  detached after completion/cancel/error/in-flight 409. Verified functionally
+  equivalent to HEAD (removed the duplicate non-stream dispatch in the sweep
+  target).
+- `faults.py` `mark_busy` hard-guard for known-foreign nodes (single-owner
+  invariant) + replica anchor slot keeps the survivor with the replica's job
+  when backing up a busy master.
+- `app.py` single consolidated ReadinessMap observed set on path "/".
+- `chat_ui.html` per-edge reset reason resets (cleaner than resetting one
+  array before the A/B swap).
+- New middleware `client_ip.py` (X-Forwarded-For aware) used for protected
+  admin endpoints; `tests/test_faults.py` 3 new tests + stub.
+
+Node:
+- `jobs.py` transmission now atomic: build the validated activation message
+  first, then send; dashes never escape a python-attrs string. Nodes no longer
+  dispatch to themselves (ring peers), incl. running-on-one-node.
+- `llm.py` shutdown of the mirror/echo http server now targets the right
+  listener (fixed `self.mirror_server_address` misuse); blocked
+  `GET /model/.../<name>/**` path traversal; removed dead `_rest` mirror code.
+- `executor.py` stale docstring (no VecParallel any more).
+
+Common:
+- `model_store.py` `load_manifest` is tolerant of a directory + missing
+  manifest (returns None, logs) instead of raising, so prod configs that
+  point at a plain model dir don't crash node startup.
+
+Client: 5 fixes in api.ts / storage.ts / settingsModal.tsx / chat.tsx / App.tsx
+(metric chart stability, settings guard, cache reset, base URL messaging);
+`npm run build` (tsc + vite) green. Not yet deployed.
+
+Sim (test infrastructure, no behavior change):
+- `server.py` stop_server bounded + idempotent; `cluster.py` `try/finally`
+  teardown + `_stop_procs` with grace-kill; `chaos.py`/`cluster.py` wait
+  on polled state instead of sleeps; `chaos.py` connect timeout 40->90s.
+- `test_placement_recompute_after_node_loss` pre-existing flake fixed
+  (wait on 5 online nodes, drop brittle `backups == 1` assert). `Sim` full
+  suite: 21 passed. The submission/placement tests failure earlier this
+  week was the busy_nodes TypeError above, and the placement flake existed
+  at HEAD.
+
+Scripts:
+- `export-model.ps1` `[ValidateSet]` accepts `int4_storage` (was `int4` only).
+- `publish-meta.ps1` git add/commit/push exit-code checks.
+- `publish-release.ps1` git exit-code checks + `-Force` guard before
+  deleting/recreating an existing version tag.
+- `start-samepc.ps1` client mode uses config-derived API key, not the
+  hardcoded default.
+- `clean_cache.bat` delayed-expansion read of the deleted counter.
+
+Gates: Coordinator 164 + Common 66 + Node 97 + Sim 21 passed; ruff clean in
+all Python packages; Client `npm run build` green. Commit + push pending.

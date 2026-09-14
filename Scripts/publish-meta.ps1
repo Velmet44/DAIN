@@ -29,8 +29,17 @@ Write-Host $json
 
 if ($Push) {
     git -C $root add Client/public/meta.json
+    if ($LASTEXITCODE -ne 0) {
+        throw "git add failed (exit $LASTEXITCODE)"
+    }
     git -C $root commit -m "meta: coordinator at $CoordUrl"
+    if ($LASTEXITCODE -ne 0) {
+        throw "git commit failed (exit $LASTEXITCODE)"
+    }
     git -C $root push
+    if ($LASTEXITCODE -ne 0) {
+        throw "git push failed (exit $LASTEXITCODE)"
+    }
     Write-Host "Pushed - the Pages site redeploys (~1-2 min), then clients/nodes pick it up."
 } else {
     Write-Host "Review the file, then commit+push (or rerun with -Push)."

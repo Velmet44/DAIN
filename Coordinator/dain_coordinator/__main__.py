@@ -43,16 +43,11 @@ def main() -> None:
         # Write the port back so the discovery responder and any other
         # settings consumers advertise the port uvicorn actually binds.
         settings = replace(settings, port=port)
-    uvicorn.run(
-        create_app(settings, settings_path=str(path)),
-        host=settings.host,
-        port=port,
-        # Behind Caddy/nginx the per-client rate limiter must see the real
-        # client IP, not the proxy's 127.0.0.1 (which would bucket the whole
-        # internet into one client).
-        proxy_headers=True,
-        forwarded_allow_ips=settings.trusted_proxies,
-    )
+    # Client-IP resolution (X-Forwarded-For, rightmost trusted hop) happens in
+    # ClientIPMiddleware — uvicorn's own proxy_headers rewriting must stay OFF
+    # so the raw socket peer remains available for security decisions (e.g.
+    # the tailnet keyless-admin range can never be spoofed via XFF).
+    uvicorn.run(create_app(settings, settings_path=str(path)), host=settings.host, port=port)
 
 
 if __name__ == "__main__":

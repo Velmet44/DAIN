@@ -156,7 +156,16 @@ async function send() {
     const res = await fetch("/v1/completions", { method: "POST", headers, body: JSON.stringify(payload) });
     if (!res.ok) {
       let detail = "HTTP " + res.status;
-      try { detail = (await res.json()).detail || detail; } catch (_) { /* non-json */ }
+      try {
+        const body = await res.json();
+        if (Array.isArray(body.detail)) {
+          detail = body.detail
+            .map((d) => (d && (d.msg ? (d.loc ? d.loc.at(-1) + ": " : "") + d.msg : JSON.stringify(d))))
+            .join("; ");  // FastAPI 422 validation errors
+        } else if (body.detail) {
+          detail = body.detail;
+        }
+      } catch (_) { /* non-json */ }
       if (res.status === 401) detail = "401: bad API key";
       throw new Error(detail);
     }
@@ -183,6 +192,11 @@ async function send() {
             $("log").scrollTop = $("log").scrollHeight;
           } else if (frame.type === "final") {
             body.innerHTML = esc(full).replace(/\n/g, "<br>");
+          } else if (frame.type === "reset") {
+            // Watchdog re-dispatched a replica pipeline: the transcript is
+            // regenerated from the prompt, so drop what we accumulated.
+            full = "";
+            body.innerHTML = esc(full).replace(/\n/g, "<br>") + '<span class="cursor"></span>';
           } else if (frame.type === "error") {
             throw new Error(frame.detail || "job error");
           } else if (frame.status === "dispatched") {

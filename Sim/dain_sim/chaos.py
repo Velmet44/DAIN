@@ -57,12 +57,29 @@ def _spawn_env(port: int, workdir: str, node_id: str) -> dict[str, str]:
 
 async def _wait_connected(client, base_url: str, count: int, timeout_s: float) -> None:
     deadline = time.monotonic() + timeout_s
+    connected = 0
     while time.monotonic() < deadline:
         listing = (await client.get(f"{base_url}/admin/nodes", headers=ADMIN_HEADERS)).json()
-        if sum(1 for n in listing if n.get("connected")) >= count:
+        connected = sum(1 for n in listing if n.get("connected"))
+        if connected >= count:
             return
         await asyncio.sleep(0.2)
-    raise AssertionError(f"only {count} nodes not all connected in time")
+    raise AssertionError(f"timed out: {connected} of {count} nodes connected")
+
+
+async def _wait_states(
+    client, base_url: str, node_ids: list[str], state: str, timeout_s: float = 20.0
+) -> bool:
+    """Wait until every node_id reports `state` (post-kill settle is event-driven,
+    not a fixed sleep — fixed sleeps made the harness flaky on slow CI)."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        listing = (await client.get(f"{base_url}/admin/nodes", headers=ADMIN_HEADERS)).json()
+        states = {n["node_id"]: n["state"] for n in listing}
+        if all(states.get(nid) == state for nid in node_ids):
+            return True
+        await asyncio.sleep(0.2)
+    return False
 
 
 async def _job_view(client, base_url: str, job_id: str) -> dict:
@@ -186,7 +203,7 @@ async def run_chaos(
                     stderr=node_log,
                 )
                 procs[node_id]._node_log = node_log  # type: ignore[attr-defined]
-            await _wait_connected(client, server.base_url, node_count, 40.0)
+            await _wait_connected(client, server.base_url, node_count, 90.0)
 
             if expect == "complete":
                 report.update(
@@ -338,7 +355,14 @@ async def _scenario_degraded(client, base_url, procs, job_tokens, prompt) -> dic
         if node_id in procs:
             procs[node_id].kill()
             await asyncio.to_thread(procs[node_id].wait)
-    await asyncio.sleep(2.0)  # let recompute + OFFLINE settle
+    if not await _wait_states(client, base_url, victims, NodeState.OFFLINE.value, 20.0):
+        return {
+            "scenario": "degraded",
+            "status": 0,
+            "served": False,
+            "job_final_state": "kill-settle-timeout",
+            "stages": [],
+        }
     status, job = await _stream_and_view(client, base_url, job_tokens, prompt)
     return {
         "scenario": "degraded",
@@ -355,7 +379,7 @@ async def _scenario_reject(client, base_url, procs, job_tokens, prompt) -> dict:
         if node_id in procs:
             procs[node_id].kill()
             await asyncio.to_thread(procs[node_id].wait)
-    await asyncio.sleep(2.0)
+    await _wait_states(client, base_url, list(procs.keys()), NodeState.OFFLINE.value, 20.0)
     listing = (await client.get(f"{base_url}/admin/nodes", headers=ADMIN_HEADERS)).json()
     online = sum(1 for n in listing if n["state"] == NodeState.ONLINE.value)
     status, _job = await _stream_and_view(client, base_url, 4, prompt)

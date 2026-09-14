@@ -39,8 +39,13 @@ def load_manifest(store_dir: str, model_id: str) -> ModelManifest | None:
     path = os.path.join(store_dir, model_id, "manifest.json")
     if not os.path.exists(path):
         return None
-    with open(path, encoding="utf-8-sig") as fh:
-        return ModelManifest.model_validate(json.load(fh))
+    try:
+        with open(path, encoding="utf-8-sig") as fh:
+            return ModelManifest.model_validate(json.load(fh))
+    except (OSError, ValueError, json.JSONDecodeError):
+        # Corrupt/unreadable manifest: treat as absent, never crash a listing
+        # or a planning pass because one model's file was truncated mid-write.
+        return None
 
 
 def list_models(store_dir: str) -> list[ModelManifest]:

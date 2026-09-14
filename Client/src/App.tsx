@@ -59,10 +59,11 @@ export default function App() {
           if (patch.replaceMessage) {
             const target = patch.replaceMessage.id;
             const idx = messages.findIndex((m) => m.id === target);
-            messages =
-              idx >= 0
-                ? messages.map((m, i) => (i === idx ? patch.replaceMessage! : m))
-                : [...messages, patch.replaceMessage];
+            if (idx >= 0)
+              messages = messages.map((m, i) => (i === idx ? patch.replaceMessage! : m));
+            // target missing ⇒ the stream belongs to a previously active chat
+            // that the user switched away from mid-stream; appending it here
+            // would inject a phantom reply into the wrong conversation.
           }
           return {
             ...conv,

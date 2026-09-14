@@ -33,7 +33,7 @@ export function SettingsModal({ settings, onSave, onClose }: Props) {
       `history=${draft.sendHistory}`,
       `systemPrompt=${draft.systemPrompt ? `${draft.systemPrompt.length} chars` : "(none)"}`,
     );
-    onSave({ ...draft, maxTokens: Math.max(1, Math.min(2048, Math.round(draft.maxTokens) || 512)) });
+    onSave({ ...draft, maxTokens: Math.max(1, Math.min(512, Math.round(draft.maxTokens) || 512)) });
     onClose();
   };
 
@@ -73,7 +73,7 @@ export function SettingsModal({ settings, onSave, onClose }: Props) {
             <input
               type="number"
               min={1}
-              max={2048}
+              max={512}
               value={draft.maxTokens}
               onChange={(e) => set("maxTokens", Number(e.target.value))}
             />

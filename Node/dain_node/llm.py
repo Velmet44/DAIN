@@ -486,6 +486,11 @@ class ModelStoreClient:
         Quantized shards (``format="torch_pt"``) land as ``.pt`` files; legacy
         shards as ``.safetensors`` — the extension is part of the address.
         """
+        if not is_safe_model_id(model_id) or not is_safe_model_id(shard_id):
+            raise ValueError(
+                f"illegal shard ids: model={model_id!r} shard={shard_id!r} "
+                "(refusing a cache-path escape)"
+            )
         model_cache = os.path.join(self.cache_dir, model_id)
         ext = _SHARD_EXTS.get(format, ".safetensors")
         path = os.path.join(model_cache, f"{shard_id}{ext}")
@@ -564,9 +569,11 @@ class ModelStoreClient:
         chunk_size = _read_chunk_size()
         parallel = _read_parallel_chunks() if total is not None and total > (8 << 20) else 1
         # S22e: content-addressed mirrors are the cheapest WAN source; the
-        # sha256 check makes every source equally trustworthy.
-        sources: list[tuple[str, bool]] = [(m, False) for m in mirror_urls]
-        sources += [(p, False) for p in peers] + [(self.base_url, True)]
+        # sha256 check makes every source equally trustworthy. Mirrors get the
+        # full URL as-is (no DAIN peer token); peers and the coordinator use
+        # their API paths below.
+        sources: list[tuple[str, bool, bool]] = [(m, False, False) for m in mirror_urls]
+        sources += [(p, False, True) for p in peers] + [(self.base_url, True, False)]
 
         if total is None:
             # No size probe (coordinator too old / error): plain linear GET.
@@ -647,7 +654,7 @@ class ModelStoreClient:
     async def _linear_fallback(
         self,
         client: httpx.AsyncClient,
-        sources: list[tuple[str, bool]],
+        sources: list[tuple[str, bool, bool]],
         model_id: str,
         shard_id: str,
         dst: str,
@@ -657,14 +664,22 @@ class ModelStoreClient:
         resume = os.path.getsize(dst) if os.path.exists(dst) else 0
         last_err: Exception | None = None
         for _attempt in range(_RANGE_RETRIES):
-            for base, is_coord in sources:
+            for base, is_coord, is_peer in sources:
                 if resume:
                     log.info(
                         "shard_resume model=%s shard=%s at=%d", model_id, shard_id, resume
                     )
                 try:
                     await self._stream_source(
-                        client, dst, base, is_coord, model_id, shard_id, resume, chunk_size
+                        client,
+                        dst,
+                        base,
+                        is_coord,
+                        is_peer,
+                        model_id,
+                        shard_id,
+                        resume,
+                        chunk_size,
                     )
                     return
                 except Exception as exc:  # noqa: BLE001
@@ -679,6 +694,7 @@ class ModelStoreClient:
         dst: str,
         base: str,
         is_coord: bool,
+        is_peer: bool,
         model_id: str,
         shard_id: str,
         resume: int,
@@ -688,9 +704,14 @@ class ModelStoreClient:
         if is_coord:
             request_headers = {**self.auth, **headers}
             url = f"{base}/shard/{model_id}/{shard_id}"
-        else:
+        elif is_peer:
             request_headers = {"X-Peer-Token": self.peer_token or "", **headers}
             url = f"{base}/peer/shard/{model_id}/{shard_id}"
+        else:
+            # Content-addressed mirror: `base` is a full public URL to the
+            # shard file; never attach the internal peer token to a third party.
+            request_headers = headers
+            url = base
         async with client.stream("GET", url, headers=request_headers) as response:
             response.raise_for_status()
             if resume and response.status_code != 206:
@@ -709,7 +730,7 @@ class ModelStoreClient:
         model_id: str,
         shard_id: str,
         byte_range: list[int],
-        sources: list[tuple[str, bool]],
+        sources: list[tuple[str, bool, bool]],
         chunk_size: int,
         index: int,
     ) -> tuple[bool, Exception | None]:
@@ -732,17 +753,22 @@ class ModelStoreClient:
                 # Inner loop: each byte-range GET opens a fresh connection, so
                 # a mid-stream drop just abandons one source and the *next*
                 # request resumes from wherever we wrote to disk.
-                for base, is_coord in sources:
+                for base, is_coord, is_peer in sources:
                     while local < end - start:
                         headers = {"Range": f"bytes={start + local}-{end - 1}"}
                         if is_coord:
                             request_headers = {**self.auth, **headers}
                             url = f"{base}/shard/{model_id}/{shard_id}"
-                        else:
+                        elif is_peer:
                             request_headers = {
                                 "X-Peer-Token": self.peer_token or "", **headers
                             }
                             url = f"{base}/peer/shard/{model_id}/{shard_id}"
+                        else:
+                            # Content-addressed mirror: `base` is a full public
+                            # URL; never attach the peer token to a third party.
+                            request_headers = headers
+                            url = base
                         async with client.stream(
                             "GET", url, headers=request_headers
                         ) as response:
@@ -787,8 +813,15 @@ class ModelStoreClient:
         self, model_id: str, tokenizer_file: str, tokenizer_hash: str
     ) -> str:
         """Download + verify the model's tokenizer.json; returns its cache path."""
+        if not is_safe_model_id(model_id):
+            raise ValueError(f"illegal model id: {model_id!r} (refusing a cache-path escape)")
         model_cache = os.path.join(self.cache_dir, model_id)
         file_name = os.path.basename(tokenizer_file)
+        if file_name != tokenizer_file or not file_name.endswith(".json"):
+            # The tokenizer name comes from the manifest; only a plain basename
+            # is ever written into the cache dir, so a crafted value like
+            # "../../config.json" cannot reach outside the model's folder.
+            raise ValueError(f"illegal tokenizer file name: {tokenizer_file!r}")
         path = os.path.join(model_cache, file_name)
         if os.path.exists(path):
             if await self._verify(path, tokenizer_hash):
@@ -827,6 +860,8 @@ class ModelStoreClient:
         return path
 
     def derived_dir(self, model_id: str) -> str:
+        if not is_safe_model_id(model_id):
+            raise ValueError(f"illegal model id: {model_id!r} (refusing a cache-path escape)")
         return os.path.join(self.cache_dir, model_id, _DERIVED_DIRNAME)
 
     async def ensure_derived_fp16(
@@ -1143,15 +1178,6 @@ class StageModel:
         if not self.last:
             raise RuntimeError("logits_from requires the last stage")
         return self.lm_head(self.norm(hidden))
-
-    @torch.inference_mode()
-    def next_token_logits(
-        self, token_id: int, cache: DynamicCache | None = None
-    ) -> torch.Tensor:
-        """Entry stage decode step: embed one token → logits for that position."""
-        hidden = self.embed(torch.tensor([[token_id]], device=self.device, dtype=torch.long))
-        hidden = self._run_layers(hidden, cache)
-        return self.lm_head(self.norm(hidden))[:, -1, :]
 
     @torch.inference_mode()
     def embed_one(self, token_id: int, cache: DynamicCache | None = None) -> torch.Tensor:

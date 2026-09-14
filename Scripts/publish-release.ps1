@@ -18,7 +18,9 @@ param(
 
     [switch]$Draft,
 
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+
+    [switch]$Force
 )
 
 $ErrorActionPreference = "Stop"
@@ -91,12 +93,34 @@ Write-Host "  Zip: $zipPath ($sizeMB MB)"
 Write-Host "`n  Creating git tag $tag ..."
 $existingTag = git tag -l $tag 2>$null
 if ($existingTag -eq $tag) {
-    Write-Host "  Tag $tag already exists, deleting remote tag..."
+    if (-not $Force) {
+        Write-Host "  Tag $tag already exists. Reusing/repointing a released tag is" -ForegroundColor Red
+        Write-Host "  destructive (clients already pin this version). Rerun with -Force to" -ForegroundColor Red
+        Write-Host "  delete and recreate it." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "  Tag $tag already exists, deleting remote tag (-Force)..."
     git tag -d $tag
-    git push origin :refs/tags/$tag
+    if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) {
+        Write-Host "  Failed to delete local tag" -ForegroundColor Red
+        exit 1
+    }
+    git push origin ":refs/tags/$tag"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  Failed to delete remote tag (is $tag already published?)" -ForegroundColor Red
+        exit 1
+    }
 }
 git tag -a $tag -m "DainNode $Version"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Failed to create tag $tag" -ForegroundColor Red
+    exit 1
+}
 git push origin $tag
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Failed to push tag $tag" -ForegroundColor Red
+    exit 1
+}
 
 # ── 4. Build release notes ───────────────────────────────────────────────
 if (-not $Title) { $Title = "DainNode $Version" }
@@ -125,13 +149,18 @@ $Notes
 }
 
 # ── 5. Create GitHub release ─────────────────────────────────────────────
+$repoUrl = git remote get-url origin
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Failed to resolve origin URL" -ForegroundColor Red
+    exit 1
+}
 Write-Host "`n  Creating GitHub release $tag ..."
 $releaseArgs = @(
     "release", "create", $tag,
     $zipPath,
     "--title", $Title,
     "--notes", $Notes,
-    "--repo", (git remote get-url origin)
+    "--repo", $repoUrl
 )
 if ($Draft) {
     $releaseArgs += "--draft"

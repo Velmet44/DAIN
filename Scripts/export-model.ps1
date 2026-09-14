@@ -15,7 +15,7 @@ param(
     [Parameter(Mandatory=$true)]
     [string]$ModelId,
     [string]$ModelStore = "",
-    [ValidateSet("int4")]
+    [ValidateSet("int4", "int4_storage")]
     [string]$Quantization = "int4",
     [int]$GroupSize = 128,
     [ValidateSet("fp16", "bf16")]

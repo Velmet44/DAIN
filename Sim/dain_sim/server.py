@@ -7,6 +7,7 @@ same app a deployed coordinator runs, so sim results transfer.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import socket
 from dataclasses import dataclass
 
@@ -57,5 +58,14 @@ async def start_server(settings: CoordinatorSettings) -> ClusterServer:
 
 
 async def stop_server(server: ClusterServer) -> None:
+    if server._task.done():  # noqa: SLF001 — idempotent: cleanup may run twice
+        return
     server._server.should_exit = True  # noqa: SLF001 (handle owns the server)
-    await server._task
+    try:
+        await asyncio.wait_for(server._task, timeout=5.0)
+    except TimeoutError:
+        # A lingering websocket/connection can keep the serve loop alive
+        # indefinitely; force it down rather than hang the caller forever.
+        server._task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await server._task

@@ -27,6 +27,7 @@ from dain_coordinator.assignments import (
     DemandTracker,
     ReadinessMap,
 )
+from dain_coordinator.client_ip import ClientIPMiddleware, trusted_proxy_ips
 from dain_coordinator.connections import NodeConnections
 from dain_coordinator.discovery import DiscoveryResponder
 from dain_coordinator.faults import FaultManager
@@ -112,6 +113,13 @@ def create_app(
             registry=registry,
             service=service,
         )
+        # S22 readiness: created before the dependent controllers so there is
+        # exactly ONE map shared by the assignment controller, the fault
+        # watchdog, `_on_disconnect`, and every API handler (a second instance
+        # would never see node drops and the scheduler would keep treating a
+        # disconnected node as provisioned).
+        readiness = ReadinessMap()
+        app.state.readiness = readiness
         ledger = Ledger(settings, registry, jobs)
 
         def recompute_pool_events(trigger: str) -> None:
@@ -147,7 +155,6 @@ def create_app(
                     recorder=placements,
                 )
 
-        readiness = ReadinessMap()
         demand = DemandTracker(window_s=app.state.settings.demand_window_s)
         assignments_service = AssignmentService(
             registry=registry,
@@ -155,6 +162,7 @@ def create_app(
             readiness=readiness,
             demand=demand,
             manifests_fn=lambda: _store_manifests(),
+            settings_getter=lambda: app.state.settings,
         )
 
         def _store_manifests() -> list[ModelManifest]:
@@ -181,6 +189,7 @@ def create_app(
         app.state.service = service
         app.state.readiness = readiness
         app.state.demand = demand
+        faults.readiness = readiness
         app.state.assignments = assignments_service
         app.state.connections = connections
         app.state.jobs = jobs
@@ -242,6 +251,11 @@ def create_app(
     app.state.settings = settings
     app.state.settings_path = settings_path
     app.state.discovery = None
+    # S24: resolve the real client IP ourselves (rightmost trusted-proxy hop)
+    # instead of uvicorn's first-entry rewriting, which client-supplied
+    # X-Forwarded-For values can spoof. The raw socket peer stays in
+    # scope["client"] for security decisions (tailnet keyless admin).
+    app.add_middleware(ClientIPMiddleware, trusted_ips=trusted_proxy_ips(settings.trusted_proxies))
     if settings.cors_origins:
         app.add_middleware(
             CORSMiddleware,

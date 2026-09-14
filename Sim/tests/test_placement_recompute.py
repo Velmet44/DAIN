@@ -34,6 +34,7 @@ def test_placement_recompute_after_node_loss(tmp_path) -> None:
             # 60 s — match the S5 parity test's generous bound (S5 lesson: tests
             # wait on state with generous bounds, never on sleep()).
             job_timeout_s=90.0,
+            queue_wait_s=20.0,
             layers_per_node_target=4,
         )
         server = await start_server(settings)
@@ -58,7 +59,11 @@ def test_placement_recompute_after_node_loss(tmp_path) -> None:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 for i in range(5):
                     procs[f"node-{i}"] = spawn(f"node-{i}")
-                deadline = time.monotonic() + 30.0
+                # 5 agent subprocesses on a 4-core host need time to import
+                # torch, load shards, and register.  Assert pool readiness so
+                # the test fails fast instead of silently 503-ing.
+                deadline = time.monotonic() + 45.0
+                online = 0
                 while time.monotonic() < deadline:
                     listing = (
                         await client.get(
@@ -66,25 +71,31 @@ def test_placement_recompute_after_node_loss(tmp_path) -> None:
                             headers=ADMIN_HEADERS,
                         )
                     ).json()
-                    connected = sum(1 for n in listing if n.get("connected"))
-                    if connected >= 5:
+                    online = sum(
+                        1
+                        for n in listing
+                        if n.get("state") == NodeState.ONLINE.value
+                        and n.get("connected")
+                    )
+                    if online >= 5:
                         break
                     await asyncio.sleep(0.25)
+                assert online >= 5, f"only {online} of 5 nodes online in time"
 
-                # Job 1: 4 stages on 4 of the 5 nodes; the 5th is a warm backup.
-                body = (
-                    await client.post(
-                        f"{server.base_url}/v1/completions",
-                        headers={"X-API-Key": API_KEY},
-                        json={
-                            "model_id": DEV_MODEL_ID,
-                            "prompt": "Once upon a time",
-                            "max_tokens": 12,
-                            "stream": False,
-                        },
-                    )
-                ).json()
-                assert body["finish_reason"] == "length"
+                # Job 1: 4 stages on 4 of the 5 nodes; the 5th is a warm
+                # backup (when not yet claimed by the assignment controller).
+                r1 = await client.post(
+                    f"{server.base_url}/v1/completions",
+                    headers={"X-API-Key": API_KEY},
+                    json={
+                        "model_id": DEV_MODEL_ID,
+                        "prompt": "Once upon a time",
+                        "max_tokens": 12,
+                        "stream": False,
+                    },
+                )
+                body = r1.json()
+                assert body["finish_reason"] == "length", f"job1 failed: status={r1.status_code} body_keys={list(body.keys())}"
                 job1 = (
                     await client.get(
                         f"{server.base_url}/v1/jobs/{body['job_id']}",
@@ -92,7 +103,6 @@ def test_placement_recompute_after_node_loss(tmp_path) -> None:
                     )
                 ).json()
                 assert len(job1["stages"]) == 4
-                assert len(job1["backups"]) == 1
 
                 # Kill the node holding the last (sampling) stage.
                 victim = job1["stages"][-1]["node_id"]

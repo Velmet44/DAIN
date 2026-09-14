@@ -5,6 +5,7 @@
  * dain:api_key, dain:model) are migrated on first load, then left alone. */
 
 import type { ClientSettings, Conversation } from "./types";
+import { defaultMaxTokens } from "./api";
 import { logInfo, logWarn } from "./logs";
 
 const CHATS_KEY = "dain:chats:v1";
@@ -31,10 +32,10 @@ export const DEFAULT_SYSTEM_PROMPT = [
 
 export function defaultSettings(url: string, apiKey: string, model: string): ClientSettings {
   return {
-    url,
+    url: url || "http://127.0.0.1:8000",
     apiKey,
     modelId: model,
-    maxTokens: 512,
+    maxTokens: defaultMaxTokens(),
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
     sendHistory: true,
   };

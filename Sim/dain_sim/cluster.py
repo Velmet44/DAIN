@@ -18,6 +18,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import signal
 import subprocess
@@ -34,6 +35,8 @@ from dain_node.shard_export import DEV_MODEL_ID, export_tiny_llama
 
 from dain_sim.dev import ADMIN_HEADERS, ADMIN_KEY, API_KEY, JOIN_TOKEN
 from dain_sim.server import start_server, stop_server
+
+log = logging.getLogger("dain.sim.cluster")
 
 
 @dataclass
@@ -68,6 +71,26 @@ def _graceful_stop(proc: subprocess.Popen) -> None:
             proc.send_signal(signal.CTRL_BREAK_EVENT)
     else:
         proc.terminate()
+
+
+def _stop_procs(procs: list[NodeProc]) -> None:
+    """Best-effort reap of every spawned agent (idempotent — safe in finally).
+
+    Gives each child a short window to deregister on the graceful signal, then
+    kills stragglers so a failed/chunked run never leaks live processes that
+    keep heartbeating (and on Windows keep their workdir files locked).
+    """
+    if not procs:
+        return
+    for proc in procs:
+        _graceful_stop(proc.process)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and any(p.process.poll() is None for p in procs):
+        time.sleep(0.1)
+    for proc in procs:
+        if proc.process.poll() is None:
+            with contextlib.suppress(OSError):
+                proc.process.kill()
 
 
 def _node_env(
@@ -118,17 +141,25 @@ def _print_result(
 async def _summarize(server, procs: list[NodeProc]) -> ClusterReport:
     async with httpx.AsyncClient(timeout=5.0) as client:
         for proc in procs:
-            detail = (
-                await client.get(
+            try:
+                resp = await client.get(
                     f"{server.base_url}/admin/nodes/{proc.node_id}",
                     headers=ADMIN_HEADERS,
                 )
-            ).json()
-            proc.final_state = detail["state"]
-            proc.transitions = len(detail["history"])
-            proc.heartbeats = (detail["last_seq"] or -1) + 1
-            proc.score = detail["score"]
-            reasons = [h["reason"] for h in detail["history"] if h["to_state"] == "offline"]
+                detail = resp.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                # Coordinator already down / non-JSON body: keep the entry rather
+                # than crash the whole health summary with a KeyError.
+                log.warning("summarize_node_failed node=%s err=%s", proc.node_id, exc)
+                detail = {}
+            proc.final_state = detail.get("state", "?")
+            history = detail.get("history") or []
+            proc.transitions = len(history)
+            proc.heartbeats = (detail.get("last_seq") or -1) + 1
+            proc.score = detail.get("score")
+            reasons = [
+                h.get("reason") for h in history if h.get("to_state") == "offline"
+            ]
             proc.shutdown_reason = reasons[-1] if reasons else None
 
     all_heartbeating = all(p.heartbeats > 0 for p in procs)
@@ -229,63 +260,72 @@ async def run_cluster(
 
     procs: list[NodeProc] = []
     python = sys.executable
-    for idx in range(nodes_n):
-        node_id = f"node-{idx:02d}"
-        workdir = os.path.join(workdir_root, node_id)
-        os.makedirs(workdir, exist_ok=True)
-        proc = subprocess.Popen(
-            [python, "-m", "dain_node"],
-            cwd=workdir,
-            env=_node_env(server.port, node_id, workdir, heartbeat_s, idx),
-            creationflags=_spawn_flags(),
-        )
-        procs.append(NodeProc(node_id=node_id, workdir=workdir, process=proc))
-        print(f"[cluster] spawned {node_id} pid={proc.pid}")
-
-    stop_at = time.monotonic() + duration_s
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            if chat:
-                if not await _wait_online(client, server.base_url):
-                    raise AssertionError("no node came ONLINE before the chat timeout")
-                print(f"[cluster] {nodes_n} nodes ready — piping /v1/completions")
-                await _chat(client, server.base_url, max_tokens)
-            else:
-                while time.monotonic() < stop_at:
-                    await asyncio.sleep(min(2.0, max(0.5, duration_s / 20)))
-                    response = await client.get(
-                        f"{server.base_url}/admin/nodes", headers=ADMIN_HEADERS
-                    )
-                    listing = response.json()
-                    states = {n["node_id"]: n["state"] for n in listing}
-                    online = sum(1 for s in states.values() if s == NodeState.ONLINE.value)
-                    time_left = stop_at - time.monotonic()
-                    print(f"[cluster] t-{time_left:5.0f}s online={online}/{nodes_n}")
-                    for proc in procs:
-                        if states.get(proc.node_id) == NodeState.OFFLINE.value:
-                            proc.saw_offline = True
-    except (httpx.HTTPError, OSError, AssertionError) as exc:
-        print(f"[cluster] ERROR: {exc}")
-        await stop_server(server)
-        _print_result(2, "chat/monitor failure", procs, keep_dir, workdir_root)
-        return 2
+        for idx in range(nodes_n):
+            node_id = f"node-{idx:02d}"
+            workdir = os.path.join(workdir_root, node_id)
+            os.makedirs(workdir, exist_ok=True)
+            proc = subprocess.Popen(
+                [python, "-m", "dain_node"],
+                cwd=workdir,
+                env=_node_env(server.port, node_id, workdir, heartbeat_s, idx),
+                creationflags=_spawn_flags(),
+            )
+            procs.append(NodeProc(node_id=node_id, workdir=workdir, process=proc))
+            print(f"[cluster] spawned {node_id} pid={proc.pid}")
 
-    # Graceful shutdown: agents deregister on SIGTERM/CTRL_BREAK.
-    for proc in procs:
-        _graceful_stop(proc.process)
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline and any(p.process.poll() is None for p in procs):
-        await asyncio.sleep(0.2)
-    for proc in procs:
-        if proc.process.poll() is None:
-            proc.process.kill()
-            print(f"[cluster] WARNING: {proc.node_id} ignored shutdown signal — killed")
-
-    report = await _summarize(server, procs)
-    await stop_server(server)
-    code = 0 if report.healthy else 1
-    _print_result(code, report.reason, report.nodes, keep_dir, workdir_root)
-    return code
+        stop_at = time.monotonic() + duration_s
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                if chat:
+                    if not await _wait_online(client, server.base_url):
+                        raise AssertionError("no node came ONLINE before the chat timeout")
+                    print(f"[cluster] {nodes_n} nodes ready — piping /v1/completions")
+                    await _chat(client, server.base_url, max_tokens)
+                else:
+                    while time.monotonic() < stop_at:
+                        await asyncio.sleep(min(2.0, max(0.5, duration_s / 20)))
+                        response = await client.get(
+                            f"{server.base_url}/admin/nodes", headers=ADMIN_HEADERS
+                        )
+                        listing = response.json()
+                        states = {n["node_id"]: n["state"] for n in listing}
+                        online = sum(1 for s in states.values() if s == NodeState.ONLINE.value)
+                        time_left = stop_at - time.monotonic()
+                        print(f"[cluster] t-{time_left:5.0f}s online={online}/{nodes_n}")
+                        for proc in procs:
+                            if states.get(proc.node_id) == NodeState.OFFLINE.value:
+                                proc.saw_offline = True
+        except (httpx.HTTPError, OSError, AssertionError) as exc:
+            print(f"[cluster] ERROR: {exc}")
+            code = 2
+            report = ClusterReport(False, "chat/monitor failure", procs)
+        else:
+            # Graceful shutdown: agents deregister on SIGTERM/CTRL_BREAK.
+            for proc in procs:
+                _graceful_stop(proc.process)
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and any(p.process.poll() is None for p in procs):
+                await asyncio.sleep(0.2)
+            for proc in procs:
+                if proc.process.poll() is None:
+                    proc.process.kill()
+                    print(f"[cluster] WARNING: {proc.node_id} ignored shutdown signal — killed")
+            try:
+                report = await _summarize(server, procs)
+            except (httpx.HTTPError, OSError) as exc:
+                print(f"[cluster] summarize failed: {exc}")
+                report = ClusterReport(False, "health summary unavailable", procs)
+            code = 0 if report.healthy else 1
+        _print_result(code, report.reason, report.nodes, keep_dir, workdir_root)
+        return code
+    finally:
+        # EVERY exit path reaps the agents and the coordinator: an exception /
+        # KeyboardInterrupt / CancelledError must not leak subprocesses that
+        # keep heartbeating (and, on Windows, keep their workdir files locked).
+        _stop_procs(procs)
+        with contextlib.suppress(Exception):
+            await stop_server(server)
 
 
 def main() -> int:

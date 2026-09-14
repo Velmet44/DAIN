@@ -304,6 +304,19 @@ class JobHandler:
         async with self._send_lock:
             await self.send_bytes(data)
 
+    async def _emit_activation(self, envelope: Envelope, payload: bytes) -> None:
+        """Send a relay header and its tensor payload under ONE lock acquisition.
+
+        Stages on the same node dispatch concurrent activations (a pipeline
+        job's entry relays `sampled_token` upstream while downstream stages
+        relay hidden activations forward). Sending header and bytes in two
+        separate locked ops lets another activation slip between them, so the
+        receiver would pair a header with the wrong tensor.
+        """
+        async with self._send_lock:
+            await self.send_envelope(envelope)
+            await self.send_bytes(payload)
+
     async def _status(self, rt: JobRuntime, state: JobState, detail: str | None = None) -> None:
         await self._emit(
             Envelope.wrap(
@@ -368,8 +381,10 @@ class JobHandler:
         if self._direct_target(rt, header.role) is not None:
             if await self._direct_send_activation(rt, header, tensor_bytes):
                 return
-        await self._emit(Envelope.wrap(MessageType.ACTIVATION_RELAY, header, ts=time.time()))
-        await self._emit_bytes(tensor_bytes)
+        await self._emit_activation(
+            Envelope.wrap(MessageType.ACTIVATION_RELAY, header, ts=time.time()),
+            tensor_bytes,
+        )
 
     def _direct_target(self, rt: JobRuntime, role: str) -> StageAssignment | None:
         """The next hop's StageAssignment when direct relay can apply."""
@@ -538,8 +553,32 @@ class JobHandler:
             else:
                 log.warning("activation_for_unknown_job job=%s", header.job_id)
             return
-        if rt.first and header.role == "sampled_token":
-            await rt.inbound.put((header, payload))
+        # Stage-consistency guard (defense in depth): `self.jobs` keys by job_id
+        # only, so if one node ever hosts two stages of the same job, both would
+        # resolve to the SAME runtime and a misdelivered activation would be
+        # processed by the wrong stage. Reject loudly instead of corrupting the
+        # tensor stream.
+        if header.role == "sampled_token":
+            if rt.first:
+                await rt.inbound.put((header, payload))
+            else:
+                # A token return is only ever addressed to the entry stage;
+                # feeding it to a mid/last-stage `_run_step` would reinterpret
+                # the int64 as a float hidden tensor and poison the pipeline.
+                log.warning(
+                    "sampled_token_misrouted job=%s my_stage=%d first=%s",
+                    header.job_id,
+                    rt.job.my_stage_idx,
+                    rt.first,
+                )
+            return
+        if header.role == "hidden" and header.stage_idx != rt.job.my_stage_idx - 1:
+            log.warning(
+                "hidden_misrouted job=%s from_stage=%d my_stage=%d",
+                header.job_id,
+                header.stage_idx,
+                rt.job.my_stage_idx,
+            )
             return
         # Acknowledge receipt so the sender can drop its replay buffer (S7).
         await self._status(rt, JobState.RUNNING, detail="step_ack")
@@ -611,8 +650,10 @@ class JobHandler:
             )
             if status == 200:
                 return
-        await self._emit(Envelope.wrap(MessageType.ACTIVATION_RELAY, replayed, ts=time.time()))
-        await self._emit_bytes(payload)
+        await self._emit_activation(
+            Envelope.wrap(MessageType.ACTIVATION_RELAY, replayed, ts=time.time()),
+            payload,
+        )
 
     # -- stage execution --------------------------------------------------------------
 

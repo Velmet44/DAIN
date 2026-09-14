@@ -6,6 +6,7 @@ while non-entry reassigns keep the completed prefix and replay via STAGE_RETRY.
 from __future__ import annotations
 
 import asyncio
+import time
 
 from dain_common.schemas import (
     JobState,
@@ -65,8 +66,11 @@ class StubService:
     def __init__(self) -> None:
         self.busy: list[str] = []
 
-    def mark_busy(self, node_id: str) -> None:
+    def mark_busy(self, node_id: str) -> bool:
+        if node_id in self.busy:
+            return False  # mirrors NodeService: ONLINE→BUSY transition rejected
         self.busy.append(node_id)
+        return True
 
 
 def make_fault_manager() -> tuple[FaultManager, StubConnections, JobRecord]:
@@ -171,3 +175,81 @@ def test_non_entry_reassign_keeps_prefix_and_replays() -> None:
     assert len(retry) == 1 and retry[0].payload["stage_idx"] == 2
     assert conn.sent[0][0] == "node-8"  # assign to replacement
     assert any(n == "node-1" for n, _ in conn.sent)  # replay request to upstream (stage 1)
+
+
+def test_replica_reassign_moves_anchor_and_resets_transcript() -> None:
+    faults, conn, job = make_fault_manager()
+    replica_stage = StageAssignment(
+        stage_idx=0, node_id="node-0", shard_id="layers_00_15", layer_start=0, layer_end=15
+    )
+    job.serving_mode = "replica"
+    job.stages = (replica_stage,)
+    job.node_id = "node-0"
+    job.tokens = ["old", "attempt"]
+    job.last_token_at = time.time()
+    job.first_token_at = time.time()
+    client_queue = faults.jobs.attach(job.job_id)  # the SSE consumer's drain queue
+
+    async def scenario() -> None:
+        faults._reassign(job, 0, reason="node_lost")
+        await asyncio.sleep(0.05)
+
+    _run(scenario())
+
+    assert job.state == JobState.RETRYING
+    assert job.retries == {0: 1}
+    assert job.attempt_nodes[(0, 0)] == "node-0"
+    assert job.stages[0].node_id == "node-8"
+    assert job.node_id == "node-8"  # anchor follows the replacement
+    assert job.tokens == []  # regenerated transcript — reset frame told the client
+    assert job.last_token_at is None
+    frames = [e for _, e in conn.sent if e.type == MessageType.JOB_ASSIGN]
+    assert len(frames) == 1
+    assert frames[0].payload["my_stage_idx"] == 0
+    assert frames[0].payload["prompt"] == "Once upon a time"
+    assert frames[0].payload["stages"][0]["node_id"] == "node-8"
+    queued: list[dict] = []
+    while not client_queue.empty():
+        queued.append(client_queue.get_nowait())
+    assert any(f.get("type") == "reset" for f in queued)
+
+
+def test_replica_reassign_no_free_backup_fails_job() -> None:
+    faults, conn, job = make_fault_manager()
+    job.serving_mode = "replica"
+    job.stages = (
+        StageAssignment(
+            stage_idx=0, node_id="node-0", shard_id="layers_00_15", layer_start=0, layer_end=15
+        ),
+    )
+    job.backups = ()
+    conn.connected.clear()
+
+    async def scenario() -> None:
+        faults._reassign(job, 0, reason="node_lost")
+        await asyncio.sleep(0.05)
+
+    _run(scenario())
+
+    assert job.state == JobState.FAILED
+    assert "no backup node" in (job.error or "")
+
+
+def test_reassign_rejects_replacement_that_raced_busy() -> None:
+    faults, conn, job = make_fault_manager()
+    job.state = JobState.RUNNING
+    job.first_token_at = 1.0
+    faults.service.busy = ["node-8"]  # already claimed by another pipeline job
+
+    async def scenario() -> None:
+        faults._reassign(job, 2, reason="watchdog")
+        await asyncio.sleep(0.05)
+
+    _run(scenario())
+
+    # The raced replacement must NOT be appended to this job's busy set (the
+    # terminal edge would release a hold that belongs to the other job).
+    assert job.busy_nodes == []
+    assert job.state == JobState.FAILED
+    assigns = [e for _, e in conn.sent if e.type == MessageType.JOB_ASSIGN]
+    assert assigns == []

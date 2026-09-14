@@ -80,7 +80,7 @@ echo.
 echo ============================================
 echo   Summary
 echo ============================================
-echo   Cache items removed: %DELETED_COUNT%
+echo   Cache items removed: !DELETED_COUNT!
 echo   .venv environments and sqlite databases were kept.
 echo.
 pause

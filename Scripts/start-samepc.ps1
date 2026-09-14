@@ -77,7 +77,7 @@ function Exec-Component {
         }
         "client" {
             if (-not $env:VITE_API_URL) { $env:VITE_API_URL = "http://localhost:8000" }
-            if (-not $env:VITE_API_KEY) { $env:VITE_API_KEY = "DzOjEXqs" }
+            if (-not $env:VITE_API_KEY) { $env:VITE_API_KEY = $script:ConfigDefaults.api_key }
             Write-Host "=== DAIN Web Client ===" -ForegroundColor Magenta
             Push-Location (Join-Path $script:Root "Client")
             try {

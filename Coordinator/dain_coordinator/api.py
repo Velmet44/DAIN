@@ -115,11 +115,16 @@ _TAILNET_NET = ipaddress.ip_network("100.64.0.0/10")
 def _tailnet_trusted(request: Request) -> bool:
     """True for requests arriving from inside the operator's Tailscale network.
 
-    Only meaningful when `admin_keyless_tailnet` is enabled. The public funnel
-    path can never impersonate this: funnel visitors arrive from the local
-    proxy (127.0.0.1), outside the tailnet range. The Origin guard mirrors
-    `_local_trusted`: drive-by cross-site requests always carry an Origin and
-    are rejected unless it is a loopback/100.x/`*.ts.net` origin.
+    Only meaningful when `admin_keyless_tailnet` is enabled. Hardened three
+    ways:
+    - the RAW socket peer must be a tailnet address (ClientIPMiddleware keeps
+      the raw peer in `scope["client"]`; a proxied visitor's spoofed
+      X-Forwarded-For only affects `state.client_ip`, never this check);
+    - the Host header must be a `*.ts.net` name, a tailnet IP, or loopback —
+      a DNS-rebinding domain re-resolved to a tailnet IP carries the
+      attacker's own hostname and is rejected;
+    - the Origin guard: drive-by cross-site requests always carry an Origin
+      and are rejected unless it is a loopback/100.x/`*.ts.net` origin.
     """
     client = request.client
     if client is None:
@@ -129,6 +134,18 @@ def _tailnet_trusted(request: Request) -> bool:
     except ValueError:
         return False
     if peer not in _TAILNET_NET:
+        return False
+    host_header = (request.headers.get("host") or "").lower()
+    host_name = host_header.rsplit(":", 1)[0]
+    host_ok = False
+    if host_name.endswith(".ts.net"):
+        host_ok = True
+    else:
+        try:
+            host_ok = ipaddress.ip_address(host_name) in _TAILNET_NET
+        except ValueError:
+            host_ok = host_name in ("127.0.0.1", "localhost", "::1")
+    if not host_ok:
         return False
     origin = request.headers.get("origin")
     if origin:
@@ -1322,7 +1339,9 @@ async def completions(payload: CompletionRequest, request: Request):
     jobs: JobTracker = request.app.state.jobs
     connections = request.app.state.connections
     limiter = request.app.state.rate_limiter
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = getattr(request.state, "client_ip", None) or (
+        request.client.host if request.client else "unknown"
+    )
     if not limiter.allow(f"{client_ip}:{request.headers.get('x-api-key', '')}"):
         raise HTTPException(
             status_code=429,
@@ -1345,7 +1364,6 @@ async def completions(payload: CompletionRequest, request: Request):
     service = _service(request)
     readiness = request.app.state.readiness
     demand = request.app.state.demand
-    demand.record(payload.model_id)
 
     def _active_sessions() -> dict[str, int]:
         counts: Counter[str] = Counter()
@@ -1406,9 +1424,15 @@ async def completions(payload: CompletionRequest, request: Request):
         if found_plan.serving_mode == "pipeline":
             # Exclusive execution for pipeline stages (multi-node chaining);
             # replica jobs share their node with other sessions (S22d).
-            busy_nodes = [s.node_id for s in stages]
-            for node_id in busy_nodes:
-                service.mark_busy(node_id)
+            for node_id in (s.node_id for s in stages):
+                if service.mark_busy(node_id):
+                    busy_nodes.append(node_id)
+            if len(busy_nodes) != len(stages):
+                # Another request claimed a stage node between planning and
+                # dispatch — release what we marked and surface the conflict.
+                for node_id in busy_nodes:
+                    service.release_node(node_id)
+                raise _DispatchError("pipeline node was claimed by another request")
 
         record = jobs.create(
             payload.model_id,
@@ -1422,6 +1446,7 @@ async def completions(payload: CompletionRequest, request: Request):
             api_key=api_key,
             backups=found_plan.backups,
             serving_mode=found_plan.serving_mode,
+            busy_nodes=list(busy_nodes),
         )
         params = GenerationParams(
             max_tokens=payload.max_tokens,
@@ -1454,52 +1479,62 @@ async def completions(payload: CompletionRequest, request: Request):
                 jobs.fail_job(record.job_id, "stage node connection lost before dispatch")
                 raise _DispatchError("stage node connection lost")
         jobs.mark_dispatched(record.job_id, stages[0].node_id, routed)
+        # Demand feeds the assignment controller's adaptive replica scaling and
+        # must be recorded for every *successfully dispatched* request, on every
+        # path (immediate plan, queued, streamed, non-streamed) — one site.
+        demand.record(payload.model_id)
         return record, queue, busy_nodes
 
 
     record = None
     queue = None
     busy_nodes: list[str] = []
+    if plan is not None:
+        try:
+            record, queue, busy_nodes = await _dispatch(plan)
+        except _DispatchError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
 
     async def event_stream():
         nonlocal plan, record, queue, busy_nodes
         try:
             loop = asyncio.get_running_loop()
-            if plan is None:
-                # S22c: hold the request open with honest status frames while
-                # nodes provision / free up, instead of failing immediately.
-                wait_until = loop.time() + settings.queue_wait_s
-                while plan is None and loop.time() < wait_until:
-                    if not _rows():
-                        break  # nobody connected: nothing can become ready
-                    yield _sse({"type": "status", "stage": "queued"})
-                    await asyncio.sleep(1.0)
-                    plan = try_plan()
-                    if plan is None:
-                        downloading = readiness.any_downloading(payload.model_id)
-                        if downloading is not None and downloading.progress is not None:
-                            yield _sse(
-                                {
-                                    "type": "status",
-                                    "stage": "provisioning",
-                                    "progress": round(downloading.progress, 3),
-                                }
-                            )
+            if record is None:
                 if plan is None:
-                    yield _sse(
-                        {
-                            "type": "error",
-                            "detail": "no node could serve this model in time",
-                        }
-                    )
+                    # S22c: hold the request open with honest status frames while
+                    # nodes provision / free up, instead of failing immediately.
+                    wait_until = loop.time() + settings.queue_wait_s
+                    while plan is None and loop.time() < wait_until:
+                        if not _rows():
+                            break  # nobody connected: nothing can become ready
+                        yield _sse({"type": "status", "stage": "queued"})
+                        await asyncio.sleep(1.0)
+                        plan = try_plan()
+                        if plan is None:
+                            downloading = readiness.any_downloading(payload.model_id)
+                            if downloading is not None and downloading.progress is not None:
+                                yield _sse(
+                                    {
+                                        "type": "status",
+                                        "stage": "provisioning",
+                                        "progress": round(downloading.progress, 3),
+                                    }
+                                )
+                    if plan is None:
+                        yield _sse(
+                            {
+                                "type": "error",
+                                "detail": "no node could serve this model in time",
+                            }
+                        )
+                        yield "data: [DONE]\n\n"
+                        return
+                try:
+                    record, queue, busy_nodes = await _dispatch(plan)
+                except _DispatchError as exc:
+                    yield _sse({"type": "error", "detail": str(exc)})
                     yield "data: [DONE]\n\n"
                     return
-            try:
-                record, queue, busy_nodes = await _dispatch(plan)
-            except _DispatchError as exc:
-                yield _sse({"type": "error", "detail": str(exc)})
-                yield "data: [DONE]\n\n"
-                return
             yield _sse({"job_id": record.job_id, "status": "dispatched"})
             deadline = asyncio.get_running_loop().time() + settings.job_timeout_s
             while True:
@@ -1520,12 +1555,18 @@ async def completions(payload: CompletionRequest, request: Request):
                     break
             yield "data: [DONE]\n\n"
         finally:
-            if record.state not in (JobState.COMPLETED, JobState.FAILED):
-                # Client went away mid-stream: reach a terminal state so the
-                # ledger fires exactly once and the watchdog stops restarting
-                # a job nobody is reading (nodes are freed by _release below).
-                jobs.fail_job(record.job_id, "client disconnected")
-            _release(request, busy_nodes)
+            if record is not None:
+                if record.state not in (JobState.COMPLETED, JobState.FAILED):
+                    # Client went away mid-stream: reach a terminal state so the
+                    # ledger fires exactly once and the watchdog stops restarting
+                    # a job nobody is reading.
+                    jobs.fail_job(record.job_id, "client disconnected")
+                # Release every BUSY node this job holds, including watchdog
+                # reassignment replacements (tracked on the record).
+                for node_id in set(record.busy_nodes) | set(busy_nodes):
+                    service.release_node(node_id)
+                # The generator is done: detach so `_evict` can retire the job.
+                jobs.detach(record.job_id)
 
     if payload.stream:
         return StreamingResponse(
@@ -1534,23 +1575,30 @@ async def completions(payload: CompletionRequest, request: Request):
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     # Non-streaming: wait for placement (no frames), dispatch, drain to final.
-    if plan is None:
-        wait_until = asyncio.get_running_loop().time() + settings.queue_wait_s
-        while plan is None and asyncio.get_running_loop().time() < wait_until:
-            if not _rows():
-                break  # nobody connected: nothing can become ready
-            await asyncio.sleep(0.5)
-            plan = try_plan()
+    if record is not None:
+        # A plan existed at admission and was dispatched eagerly above — reuse
+        # that record instead of dispatching a second time (which would trip the
+        # busy-node conflict for pipeline plans and orphan a second replica
+        # queue). Mirrors the stream path's `if record is None:` guard.
+        pass
+    else:
         if plan is None:
-            raise HTTPException(
-                status_code=503,
-                detail="no node could serve this model in time",
-                headers={"Retry-After": "5"},
-            )
-    try:
-        record, queue, busy_nodes = await _dispatch(plan)
-    except _DispatchError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from None
+            wait_until = asyncio.get_running_loop().time() + settings.queue_wait_s
+            while plan is None and asyncio.get_running_loop().time() < wait_until:
+                if not _rows():
+                    break  # nobody connected: nothing can become ready
+                await asyncio.sleep(0.5)
+                plan = try_plan()
+            if plan is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="no node could serve this model in time",
+                    headers={"Retry-After": "5"},
+                )
+        try:
+            record, queue, busy_nodes = await _dispatch(plan)
+        except _DispatchError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from None
 
     text_parts: list[str] = []
     final: dict = {}
@@ -1574,7 +1622,9 @@ async def completions(payload: CompletionRequest, request: Request):
     finally:
         if record.state not in (JobState.COMPLETED, JobState.FAILED):
             jobs.fail_job(record.job_id, "client disconnected")
-        _release(request, busy_nodes)
+        for node_id in set(record.busy_nodes) | set(busy_nodes):
+            service.release_node(node_id)
+        jobs.detach(record.job_id)
     return {
         "job_id": record.job_id,
         "text": "".join(text_parts),

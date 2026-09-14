@@ -93,7 +93,9 @@ function fetchWithTimeout(
 }
 
 export function defaultApiUrl(): string {
-  return import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+  // "" (not the localhost fallback) tells loadSettings that no env default was
+  // baked in, so a previously stored coordinator URL must win.
+  return import.meta.env.VITE_API_URL || "";
 }
 
 export function defaultApiKey(): string {
@@ -232,8 +234,19 @@ export async function streamCompletion(
     if (!resp.ok) {
       let detail = `HTTP ${resp.status}`;
       try {
-        const body = (await resp.json()) as { detail?: string };
-        if (body.detail) detail = body.detail;
+        const body = (await resp.json()) as { detail?: unknown };
+        if (Array.isArray(body.detail)) {
+          // FastAPI 422 validation errors: [{loc, msg, type}, ...]
+          const items = body.detail
+            .map(
+              (d: { loc?: unknown[]; msg?: string }) =>
+                `${(d.loc ?? []).at(-1) ?? "body"}: ${d.msg ?? "invalid"}`,
+            )
+            .join("; ");
+          if (items) detail = items;
+        } else if (typeof body.detail === "string") {
+          detail = body.detail;
+        }
       } catch {
         /* empty body */
       }
@@ -246,6 +259,7 @@ export async function streamCompletion(
     let buffer = "";
     let frames = 0;
     let tokens = 0;
+    let sawDone = false;
     for (;;) {
       armIdle();
       const { done, value } = await reader.read();
@@ -258,6 +272,7 @@ export async function streamCompletion(
         if (!line.startsWith("data: ")) continue;
         const payload = line.slice("data: ".length).trim();
         if (payload === "[DONE]") {
+          sawDone = true;
           logOk(`stream complete: ${frames} frames, ${tokens} tokens`);
           return;
         }
@@ -281,6 +296,11 @@ export async function streamCompletion(
         onFrame(frame);
       }
     }
+    // Server closed the body: without an explicit [DONE] the stream was cut
+    // short (proxy drop, coordinator crash), so do not surface a partial reply
+    // as a successful completion.
+    if (!sawDone) throw new Error("stream ended before [DONE] (truncated)");
+    if (buffer.trim()) throw new Error("stream ended mid-frame (truncated)");
   } catch (err) {
     if (timedOut) throw new Error(`stream idle timeout (no data for ${STREAM_IDLE_TIMEOUT_MS}ms)`);
     throw err;

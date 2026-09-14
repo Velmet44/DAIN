@@ -53,6 +53,7 @@ class FaultManager:
         connections,
         registry,
         service,
+        readiness=None,
     ) -> None:
         # Accept either a snapshot or a getter so admin edits to runtime settings
         # (layers_per_node_target, max_job_restarts, …) apply live instead of
@@ -64,6 +65,9 @@ class FaultManager:
         self.connections = connections
         self.registry = registry
         self.service = service
+        # Optional ReadinessMap: replacements prefer nodes that already hold
+        # the model (files_ready/warm) over unprovisioned ones.
+        self.readiness = readiness
 
     @property
     def settings(self) -> CoordinatorSettings:
@@ -138,11 +142,13 @@ class FaultManager:
             job.stage_started_at.pop(stage_idx, None)
             job.stage_finished_at.pop(stage_idx, None)
             job.stage_last_activity[stage_idx] = now
+        job.tokens.clear()
         job.last_token_at = None
         job.first_token_at = None
         job.restarts += 1
         job.dispatched_at = now
         job.state = JobState.DISPATCHED
+        self.jobs._push(job, {"type": "reset", "job_id": job.job_id})
         # Re-fire JOB_ASSIGN for every stage of the current placement; stage 0
         # carries the prompt so the graph starts over (nodes replace their
         # runtime for the same job_id, so repeat assigns are safe).
@@ -162,7 +168,12 @@ class FaultManager:
             self._fire(MessageType.JOB_ASSIGN, assign, stage.node_id)
 
     def _pick_replacement(self, job: JobRecord, failed_node: str) -> str | None:
-        """A warm backup that is ONLINE, connected, and free for this job."""
+        """A backup that is ONLINE, connected, and free for this job.
+
+        Nodes that already hold the model (readiness files_ready/warm) rank
+        ahead of unprovisioned ones — a replacement without the shards turns
+        'instant failover' into a multi-GB fetch mid-request.
+        """
         current = {s.node_id for s in job.stages}
         dark = set(current) | {failed_node}
         candidates = [n for n in job.backups if n not in dark]
@@ -171,7 +182,14 @@ class FaultManager:
             if row.node_id not in seen:
                 candidates.append(row.node_id)
                 seen.add(row.node_id)
-        for cand in candidates:
+
+        def ready(node_id: str) -> int:
+            if self.readiness is None:
+                return 0
+            return 0 if self.readiness.schedulable(node_id, job.model_id) else 1
+
+        ordered = sorted(set(candidates), key=lambda n: (ready(n), n))
+        for cand in ordered:
             row = self.registry.get_node(cand)
             if (
                 row is not None
@@ -183,6 +201,66 @@ class FaultManager:
 
     def _reassign(self, job: JobRecord, stage_idx: int, *, reason: str) -> None:
         if job.state in (JobState.COMPLETED, JobState.FAILED):
+            return
+        # Replica jobs are single-stage: a lost node is healed by moving the
+        # whole stage to a backup (prompt rides the re-fired JOB_ASSIGN), not
+        # by restarting on the dead node. The regeneration restarts the
+        # transcript, so the client is told to reset its accumulated text.
+        if stage_idx == 0 and job.serving_mode == "replica":
+            replacement = self._pick_replacement(job, job.stages[0].node_id)
+            if replacement is None:
+                log.warning(
+                    "no_replacement job=%s replica node=%s", job.job_id, job.stages[0].node_id
+                )
+                self.jobs.fail_job(job.job_id, f"no backup node for replica ({reason})")
+                return
+            attempts = job.retries.get(0, 0)
+            if attempts >= self.settings.max_stage_attempts:
+                self.jobs.fail_job(job.job_id, f"replica exhausted retries ({reason})")
+                return
+            failed_node = job.stages[0].node_id
+            job.retries[0] = attempts + 1
+            job.attempt_nodes[(0, attempts)] = failed_node
+            job.stages = tuple(
+                s.model_copy(update={"node_id": replacement}) if s.stage_idx == 0 else s
+                for s in job.stages
+            )
+            job.state = JobState.RETRYING
+            # The whole (single) stage now runs on the replacement; move the
+            # anchor so session accounting (_active_sessions), fail_jobs_of_node
+            # and the admin job view attribute the work to the live node.
+            job.node_id = replacement
+            log.warning(
+                "replica_reassign job=%s node=%s->%s attempt=%d reason=%s",
+                job.job_id,
+                failed_node,
+                replacement,
+                attempts + 1,
+                reason,
+            )
+            job.tokens.clear()
+            job.last_token_at = None
+            job.first_token_at = None
+            self.jobs._push(
+                job, {"type": "reset", "job_id": job.job_id}
+            )
+            self._fire(
+                MessageType.JOB_ASSIGN,
+                JobAssign(
+                    job_id=job.job_id,
+                    model_id=job.model_id,
+                    my_stage_idx=0,
+                    stages=job.stages,
+                    prompt=job.prompt,
+                    params=GenerationParams(
+                        max_tokens=int(job.params.get("max_tokens", 64)),
+                        temperature=float(job.params.get("temperature", 0.0)),
+                        seed=job.params.get("seed"),
+                    ),
+                ),
+                replacement,
+            )
+            job.stage_last_activity[0] = time.time()
             return
         # Entry stage (0): the KV prefix chain starts at the prompt, so a lone
         # entry reassign cannot resume — live downstream stages still hold caches
@@ -247,7 +325,19 @@ class FaultManager:
         if job.serving_mode != "replica":
             # Pipeline jobs keep exclusive BUSY semantics; replica jobs share
             # the node with other sessions (load is a metric, S22d).
-            self.service.mark_busy(replacement)
+            if not self.service.mark_busy(replacement):
+                # The replacement raced to BUSY/offline between _pick_replacement
+                # and now. Assigning anyway would stack two pipeline jobs on one
+                # node, and tracking it as ours would make the terminal edge
+                # release a hold that belongs to another job. Fail cleanly.
+                log.warning(
+                    "replacement_claim_failed job=%s replacement=%s", job.job_id, replacement
+                )
+                self.jobs.fail_job(
+                    job.job_id, f"replacement {replacement} no longer free for stage {stage_idx}"
+                )
+                return
+            job.busy_nodes.append(replacement)
 
         assign = JobAssign(
             job_id=job.job_id,

@@ -63,6 +63,9 @@ class JobRecord:
     # stays ONLINE; its load is a metric, not a state). "pipeline" jobs keep
     # the exclusive BUSY semantics.
     serving_mode: str = "pipeline"
+    # Nodes currently held BUSY for this job (pipeline stages; extended by
+    # watchdog reassignments) — released exactly once at the terminal edge.
+    busy_nodes: list[str] = field(default_factory=list)
     attempt_nodes: dict[tuple[int, int], str] = field(default_factory=dict)
 
 
@@ -117,6 +120,7 @@ class JobTracker:
         api_key: str | None = None,
         backups: tuple[str, ...] = (),
         serving_mode: str = "pipeline",
+        busy_nodes: list[str] | None = None,
     ) -> JobRecord:
         job_id = uuid.uuid4().hex[:12]
         record = JobRecord(
@@ -128,6 +132,7 @@ class JobTracker:
             api_key=api_key,
             backups=backups,
             serving_mode=serving_mode,
+            busy_nodes=list(busy_nodes or []),
         )
         self.jobs[job_id] = record
         self._order.append(job_id)
@@ -150,6 +155,8 @@ class JobTracker:
                 job = self.jobs[job_id]
                 if job.state not in (JobState.COMPLETED, JobState.FAILED):
                     continue
+                if job.queue is not None:
+                    continue  # a live SSE generator still drains this job
                 finished_at = job.finished_at or job.created_at
                 if now - finished_at > self._job_ttl_s:
                     del self.jobs[job_id]
@@ -185,6 +192,19 @@ class JobTracker:
         queue: asyncio.Queue = asyncio.Queue(maxsize=4096)
         self.jobs[job_id].queue = queue
         return queue
+
+    def detach(self, job_id: str) -> None:
+        """Release the SSE drain queue once its consumer exits.
+
+        `_evict` deliberately keeps any terminal record with a non-null queue so
+        a live generator can finish draining; without this call every dispatched
+        job would be pinned in the history forever (unbounded growth on a
+        long-lived coordinator). Frames pushed after detach are dropped — the
+        record is terminal, so nothing valid arrives.
+        """
+        job = self.jobs.get(job_id)
+        if job is not None:
+            job.queue = None
 
     def get(self, job_id: str) -> JobRecord | None:
         return self.jobs.get(job_id)
@@ -242,7 +262,7 @@ class JobTracker:
         self, job_id: str, stage_idx: int, state: JobState, tokens_done: int, detail: str | None
     ) -> None:
         job = self.jobs.get(job_id)
-        if job is None:
+        if job is None or job.state == JobState.FAILED:
             return
         job.stage_last_activity[stage_idx] = time.time()
         if state == JobState.RUNNING and job.state in (
@@ -304,6 +324,8 @@ class JobTracker:
                 batch.finish_reason,
                 len(job.tokens),
             )
+            if job.state == JobState.FAILED:
+                return  # _push overflow inside a prior frame already failed it
             job.finish_reason = batch.finish_reason or "length"
             job.finished_at = time.time()
             # The streaming final is the terminal edge of the reporting stage
