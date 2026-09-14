@@ -95,7 +95,9 @@ def test_placement_recompute_after_node_loss(tmp_path) -> None:
                     },
                 )
                 body = r1.json()
-                assert body["finish_reason"] == "length", f"job1 failed: status={r1.status_code} body_keys={list(body.keys())}"
+                assert body["finish_reason"] == "length", (
+                    f"job1 failed: status={r1.status_code} body_keys={list(body.keys())}"
+                )
                 job1 = (
                     await client.get(
                         f"{server.base_url}/v1/jobs/{body['job_id']}",

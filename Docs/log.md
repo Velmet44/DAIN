@@ -1731,3 +1731,7 @@ Scripts:
 
 Gates: Coordinator 164 + Common 66 + Node 97 + Sim 21 passed; ruff clean in
 all Python packages; Client `npm run build` green. Commit + push pending.
+
+CI: the pushed run's Sim job (tests only) passed; after push, CI flagged one
+ruff E501 in Sim/tests/test_placement_recompute.py (my added assert message)
+which a local Sim ruff run had missed - wrapped the message, Sim ruff green.
