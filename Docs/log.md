@@ -1753,3 +1753,15 @@ which a local Sim ruff run had missed - wrapped the message, Sim ruff green.
 - No code touched: no pytest/ruff/build gates apply to this change.
 - License decision (MIT vs Apache-2.0 vs none) intentionally deferred by the
   owner; FUNDING/CONTRIBUTING do not depend on it.
+
+## 2026-09-14 - README top rewrite: try-first, non-technical friendly
+
+- Replaced the title block + support section intro with a try-first pitch:
+  plain-language tagline ("split across your everyday computers"), a
+  non-technical 3-line pitch, and a "Try it now" section with three
+  one-click paths: the live Pages web app, the latest DainNode release
+  (v1.0.0), and the local quick start anchor.
+- Kept docs links (spec/roadmap/log) and the support/funding section below
+  the pitch. No code touched - no test gates apply.
+- Goal: a low-technical-knowledge visitor understands what DAIN does and can
+  try it in one click, which is the top-of-funnel for stars + node operators.

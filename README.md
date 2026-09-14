@@ -1,11 +1,26 @@
-# DAIN — Decentralized AI Inference Network
+# DAIN — One big model, split across your everyday computers
 
-A coordinator-orchestrated inference network that partitions one large model
-( dense or MoE ) across 8–16 independent, heterogeneous compute nodes.
+Ask it anything, and the answer comes from a model too large for any single
+machine — because DAIN chains your laptop, old PC, home server, and spare GPUs
+into one private inference cluster. **8–16 ordinary machines** (Windows and
+Linux, mixed speeds, even behind NAT or on Wi-Fi) pool their memory and
+compute to run the model together.
 
-- Specification: [Docs/spec.md](Docs/spec.md)
-- Development stages: [Docs/stages.md](Docs/stages.md)
-- Work log: [Docs/log.md](Docs/log.md)
+**No data center. No big cloud. No per-token fees. Just your own hardware.**
+
+## Try it now
+
+- **Chat in your browser, instantly** — open the
+  [DAIN Web App](https://velmet44.github.io/DAIN/), no install and no signup.
+  Enter a coordinator's address in the chat tab and start typing.
+- **Donate your machine as a node** — download the latest
+  [DainNode](https://github.com/Velmet44/DAIN/releases/tag/v1.0.0), run it, and
+  your idle PC helps serve the model alongside everyone else's. That's the
+  whole idea: every machine makes the network smarter.
+- **Run an entire cluster on one PC** — gone in one script:
+  [Quick start](#quick-start-same-pc-web-interface).
+
+- Docs: [specification](Docs/spec.md) · [roadmap](Docs/stages.md) · [work log](Docs/log.md)
 
 ## Support, funding & contributing
 
