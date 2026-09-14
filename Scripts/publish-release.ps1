@@ -100,6 +100,16 @@ if ($existingTag -eq $tag) {
         exit 1
     }
     Write-Host "  Tag $tag already exists, deleting remote tag (-Force)..."
+    # Remove any existing GitHub release first — gh release create fails with
+    # "already exists" if one is still attached to the tag.
+    $releaseExists = gh release view $tag --json tagName 2>$null
+    if ($LASTEXITCODE -eq 0) {
+        gh release delete $tag --yes
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "  Failed to delete existing release $tag" -ForegroundColor Red
+            exit 1
+        }
+    }
     git tag -d $tag
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 1) {
         Write-Host "  Failed to delete local tag" -ForegroundColor Red

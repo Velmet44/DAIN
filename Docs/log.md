@@ -1765,3 +1765,25 @@ which a local Sim ruff run had missed - wrapped the message, Sim ruff green.
   the pitch. No code touched - no test gates apply.
 - Goal: a low-technical-knowledge visitor understands what DAIN does and can
   try it in one click, which is the top-of-funnel for stars + node operators.
+
+## 2026-09-14 - Auto node release workflow (replace-latest semantics)
+
+- New `.github/workflows/release-node.yml` ("Release DainNode"): runs on
+  windows-latest whenever a push to main touches Node/** (node code), Common/**
+  (node depends on dain-common), the build/publish scripts, or the workflow
+  itself; also workflow_dispatch for manual rebuilds.
+- Semantics: reads the version from Node/dain_node/__init__.py. If a git tag
+  v<version> already exists the run REBUILDS and REPLACES that release/tag
+  (publish-release.ps1 -Force) so "latest" always tracks the newest node code
+  without version bumps. If the version was bumped the tag does not exist and
+  a new tag+release is created normally. Concurrency group serializes release
+  builds; permissions = contents:write.
+- Node runs on a Windows runner because the artifact is a onefile PyInstaller
+  bundle (torch bundled) - a Linux runner cannot produce it. Test+lint gate
+  re-runs inside the job (Windows), then publish-release.ps1 builds, tags and
+  creates the release exactly as the manual flow does.
+- `publish-release.ps1` -Force now also deletes the existing GitHub release
+  before re-tagging (previously only the git tag was deleted, so
+  `gh release create` would fail with "already exists" on a re-publish).
+- Manual release with a new version still works unchanged:
+  `Scripts\publish-release.ps1 -Version X.Y.Z`.

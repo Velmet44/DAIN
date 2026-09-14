@@ -1,0 +1,91 @@
+name: Release DainNode
+
+# Auto-publish the Windows node distribution when its code changes.
+#
+# Semantics:
+#   - If the version in Node/dain_node/__init__.py already has a git tag +
+#     release, the run REBUILDS and REPLACES that tag (publish-release.ps1
+#     -Force): the "latest" build always matches the newest node code without
+#     bumping the version number.
+#   - If the version was bumped (tag does not exist), normal behavior: create
+#     the new tag + release.
+#   - Manual runs (workflow_dispatch) rebuild whatever the current version is.
+#
+# The node is a Windows onefile PyInstaller bundle (torch bundled), so this
+# job MUST run on a Windows runner — a Linux runner cannot produce it.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Node/**"
+      - "Common/**"
+      - "Scripts/build-node.ps1"
+      - "Scripts/build_exe.ps1"
+      - "Scripts/publish-release.ps1"
+      - ".github/workflows/release-node.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-node
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout full history (tags needed to detect existing versions)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Resolve version + whether its tag already exists
+        id: version
+        run: |
+          $init = "Node/dain_node/__init__.py"
+          $match = Select-String -Path $init -Pattern '__version__\s*=\s*"([^"]+)"'
+          if (-not $match) {
+            Write-Host "Cannot read version from $init"
+            exit 1
+          }
+          $ver = $match.Matches[0].Groups[1].Value
+          $tag = "v$ver"
+          $tags = git tag -l "$tag"
+          $replace = if ($tags) { "true" } else { "false" }
+          Write-Output "version=$ver"
+          Write-Output "tag=$tag"
+          Write-Output "replace=$replace"
+          "version=$ver" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          "replace=$replace" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+      - name: Node test + lint gate (same venv the build uses)
+        working-directory: Node
+        run: |
+          uv sync
+          uv run pytest -q
+          uv run ruff check .
+
+      - name: Build + publish release
+        run: |
+          $publish = Join-Path $PWD "Scripts\publish-release.ps1"
+          $argsList = @("-Version", "${{ steps.version.outputs.version }}")
+          if ("${{ steps.version.outputs.replace }}" -eq "true") {
+            $argsList += "-Force"
+            Write-Host "Replacing existing release/tag ${{ steps.version.outputs.tag }}"
+          }
+          & powershell -ExecutionPolicy Bypass -File $publish @argsList
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
