@@ -7,6 +7,18 @@ A coordinator-orchestrated inference network that partitions one large model
 - Development stages: [Docs/stages.md](Docs/stages.md)
 - Work log: [Docs/log.md](Docs/log.md)
 
+## Support, funding & contributing
+
+DAIN is a small pre-1.0 project. The best ways to help:
+
+- **Run a node** — real-world hardware is the only thing that matures it.
+  See [CONTRIBUTING.md](CONTRIBUTING.md) for guidance and what to report.
+- **Sponsor** — funds the coordinator VPS and CI that keep the public
+  network + repo healthy. Use the **Sponsor** button above (see
+  [FUNDING.yml](.github/FUNDING.yml)).
+- **Report bugs** — a precise issue (component, exact command, log tail)
+  is worth more than a PR right now.
+
 ## Quick start (same PC, web interface)
 
 Requires [uv](https://docs.astral.sh/uv/) and [Node.js 18+](https://nodejs.org).

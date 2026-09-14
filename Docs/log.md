@@ -1735,3 +1735,21 @@ all Python packages; Client `npm run build` green. Commit + push pending.
 CI: the pushed run's Sim job (tests only) passed; after push, CI flagged one
 ruff E501 in Sim/tests/test_placement_recompute.py (my added assert message)
 which a local Sim ruff run had missed - wrapped the message, Sim ruff green.
+
+## 2026-09-14 - Project-health docs: funding, contributing, contributing rules
+
+- `.github/FUNDING.yml` - GitHub Sponsors button alive for the repo, pointing
+  at the owner account (payouts require Sponsors enrollment on the account).
+- `CONTRIBUTING.md` - written for a single-maintainer project: non-code help
+  first (run a node, test exports, precise bug reports, sharing), a short
+  low-priority code section, and an explicit license note telling contributors
+  to hold off on PRs until a license is chosen (avoids implied-license
+  entanglements). Style/lint advice per package matches the real gates.
+- `README.md` - "Support, funding & contributing" section linking both files.
+- `Docs/AGENTS.md` - agent operating rules (read-before-act, targeted tests,
+  self-containment, commit+push+log delivery, no secrets). Added so any
+  future agent session starts from the same constraints the current one
+  follows.
+- No code touched: no pytest/ruff/build gates apply to this change.
+- License decision (MIT vs Apache-2.0 vs none) intentionally deferred by the
+  owner; FUNDING/CONTRIBUTING do not depend on it.
